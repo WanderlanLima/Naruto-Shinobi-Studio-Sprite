@@ -35,8 +35,9 @@ const LEGACY_BROKEN_PROXIES = new Set([
 ]);
 
 const FALLBACK_TEXT_PROXIES = [
-  'https://api.cors.lol/?url=',
+  'https://api.codetabs.com/v1/proxy?quest=',
   'https://api.allorigins.win/raw?url=',
+  'https://api.cors.lol/?url=',
 ];
 
 let backendStatus: 'unknown' | 'available' | 'static' = 'unknown';
@@ -68,17 +69,31 @@ async function loadStaticSkeleton(ninjaId: string, chunkIndex: number): Promise<
     chunkPromise = (async () => {
       try {
         const resp = await fetch(`${STATIC_BASE}data/skeletons/skel-${chunkIndex}.zip`);
-        if (!resp.ok) return null;
+        if (!resp.ok) {
+          skeletonChunkCache.delete(chunkIndex);
+          return null;
+        }
         const buf = await resp.arrayBuffer();
         return await JSZip.loadAsync(buf);
       } catch {
+        skeletonChunkCache.delete(chunkIndex);
         return null;
       }
     })();
     skeletonChunkCache.set(chunkIndex, chunkPromise);
   }
   const zip = await chunkPromise;
-  const file = zip?.file(`${ninjaId}.json`);
+  if (!zip) return null;
+  let file = zip.file(`${ninjaId}.json`);
+  if (!file) {
+    const lowTarget = `${ninjaId}.json`.toLowerCase();
+    for (const [k, v] of Object.entries(zip.files)) {
+      if (!v.dir && k.toLowerCase() === lowTarget) {
+        file = v;
+        break;
+      }
+    }
+  }
   if (!file) return null;
   try {
     return JSON.parse(await file.async('text')) as SpineSkeleton;
@@ -92,7 +107,10 @@ async function loadStaticAtlasPack(): Promise<StaticAtlasPack | null> {
     staticPackPromise = (async () => {
       try {
         const resp = await fetch(`${STATIC_BASE}data/naruto-atlas-pack.zip`);
-        if (!resp.ok) return null;
+        if (!resp.ok) {
+          staticPackPromise = null;
+          return null;
+        }
         const buf = await resp.arrayBuffer();
         const zip = await JSZip.loadAsync(buf);
         const idleFile = zip.file('idle-map.json');
@@ -101,6 +119,7 @@ async function loadStaticAtlasPack(): Promise<StaticAtlasPack | null> {
           : {};
         return { zip, idleMap };
       } catch {
+        staticPackPromise = null;
         return null;
       }
     })();
@@ -411,10 +430,21 @@ export async function fetchNinjaBundle(
 
   if (ninjaId) {
     const pack = await loadStaticAtlasPack();
-    const packedAtlas = pack?.zip.file(`atlas/${ninjaId}.atlas`);
+    let packedAtlas = pack?.zip.file(`atlas/${ninjaId}.atlas`) ?? null;
+    let resolvedId = ninjaId;
+    if (!packedAtlas && pack) {
+      const targetLow = `atlas/${ninjaId}.atlas`.toLowerCase();
+      for (const [k, v] of Object.entries(pack.zip.files)) {
+        if (!v.dir && k.toLowerCase() === targetLow) {
+          packedAtlas = v;
+          resolvedId = k.slice('atlas/'.length, -'.atlas'.length);
+          break;
+        }
+      }
+    }
     if (packedAtlas) {
       atlasText = await packedAtlas.async('text');
-      const entry = pack?.idleMap[ninjaId];
+      const entry = pack?.idleMap[resolvedId] || pack?.idleMap[ninjaId];
       idleFrameName = entry?.frame;
       skeletonChunkIdx = entry?.s;
     }
@@ -424,7 +454,7 @@ export async function fetchNinjaBundle(
     const atlasResp = await fetchTextViaRelays(atlasUrl, 7000);
     if (!atlasResp) {
       throw new Error(
-        'Não foi possível carregar o .atlas em modo estático pelos proxies públicos. Adicione um Proxy CORS próprio nas configurações.'
+        'Não foi possível carregar o .atlas em modo estático pelos proxies públicos. Use a aba "Backup Offline" para abrir seu arquivo .zip local ou configure um Proxy CORS próprio.'
       );
     }
     atlasText = await atlasResp.text();
