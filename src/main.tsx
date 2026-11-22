@@ -4,7 +4,16 @@ import App from './App.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import './index.css';
 
-registerSW({ immediate: true });
+try {
+  registerSW({
+    immediate: true,
+    onRegisterError(err) {
+      console.warn('Registro do Service Worker ignorado:', err);
+    },
+  });
+} catch {
+  // Never block initial render if Service Worker registration is unavailable
+}
 
 createRoot(document.getElementById('root')!).render(
   <ErrorBoundary>

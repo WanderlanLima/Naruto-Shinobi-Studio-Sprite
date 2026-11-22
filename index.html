@@ -10,8 +10,8 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="ShinobiApp" />
-    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
-    <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+    <link rel="apple-touch-icon" href="%BASE_URL%apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="%BASE_URL%icon.svg" />
     <meta property="og:title" content="Shinobi Sprite Studio" />
     <meta property="og:description" content="Extrator e estúdio de fatiamento de sprites de ninjas, texture atlases e animações Spine para jogos web." />
     <meta property="og:type" content="website" />
@@ -21,7 +21,9 @@
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap" rel="stylesheet" />
   </head>
   <body class="bg-[#0B0F17] text-slate-100 antialiased selection:bg-orange-500/30 selection:text-orange-100">
-    <div id="root"></div>
+    <div id="root">
+      <noscript>Ative o JavaScript para usar o Shinobi Sprite Studio.</noscript>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

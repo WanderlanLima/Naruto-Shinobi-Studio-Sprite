@@ -60,12 +60,14 @@ interface StaticAtlasPack {
 let staticPackPromise: Promise<StaticAtlasPack | null> | null = null;
 const skeletonChunkCache = new Map<number, Promise<JSZip | null>>();
 
+const STATIC_BASE = import.meta.env.BASE_URL || './';
+
 async function loadStaticSkeleton(ninjaId: string, chunkIndex: number): Promise<SpineSkeleton | null> {
   let chunkPromise = skeletonChunkCache.get(chunkIndex);
   if (!chunkPromise) {
     chunkPromise = (async () => {
       try {
-        const resp = await fetch(`./data/skeletons/skel-${chunkIndex}.zip`);
+        const resp = await fetch(`${STATIC_BASE}data/skeletons/skel-${chunkIndex}.zip`);
         if (!resp.ok) return null;
         const buf = await resp.arrayBuffer();
         return await JSZip.loadAsync(buf);
@@ -89,7 +91,7 @@ async function loadStaticAtlasPack(): Promise<StaticAtlasPack | null> {
   if (!staticPackPromise) {
     staticPackPromise = (async () => {
       try {
-        const resp = await fetch('./data/naruto-atlas-pack.zip');
+        const resp = await fetch(`${STATIC_BASE}data/naruto-atlas-pack.zip`);
         if (!resp.ok) return null;
         const buf = await resp.arrayBuffer();
         const zip = await JSZip.loadAsync(buf);
@@ -290,7 +292,7 @@ export async function extractGameCatalog(targetUrl: string): Promise<ExtractResp
   // Static / GitHub Pages fallback
   const normalized = targetUrl.toLowerCase();
   if (normalized.includes('naruto.jotagame.com')) {
-    const staticResp = await fetch('./data/naruto-catalog.json');
+    const staticResp = await fetch(`${STATIC_BASE}data/naruto-catalog.json`);
     if (staticResp.ok) {
       return (await staticResp.json()) as ExtractResponse;
     }

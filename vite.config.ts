@@ -5,10 +5,23 @@ import path from 'path';
 import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
+function resolveBasePath(): string {
+  const raw = (process.env.VITE_BASE_PATH || '').trim();
+  if (!raw) return './';
+  const normalized = raw.replace(/\/{2,}/g, '/');
+  const withLeading =
+    normalized.startsWith('/') || normalized.startsWith('./')
+      ? normalized
+      : `/${normalized}`;
+  return withLeading.endsWith('/') ? withLeading : `${withLeading}/`;
+}
+
 export default defineConfig(() => {
+  const base = resolveBasePath();
+
   return {
-    // Relative base ensures assets, manifest, and service worker resolve on GitHub Pages subpaths (/repo/)
-    base: './',
+    // Uses exact GitHub Pages subpath (/repo/) in CI and relative './' for local/portable builds
+    base,
     plugins: [
       react(),
       tailwindcss(),
@@ -22,7 +35,7 @@ export default defineConfig(() => {
           'pwa-maskable-512x512.png',
         ],
         manifest: {
-          id: './',
+          id: base,
           name: 'Shinobi Sprite Studio',
           short_name: 'ShinobiApp',
           description:
@@ -31,23 +44,23 @@ export default defineConfig(() => {
           background_color: '#0B0F17',
           display: 'standalone',
           orientation: 'any',
-          start_url: './',
-          scope: './',
+          start_url: base,
+          scope: base,
           icons: [
             {
-              src: './pwa-192x192.png',
+              src: `${base}pwa-192x192.png`,
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: './pwa-512x512.png',
+              src: `${base}pwa-512x512.png`,
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: './pwa-maskable-512x512.png',
+              src: `${base}pwa-maskable-512x512.png`,
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
@@ -57,6 +70,9 @@ export default defineConfig(() => {
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,json}'],
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
@@ -114,9 +130,14 @@ export default defineConfig(() => {
           if (fs.existsSync(distAiStudioAssets)) {
             fs.rmSync(distAiStudioAssets, {recursive: true, force: true});
           }
-          // Ensure GitHub Pages serves all static files without Jekyll processing
+          // Ensure GitHub Pages serves all static files without Jekyll processing and handles SPA 404s
           if (fs.existsSync(distDir)) {
             fs.writeFileSync(path.resolve(distDir, '.nojekyll'), '');
+            const distIndex = path.resolve(distDir, 'index.html');
+            const dist404 = path.resolve(distDir, '404.html');
+            if (fs.existsSync(distIndex)) {
+              fs.copyFileSync(distIndex, dist404);
+            }
           }
         },
       },
