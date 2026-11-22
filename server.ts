@@ -13,6 +13,15 @@ import {
   type BackupExtractPayload,
   type BackupTablesLike,
 } from './serverBackup.ts';
+import type {
+  NinjaCombatProfile,
+  NinjaPassiveInfo,
+  NinjaSkillInfo,
+} from './src/types/sprite.ts';
+import {
+  buildNinjaCombatProfile,
+  parseRawSkillMechanics,
+} from './src/utils/combatMechanicsParser.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1234,25 +1243,8 @@ function buildNinjaMediaProfileFromTables(
   let resolvedHeroCode = code6 || code;
   let resolvedName = params.displayName || undefined;
 
-  const skillsOut: Record<
-    string,
-    {
-      id: string;
-      animKey: string;
-      slotLabel: string;
-      name: string;
-      desc?: string;
-      iconName?: string;
-      iconUrl?: string;
-    }
-  > = {};
-  const passivesOut: Array<{
-    id: string;
-    name: string;
-    desc?: string;
-    iconName?: string;
-    iconUrl?: string;
-  }> = [];
+  const skillsOut: Record<string, NinjaSkillInfo> = {};
+  const passivesOut: NinjaPassiveInfo[] = [];
   const voicesOut: Array<{ key: string; category: string; label: string; url: string }> = [];
   const soundUrlMap: Record<string, string> = {};
 
@@ -1363,12 +1355,13 @@ function buildNinjaMediaProfileFromTables(
     const name = resolvePt(sk.name) || skillId.trim();
     const desc = resolvePt(sk.desc);
     const { iconName, iconUrl } = resolveSkillIconUrl(sk.icon);
+    const mechanics = parseRawSkillMechanics(sk, desc, resolvePt);
     skillsOut[animKey] = {
       id: skillId.trim(),
       animKey,
       slotLabel,
       name,
-      ...(desc ? { desc } : {}),
+      ...mechanics,
       ...(iconName ? { iconName } : {}),
       ...(iconUrl ? { iconUrl } : {}),
     };
@@ -1392,12 +1385,25 @@ function buildNinjaMediaProfileFromTables(
       if (!name) continue;
       const desc = resolvePt(sk.desc);
       const { iconName, iconUrl } = resolveSkillIconUrl(sk.icon);
+      const mechanics = parseRawSkillMechanics(sk, desc, resolvePt);
       passivesOut.push({
         id: pId.trim(),
         name,
-        ...(desc ? { desc } : {}),
+        ...(mechanics.desc ? { desc: mechanics.desc } : {}),
+        ...(mechanics.descPlain ? { descPlain: mechanics.descPlain } : {}),
         ...(iconName ? { iconName } : {}),
         ...(iconUrl ? { iconUrl } : {}),
+        ...(mechanics.skillType != null ? { skillType: mechanics.skillType } : {}),
+        ...(mechanics.targetFlags ? { targetFlags: mechanics.targetFlags } : {}),
+        ...(mechanics.chaseTriggers ? { chaseTriggers: mechanics.chaseTriggers } : {}),
+        ...(mechanics.chaseTriggerLabels ? { chaseTriggerLabels: mechanics.chaseTriggerLabels } : {}),
+        ...(mechanics.causesChaseStates ? { causesChaseStates: mechanics.causesChaseStates } : {}),
+        ...(mechanics.causesChaseStateLabels
+          ? { causesChaseStateLabels: mechanics.causesChaseStateLabels }
+          : {}),
+        ...(mechanics.appliedEffects ? { appliedEffects: mechanics.appliedEffects } : {}),
+        ...(mechanics.effectIds ? { effectIds: mechanics.effectIds } : {}),
+        ...(mechanics.effectDescs ? { effectDescs: mechanics.effectDescs } : {}),
       });
     }
   }
@@ -1483,11 +1489,19 @@ function buildNinjaMediaProfileFromTables(
   });
 
   const passiveAura = resolvePassiveAuraServer(origin, ninjaId, resolvedHeroCode, resolvedName);
+  const combatProfile: NinjaCombatProfile | undefined = buildNinjaCombatProfile(
+    heroObj,
+    resolvedHeroCode || '',
+    resolvedName || ninjaId,
+    skillsOut,
+    passivesOut
+  );
 
   return {
     ninjaId,
     heroCode: resolvedHeroCode || undefined,
     displayName: resolvedName,
+    ...(combatProfile ? { combatProfile } : {}),
     skills: skillsOut,
     passives: passivesOut,
     passiveAura,

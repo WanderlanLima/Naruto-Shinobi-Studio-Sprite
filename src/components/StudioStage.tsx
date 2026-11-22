@@ -61,6 +61,7 @@ import {
 } from '../utils/atlasParser';
 import { audioCuePlayer } from '../utils/audioCuePlayer';
 import {
+  buildCharacterCombatJson,
   buildCharacterInstructionsJson,
   collectCharacterEffectPlan,
   collectCharacterSkillIconFiles,
@@ -69,6 +70,7 @@ import {
   sanitizePathSegment,
   type EffectIncludeScope,
 } from '../utils/completeCharacterExporter';
+import { stripHtmlTags } from '../utils/combatMechanicsParser';
 import {
   fetchNinjaBundle,
   fetchNinjaMediaProfile,
@@ -859,44 +861,59 @@ export function StudioStage({
       slotLabel: string;
       name: string;
       desc?: string;
+      descPlain?: string;
       iconUrl?: string;
       isPassive: boolean;
+      chaseTriggerLabels?: string[];
+      causesChaseStateLabels?: string[];
+      targetLabel?: string;
+      appliedEffects?: string[];
+      damageCategories?: string[];
+      elements?: string[];
     }> = [];
     const seen = new Set<string>();
+    const pushSkill = (k: string, sk: NonNullable<typeof skillsMap[string]>) => {
+      const plain = sk.descPlain || (sk.desc ? stripHtmlTags(sk.desc) : undefined);
+      result.push({
+        key: `active_${k}`,
+        animKey: sk.animKey,
+        slotLabel: sk.slotLabel,
+        name: sk.name,
+        desc: sk.desc,
+        descPlain: plain,
+        iconUrl: sk.iconUrl,
+        isPassive: false,
+        chaseTriggerLabels: sk.chaseTriggerLabels,
+        causesChaseStateLabels: sk.causesChaseStateLabels,
+        targetLabel: sk.targetLabel,
+        appliedEffects: sk.appliedEffects,
+        damageCategories: sk.damageCategories,
+        elements: sk.elements,
+      });
+    };
     for (const k of order) {
       const sk = skillsMap[k];
       if (!sk) continue;
       seen.add(k);
-      result.push({
-        key: `active_${k}`,
-        animKey: sk.animKey,
-        slotLabel: sk.slotLabel,
-        name: sk.name,
-        desc: sk.desc,
-        iconUrl: sk.iconUrl,
-        isPassive: false,
-      });
+      pushSkill(k, sk);
     }
     for (const [k, sk] of Object.entries(skillsMap)) {
       if (seen.has(k) || !sk) continue;
-      result.push({
-        key: `active_${k}`,
-        animKey: sk.animKey,
-        slotLabel: sk.slotLabel,
-        name: sk.name,
-        desc: sk.desc,
-        iconUrl: sk.iconUrl,
-        isPassive: false,
-      });
+      pushSkill(k, sk);
     }
     for (const p of mediaProfile?.passives || []) {
+      const plain = p.descPlain || (p.desc ? stripHtmlTags(p.desc) : undefined);
       result.push({
         key: `passive_${p.id}`,
         slotLabel: 'Passiva',
         name: p.name,
         desc: p.desc,
+        descPlain: plain,
         iconUrl: p.iconUrl,
         isPassive: true,
+        chaseTriggerLabels: p.chaseTriggerLabels,
+        causesChaseStateLabels: p.causesChaseStateLabels,
+        appliedEffects: p.appliedEffects,
       });
     }
     return result;
@@ -1509,12 +1526,19 @@ export function StudioStage({
     }
   };
 
+  const handleDownloadCombatJson = () => {
+    if (!ninja || !mediaProfile) return;
+    const jsonStr = buildCharacterCombatJson(ninja.id, mediaProfile);
+    if (!jsonStr) return;
+    const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+    downloadBlob(blob, `${ninja.id}_combate_e_habilidades.json`);
+  };
+
   const handleDownloadAllSkillIconsZip = async () => {
     if (!ninja || !mediaProfile || downloadingSkillIconsZip) return;
     setDownloadingSkillIconsZip(true);
     try {
       const iconFiles = await collectCharacterSkillIconFiles(mediaProfile);
-      if (iconFiles.length === 0) return;
       const entries: StreamingZipEntry[] = [];
       for (const f of iconFiles) {
         const bytes =
@@ -1532,6 +1556,17 @@ export function StudioStage({
           crc32: computeCrc32(bytes),
         });
       }
+      const combatJson = buildCharacterCombatJson(ninja.id, mediaProfile);
+      if (combatJson) {
+        const combatBytes = new TextEncoder().encode(combatJson);
+        entries.push({
+          path: 'combate_e_habilidades.json',
+          blob: new Blob([combatBytes as Uint8Array<ArrayBuffer>], { type: 'application/json' }),
+          size: combatBytes.byteLength,
+          crc32: computeCrc32(combatBytes),
+        });
+      }
+      if (entries.length === 0) return;
       const zipBlob = await assembleStreamingZipBlob(async function* () {
         yield entries;
       }, entries.length);
@@ -1560,6 +1595,13 @@ export function StudioStage({
         });
       }
       if (mediaProfile) {
+        const combatJson = buildCharacterCombatJson(ninja.id, mediaProfile);
+        if (combatJson) {
+          extraFiles.push({
+            path: 'combate_e_habilidades.json',
+            data: combatJson,
+          });
+        }
         const iconFiles = await collectCharacterSkillIconFiles(mediaProfile);
         for (const ic of iconFiles) {
           const bytes =
@@ -2778,28 +2820,111 @@ export function StudioStage({
               </div>
             )}
 
-            {/* Skills & Passives Icons Card */}
-            {orderedSkillList.length > 0 && (
+            {/* Skills, Passives & Combat Mechanics Card */}
+            {(orderedSkillList.length > 0 || Boolean(mediaProfile?.combatProfile)) && (
               <div className="rounded-lg border border-slate-800 bg-[#131A26] p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="font-display text-sm font-semibold text-slate-100">
-                    Habilidades & Ícones ({orderedSkillList.length})
+                    Combate, Skills & Ícones ({orderedSkillList.length})
                   </h3>
-                  {skillIconCount > 0 && (
-                    <button
-                      type="button"
-                      disabled={downloadingSkillIconsZip}
-                      onClick={() => void handleDownloadAllSkillIconsZip()}
-                      title="Baixar todos os ícones das habilidades e passivas em ZIP (PNG qualidade máxima)"
-                      className="inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-950/30 px-2 py-1 text-[11px] font-medium text-amber-200 hover:bg-amber-900/40 disabled:opacity-50 cursor-pointer whitespace-nowrap"
-                    >
-                      <Download className="h-3 w-3" aria-hidden="true" />
-                      <span>{downloadingSkillIconsZip ? 'Gerando...' : `ZIP (${skillIconCount})`}</span>
-                    </button>
-                  )}
+                  <div className="flex items-center gap-1.5">
+                    {mediaProfile && (
+                      <button
+                        type="button"
+                        onClick={handleDownloadCombatJson}
+                        title="Baixar ficha estruturada de combate, perseguições, efeitos e atributos (combate_e_habilidades.json)"
+                        className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-950/30 px-2 py-1 text-[11px] font-medium text-emerald-200 hover:bg-emerald-900/40 cursor-pointer whitespace-nowrap"
+                      >
+                        <Download className="h-3 w-3" aria-hidden="true" />
+                        <span>JSON</span>
+                      </button>
+                    )}
+                    {skillIconCount > 0 && (
+                      <button
+                        type="button"
+                        disabled={downloadingSkillIconsZip}
+                        onClick={() => void handleDownloadAllSkillIconsZip()}
+                        title="Baixar todos os ícones das habilidades e passivas + JSON de combate em ZIP"
+                        className="inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-950/30 px-2 py-1 text-[11px] font-medium text-amber-200 hover:bg-amber-900/40 disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                      >
+                        <Download className="h-3 w-3" aria-hidden="true" />
+                        <span>{downloadingSkillIconsZip ? 'Gerando...' : `ZIP (${skillIconCount})`}</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
 
-                <div className="max-h-[340px] space-y-1.5 overflow-y-auto pr-1">
+                {mediaProfile?.combatProfile && (
+                  <div className="rounded-md border border-slate-800/90 bg-[#0B0F17] p-2.5 space-y-2 text-[11px]">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {mediaProfile.combatProfile.natureLabel && (
+                        <span className="rounded border border-sky-500/35 bg-sky-950/40 px-1.5 py-0.5 text-[10px] font-semibold text-sky-200">
+                          {mediaProfile.combatProfile.natureLabel}
+                        </span>
+                      )}
+                      {mediaProfile.combatProfile.combatRoleLabel && (
+                        <span className="rounded border border-slate-700 bg-slate-800/80 px-1.5 py-0.5 text-[10px] font-medium text-slate-200">
+                          {mediaProfile.combatProfile.combatRoleLabel}
+                        </span>
+                      )}
+                      {typeof mediaProfile.combatProfile.baseStats?.hp === 'number' && (
+                        <span className="font-mono text-[10px] text-slate-400">
+                          PV <strong className="text-slate-200">{mediaProfile.combatProfile.baseStats.hp}</strong>
+                        </span>
+                      )}
+                      {typeof mediaProfile.combatProfile.baseStats?.attack === 'number' && (
+                        <span className="font-mono text-[10px] text-slate-400">
+                          ATQ <strong className="text-slate-200">{mediaProfile.combatProfile.baseStats.attack}</strong>
+                        </span>
+                      )}
+                      {typeof mediaProfile.combatProfile.baseStats?.defense === 'number' && (
+                        <span className="font-mono text-[10px] text-slate-400">
+                          DEF <strong className="text-slate-200">{mediaProfile.combatProfile.baseStats.defense}</strong>
+                        </span>
+                      )}
+                    </div>
+
+                    {(mediaProfile.combatProfile.chaseComboSummary.initiators.length > 0 ||
+                      mediaProfile.combatProfile.chaseComboSummary.chasers.length > 0) && (
+                      <div className="space-y-1 border-t border-slate-800/80 pt-1.5 text-[10px]">
+                        {mediaProfile.combatProfile.chaseComboSummary.initiators.length > 0 && (
+                          <div className="flex flex-wrap items-center gap-1 text-slate-300">
+                            <span className="font-semibold text-orange-300">Causa:</span>
+                            <span>
+                              {Array.from(
+                                new Set(
+                                  mediaProfile.combatProfile.chaseComboSummary.initiators.flatMap(
+                                    (i) => i.causesStateLabels || []
+                                  )
+                                )
+                              ).join(' · ')}
+                            </span>
+                          </div>
+                        )}
+                        {mediaProfile.combatProfile.chaseComboSummary.chasers.length > 0 && (
+                          <div className="space-y-0.5 text-slate-300">
+                            {mediaProfile.combatProfile.chaseComboSummary.chasers.map((c, idx) => (
+                              <div key={`${c.skillId}_${idx}`} className="flex flex-wrap items-center gap-1">
+                                <span className="font-semibold text-emerald-300">Persegue:</span>
+                                <span>{(c.requiresStateLabels || []).join('/')}</span>
+                                {c.causesStateLabels && c.causesStateLabels.length > 0 && (
+                                  <>
+                                    <span className="text-slate-500">→</span>
+                                    <span className="text-orange-200">
+                                      {c.causesStateLabels.join('/')}
+                                    </span>
+                                  </>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="max-h-[380px] space-y-1.5 overflow-y-auto pr-1">
                   {orderedSkillList.map((item) => {
                     const matchedAnim =
                       !item.isPassive && item.animKey
@@ -2808,12 +2933,13 @@ export function StudioStage({
                         : undefined;
                     const iconSrc = item.iconUrl ? resolveAssetFetchUrl(item.iconUrl) : '';
                     const downloadName = `${ninja.id}_${sanitizePathSegment(item.slotLabel)}_${sanitizePathSegment(item.name)}.png`;
+                    const cleanDesc = item.descPlain || (item.desc ? stripHtmlTags(item.desc) : '');
 
                     return (
                       <div
                         key={item.key}
-                        title={item.desc || item.name}
-                        className="flex items-center gap-2.5 rounded-md border border-slate-800 bg-[#0B0F17] p-2 text-xs"
+                        title={cleanDesc || item.name}
+                        className="flex items-start gap-2.5 rounded-md border border-slate-800 bg-[#0B0F17] p-2 text-xs"
                       >
                         <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded border border-slate-700/80 bg-[#131A26]">
                           {iconSrc ? (
@@ -2869,9 +2995,39 @@ export function StudioStage({
                           <div className="mt-0.5 truncate font-medium text-slate-100">
                             {item.name}
                           </div>
-                          {item.desc && (
-                            <div className="line-clamp-2 text-[10px] leading-snug text-slate-400">
-                              {item.desc}
+                          {cleanDesc && (
+                            <div className="line-clamp-3 text-[10px] leading-snug text-slate-400">
+                              {cleanDesc}
+                            </div>
+                          )}
+                          {((item.chaseTriggerLabels && item.chaseTriggerLabels.length > 0) ||
+                            (item.causesChaseStateLabels && item.causesChaseStateLabels.length > 0) ||
+                            item.targetLabel ||
+                            (item.appliedEffects && item.appliedEffects.length > 0)) && (
+                            <div className="mt-1.5 flex flex-wrap gap-1">
+                              {item.chaseTriggerLabels && item.chaseTriggerLabels.length > 0 && (
+                                <span className="rounded bg-emerald-950/80 px-1.5 py-0.5 text-[9px] font-medium text-emerald-300">
+                                  Persegue: {item.chaseTriggerLabels.join('/')}
+                                </span>
+                              )}
+                              {item.causesChaseStateLabels && item.causesChaseStateLabels.length > 0 && (
+                                <span className="rounded bg-orange-950/80 px-1.5 py-0.5 text-[9px] font-medium text-orange-300">
+                                  Causa: {item.causesChaseStateLabels.join('/')}
+                                </span>
+                              )}
+                              {item.targetLabel && (
+                                <span className="rounded bg-slate-800/90 px-1.5 py-0.5 text-[9px] text-slate-300">
+                                  Alvo: {item.targetLabel}
+                                </span>
+                              )}
+                              {item.appliedEffects?.slice(0, 4).map((ef) => (
+                                <span
+                                  key={ef}
+                                  className="rounded bg-violet-950/70 px-1.5 py-0.5 text-[9px] text-violet-200"
+                                >
+                                  {ef}
+                                </span>
+                              ))}
                             </div>
                           )}
                         </div>
@@ -3144,10 +3300,10 @@ export function StudioStage({
                   />
                   <div>
                     <div className="font-medium text-slate-100">
-                      Pacotes de Partículas + Instruções JSON
+                      Pacotes de Partículas + Instruções e Combate JSON
                     </div>
                     <div className="text-[11px] text-slate-400">
-                      Inclui <code className="font-mono">particulas/&lt;efeito&gt;/</code> e <code className="font-mono">animacoes_instrucoes.json</code> mapeando cada animação e tempo de disparo.
+                      Inclui <code className="font-mono">particulas/&lt;efeito&gt;/</code>, <code className="font-mono">animacoes_instrucoes.json</code> e <code className="font-mono">combate_e_habilidades.json</code> (perseguições, efeitos, alvos e atributos).
                     </div>
                   </div>
                 </label>

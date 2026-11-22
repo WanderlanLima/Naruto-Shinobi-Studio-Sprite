@@ -1424,6 +1424,389 @@ async function ensureBackupManifestPack(catalog, cachedTables) {
   return tables;
 }
 
+const CHASE_STATE_LABELS = {
+  fall: 'Queda / Derrubado',
+  popup: 'Flutuação Baixa',
+  launcher: 'Flutuação Alta',
+  back: 'Empurrão / Repelido',
+};
+
+const NATURE_MAP = {
+  1: { code: 'wind', label: 'Vento' },
+  2: { code: 'fire', label: 'Fogo' },
+  3: { code: 'earth', label: 'Terra' },
+  4: { code: 'water', label: 'Água' },
+  5: { code: 'thunder', label: 'Relâmpago' },
+};
+
+const COMBAT_ROLE_LABELS = {
+  tank: 'Tanque',
+  gank: 'Controle / Estratégia',
+  dps: 'Dano (DPS)',
+};
+
+const TARGET_MAP = {
+  ENEMY: { type: 'single_enemy', label: 'Único Inimigo' },
+  ENEMY_ROW: { type: 'enemy_row', label: 'Fileira de Inimigos' },
+  ENEMY_COL: { type: 'enemy_col', label: 'Coluna de Inimigos' },
+  ENEMY_ALL: { type: 'all_enemies', label: 'Todos os Inimigos' },
+  ENEMY3: { type: 'multi_enemy_3', label: 'Até 3 Inimigos' },
+  ENEMY_RANDOM_2: { type: 'random_enemies', label: '2 Inimigos Aleatórios' },
+  ENEMY_RANDOM_3: { type: 'random_enemies', label: '3 Inimigos Aleatórios' },
+  ENEMY_RANDOM_4: { type: 'random_enemies', label: '4 Inimigos Aleatórios' },
+  ENEMY_RANDOM_5: { type: 'random_enemies', label: '5 Inimigos Aleatórios' },
+  FRIEND_ALL: { type: 'all_allies', label: 'Todos os Aliados' },
+};
+
+const DAMAGE_CATEGORY_TERMS = new Set([
+  'taijutsu',
+  'ninjutsu',
+  'taijutsu/ninjutsu',
+  'ninjutsu/taijutsu',
+  'genjutsu',
+]);
+
+const ELEMENT_BRACKET_TERMS = new Set([
+  'fogo',
+  'água',
+  'agua',
+  'vento',
+  'trovão',
+  'trovao',
+  'relâmpago',
+  'relampago',
+  'raio',
+  'terra',
+  'madeira',
+]);
+
+function stripHtmlTags(raw) {
+  if (!raw) return '';
+  return String(raw)
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeChaseFlag(flag) {
+  if (typeof flag !== 'string') return null;
+  const f = flag.trim().toLowerCase();
+  return f === 'fall' || f === 'popup' || f === 'launcher' || f === 'back' ? f : null;
+}
+
+function detectChaseStateFromTerm(termRaw) {
+  const t = String(termRaw || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (t === 'derrubar' || t === 'derrubado' || t === 'queda' || t === 'caido' || t.includes('derrub')) {
+    return 'fall';
+  }
+  if (
+    t === 'flutuacao baixa' ||
+    t === 'flutuacao pequena' ||
+    t === 'flutuacao menor' ||
+    t.includes('flutuacao baixa') ||
+    t.includes('flutuacao pequena') ||
+    t.includes('flutuacao menor')
+  ) {
+    return 'popup';
+  }
+  if (
+    t === 'flutuacao alta' ||
+    t === 'grande flutuacao' ||
+    t.includes('flutuacao alta') ||
+    t.includes('grande flutuacao')
+  ) {
+    return 'launcher';
+  }
+  if (
+    t === 'empurrao' ||
+    t === 'empurrado' ||
+    t === 'repelir' ||
+    t === 'repelido' ||
+    t === 'repelimento' ||
+    t === 'repulsao' ||
+    t.includes('empurr') ||
+    t.includes('repel')
+  ) {
+    return 'back';
+  }
+  return null;
+}
+
+function extractCausedChaseStates(descPlain, knownTriggers = []) {
+  if (!descPlain) return [];
+  const caused = new Set();
+  const resultClauseRegex =
+    /(?:para\s+causar|causa(?:ndo)?|inflig(?:e|ir|indo)|gera(?:ndo)?|provoca(?:ndo)?|arremessa(?:ndo)?|lança(?:ndo)?)\s*(?:o\s+|um\s+|uma\s+|efeito\s+de\s+|estado\s+de\s+)?\[([^\]]{2,32})\]/gi;
+  let match;
+  while ((match = resultClauseRegex.exec(descPlain)) !== null) {
+    const st = detectChaseStateFromTerm(match[1]);
+    if (st) caused.add(st);
+  }
+  if (knownTriggers.length === 0) {
+    const bracketRegex = /\[([^\]]{2,32})\]/g;
+    while ((match = bracketRegex.exec(descPlain)) !== null) {
+      const st = detectChaseStateFromTerm(match[1]);
+      if (st) caused.add(st);
+    }
+  } else if (caused.size === 0) {
+    const foundInOrder = [];
+    const bracketRegex = /\[([^\]]{2,32})\]/g;
+    while ((match = bracketRegex.exec(descPlain)) !== null) {
+      const st = detectChaseStateFromTerm(match[1]);
+      if (st) foundInOrder.push(st);
+    }
+    if (foundInOrder.length >= 2) {
+      for (const st of foundInOrder.slice(1)) caused.add(st);
+    } else if (foundInOrder.length === 1 && !knownTriggers.includes(foundInOrder[0])) {
+      caused.add(foundInOrder[0]);
+    }
+  }
+  return Array.from(caused);
+}
+
+function parseRawSkillMechanicsStatic(rawSkill, descResolved, resolvePt) {
+  const descPlain = stripHtmlTags(descResolved);
+  const descShort = stripHtmlTags(resolvePt(rawSkill.desc_short));
+  const descInBattle = stripHtmlTags(resolvePt(rawSkill.descInBattle));
+  const rawFlags = Array.isArray(rawSkill.flags)
+    ? rawSkill.flags.map((f) => String(f || '').trim()).filter(Boolean)
+    : [];
+
+  let targetType;
+  let targetLabel;
+  const elementsSet = new Set();
+  for (const f of rawFlags) {
+    if (!targetType && TARGET_MAP[f]) {
+      targetType = TARGET_MAP[f].type;
+      targetLabel = TARGET_MAP[f].label;
+    }
+    const low = f.toLowerCase();
+    if (low === 'fire' || low === 'water' || low === 'wind' || low === 'thunder' || low === 'earth') {
+      elementsSet.add(low);
+    }
+  }
+
+  const chaseTriggers = [];
+  if (Array.isArray(rawSkill.chaseFlags)) {
+    for (const cf of rawSkill.chaseFlags) {
+      const norm = normalizeChaseFlag(cf);
+      if (norm && !chaseTriggers.includes(norm)) chaseTriggers.push(norm);
+    }
+  }
+
+  const causesChaseStates = extractCausedChaseStates(descPlain, chaseTriggers);
+  const damageCategories = [];
+  const appliedEffects = [];
+  const seenEffects = new Set();
+
+  const bracketRegex = /\[([^\]]{2,40})\]/g;
+  let bMatch;
+  while ((bMatch = bracketRegex.exec(descPlain)) !== null) {
+    const term = bMatch[1].trim();
+    const low = term.toLowerCase();
+    if (DAMAGE_CATEGORY_TERMS.has(low)) {
+      if (!damageCategories.includes(term)) damageCategories.push(term);
+      continue;
+    }
+    if (ELEMENT_BRACKET_TERMS.has(low)) {
+      if (low === 'fogo') elementsSet.add('fire');
+      else if (low === 'água' || low === 'agua') elementsSet.add('water');
+      else if (low === 'vento') elementsSet.add('wind');
+      else if (low === 'terra') elementsSet.add('earth');
+      else if (low === 'trovão' || low === 'trovao' || low === 'relâmpago' || low === 'relampago' || low === 'raio') {
+        elementsSet.add('thunder');
+      }
+      continue;
+    }
+    if (detectChaseStateFromTerm(term)) continue;
+    if (!seenEffects.has(low)) {
+      seenEffects.add(low);
+      appliedEffects.push(term);
+    }
+  }
+
+  const effectIds = Array.isArray(rawSkill.effects)
+    ? rawSkill.effects.map((e) => String(e || '').trim()).filter(Boolean)
+    : [];
+
+  let effectDescs;
+  if (rawSkill.EffectDesc && typeof rawSkill.EffectDesc === 'object') {
+    const out = {};
+    for (const [lv, val] of Object.entries(rawSkill.EffectDesc)) {
+      const clean = stripHtmlTags(resolvePt(val));
+      if (clean) out[lv] = clean;
+    }
+    if (Object.keys(out).length > 0) effectDescs = out;
+  }
+
+  const skillType =
+    typeof rawSkill.type === 'number' && Number.isFinite(rawSkill.type) ? rawSkill.type : undefined;
+  const actionFlags =
+    typeof rawSkill.ActionFlags === 'string' && rawSkill.ActionFlags.trim()
+      ? rawSkill.ActionFlags.trim()
+      : undefined;
+
+  return {
+    ...(descResolved ? { desc: descResolved } : {}),
+    ...(descPlain ? { descPlain } : {}),
+    ...(descShort ? { descShort } : {}),
+    ...(descInBattle ? { descInBattle } : {}),
+    ...(skillType != null ? { skillType } : {}),
+    ...(damageCategories.length > 0 ? { damageCategories } : {}),
+    ...(elementsSet.size > 0 ? { elements: Array.from(elementsSet) } : {}),
+    ...(rawFlags.length > 0 ? { targetFlags: rawFlags } : {}),
+    ...(targetType ? { targetType, targetLabel } : {}),
+    ...(actionFlags ? { actionFlags } : {}),
+    ...(chaseTriggers.length > 0
+      ? {
+          chaseTriggers,
+          chaseTriggerLabels: chaseTriggers.map((c) => CHASE_STATE_LABELS[c]),
+        }
+      : {}),
+    ...(causesChaseStates.length > 0
+      ? {
+          causesChaseStates,
+          causesChaseStateLabels: causesChaseStates.map((c) => CHASE_STATE_LABELS[c]),
+        }
+      : {}),
+    ...(appliedEffects.length > 0 ? { appliedEffects } : {}),
+    ...(effectIds.length > 0 ? { effectIds } : {}),
+    ...(effectDescs ? { effectDescs } : {}),
+  };
+}
+
+function numOrUndefined(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+function buildHeroCombatProfileStatic(heroObj, heroCode, displayName, skillsOut, passivesOut) {
+  const initiators = [];
+  const chasers = [];
+  for (const [slot, sk] of Object.entries(skillsOut)) {
+    const hasTrigger = Array.isArray(sk.chaseTriggers) && sk.chaseTriggers.length > 0;
+    const hasCaused = Array.isArray(sk.causesChaseStates) && sk.causesChaseStates.length > 0;
+    if (hasTrigger) {
+      chasers.push({
+        slot,
+        skillId: sk.id,
+        skillName: sk.name,
+        requiresStates: sk.chaseTriggers,
+        requiresStateLabels: sk.chaseTriggerLabels,
+        ...(hasCaused
+          ? { causesStates: sk.causesChaseStates, causesStateLabels: sk.causesChaseStateLabels }
+          : {}),
+        ...(sk.appliedEffects?.length ? { appliedEffects: sk.appliedEffects } : {}),
+      });
+    } else if (hasCaused) {
+      initiators.push({
+        slot,
+        skillId: sk.id,
+        skillName: sk.name,
+        causesStates: sk.causesChaseStates,
+        causesStateLabels: sk.causesChaseStateLabels,
+        ...(sk.appliedEffects?.length ? { appliedEffects: sk.appliedEffects } : {}),
+      });
+    }
+  }
+  for (const p of passivesOut) {
+    const hasTrigger = Array.isArray(p.chaseTriggers) && p.chaseTriggers.length > 0;
+    const hasCaused = Array.isArray(p.causesChaseStates) && p.causesChaseStates.length > 0;
+    if (hasTrigger) {
+      chasers.push({
+        slot: 'passive',
+        skillId: p.id,
+        skillName: p.name,
+        requiresStates: p.chaseTriggers,
+        requiresStateLabels: p.chaseTriggerLabels,
+        ...(hasCaused
+          ? { causesStates: p.causesChaseStates, causesStateLabels: p.causesChaseStateLabels }
+          : {}),
+        ...(p.appliedEffects?.length ? { appliedEffects: p.appliedEffects } : {}),
+      });
+    }
+  }
+
+  if (!heroObj && initiators.length === 0 && chasers.length === 0) return undefined;
+
+  const natureId = numOrUndefined(heroObj?.nature);
+  const natureInfo = natureId != null ? NATURE_MAP[natureId] : undefined;
+  const combatRole =
+    typeof heroObj?.type === 'string' && heroObj.type.trim() ? heroObj.type.trim() : undefined;
+  const rolePosition = stripHtmlTags(typeof heroObj?.position === 'string' ? heroObj.position : '');
+  const shortDesc = stripHtmlTags(typeof heroObj?.shortdesc === 'string' ? heroObj.shortdesc : '');
+  const tags = Array.isArray(heroObj?.flags)
+    ? heroObj.flags.map((f) => String(f || '').trim()).filter(Boolean)
+    : undefined;
+
+  const baseStats = heroObj
+    ? {
+        hp: numOrUndefined(heroObj.lifenum),
+        attack: numOrUndefined(heroObj.attacknum),
+        defense: numOrUndefined(heroObj.defensenum),
+        hpGrowth: numOrUndefined(heroObj.hp),
+        attackGrowth: numOrUndefined(heroObj.attack),
+        defenseGrowth: numOrUndefined(heroObj.defense),
+        crit: numOrUndefined(heroObj.crit),
+        uncrit: numOrUndefined(heroObj.uncrit),
+        critDeepen: numOrUndefined(heroObj.critdeepen),
+        block: numOrUndefined(heroObj.block),
+        unblock: numOrUndefined(heroObj.unblock),
+        blockDeepen: numOrUndefined(heroObj.blockdeepen),
+        hurtBonus: numOrUndefined(heroObj.hurt),
+        hurtReduction: numOrUndefined(heroObj.unhurt),
+        skillRate: numOrUndefined(heroObj.skillrate),
+        lifesteal: numOrUndefined(heroObj.suck),
+        control: numOrUndefined(heroObj.ctrl),
+        uncontrol: numOrUndefined(heroObj.unctrl),
+        cure: numOrUndefined(heroObj.cure),
+        ultimateDamage: numOrUndefined(heroObj.bishadamage),
+        ultimateDefense: numOrUndefined(heroObj.bishadefense),
+      }
+    : undefined;
+
+  const chakraAnger =
+    heroObj && (heroObj.anger != null || heroObj.angerbase != null)
+      ? {
+          base: numOrUndefined(heroObj.angerbase),
+          ...(heroObj.anger && typeof heroObj.anger === 'object' ? { rules: heroObj.anger } : {}),
+        }
+      : undefined;
+
+  return {
+    heroCode: heroCode || String(heroObj?.Id || ''),
+    name: displayName || String(heroObj?.name || ''),
+    ...(shortDesc ? { shortDesc } : {}),
+    ...(rolePosition ? { rolePosition } : {}),
+    ...(combatRole
+      ? { combatRole, combatRoleLabel: COMBAT_ROLE_LABELS[combatRole] || combatRole }
+      : {}),
+    ...(natureId != null
+      ? {
+          natureId,
+          ...(natureInfo ? { nature: natureInfo.code, natureLabel: natureInfo.label } : {}),
+        }
+      : {}),
+    ...(numOrUndefined(heroObj?.quality) != null ? { quality: numOrUndefined(heroObj?.quality) } : {}),
+    ...(numOrUndefined(heroObj?.star) != null ? { star: numOrUndefined(heroObj?.star) } : {}),
+    ...(numOrUndefined(heroObj?.maxStar) != null ? { maxStar: numOrUndefined(heroObj?.maxStar) } : {}),
+    ...(typeof heroObj?.teamid === 'string' && heroObj.teamid.trim()
+      ? { teamId: heroObj.teamid.trim() }
+      : {}),
+    ...(tags && tags.length > 0 ? { tags } : {}),
+    ...(baseStats ? { baseStats } : {}),
+    ...(chakraAnger ? { chakraAnger } : {}),
+    chaseComboSummary: {
+      initiators,
+      chasers,
+    },
+  };
+}
+
 async function ensureNinjaSkillsPack(catalog, mainSkelZips, cachedTables) {
   const catalogNinjaCount = Array.isArray(catalog.ninjas) ? catalog.ninjas.length : 0;
   const existing = await tryLoadZip(NINJA_SKILLS_PACK_PATH);
@@ -1432,14 +1815,14 @@ async function ensureNinjaSkillsPack(catalog, mainSkelZips, cachedTables) {
       const parsed = JSON.parse(await existing.file('ninja-skills.json').async('text'));
       const count = parsed?.ninjas ? Object.keys(parsed.ninjas).length : 0;
       if (
-        parsed?.version === 2 &&
+        parsed?.version === 3 &&
         parsed?.catalogNinjaCount === catalogNinjaCount &&
         count > 0 &&
         parsed?.sons &&
         typeof parsed.sons === 'object'
       ) {
         console.log(
-          `[ensure-static-packs] Ninja media/skills pack v2 OK (${count} ninjas, ${Object.keys(parsed.sons).length} sound mappings).`
+          `[ensure-static-packs] Ninja media/skills/combat pack v3 OK (${count} ninjas, ${Object.keys(parsed.sons).length} sound mappings).`
         );
         return cachedTables;
       }
@@ -1448,7 +1831,7 @@ async function ensureNinjaSkillsPack(catalog, mainSkelZips, cachedTables) {
     }
   }
 
-  console.log('[ensure-static-packs] Building public/data/ninja-skills-pack.zip (v2: skills, icons, voices, videos, sons)...');
+  console.log('[ensure-static-packs] Building public/data/ninja-skills-pack.zip (v3: skills, combat mechanics, chase triggers, stats, icons, voices, videos, sons)...');
   const tables = cachedTables || (await fetchOriginManifestAndTables());
   if (!tables) {
     console.warn('[ensure-static-packs] Could not fetch origin tables for ninja-skills-pack.zip; skipping.');
@@ -1598,12 +1981,13 @@ async function ensureNinjaSkillsPack(catalog, mainSkelZips, cachedTables) {
       const name = resolvePt(sk.name) || skillId.trim();
       const desc = resolvePt(sk.desc);
       const { iconName, iconUrl } = resolveSkillIconUrl(sk.icon);
+      const mechanics = parseRawSkillMechanicsStatic(sk, desc, resolvePt);
       skillsOut[animKey] = {
         id: skillId.trim(),
         animKey,
         slotLabel,
         name,
-        ...(desc ? { desc } : {}),
+        ...mechanics,
         ...(iconName ? { iconName } : {}),
         ...(iconUrl ? { iconUrl } : {}),
       };
@@ -1630,12 +2014,25 @@ async function ensureNinjaSkillsPack(catalog, mainSkelZips, cachedTables) {
         if (!name) continue;
         const desc = resolvePt(sk.desc);
         const { iconName, iconUrl } = resolveSkillIconUrl(sk.icon);
+        const mechanics = parseRawSkillMechanicsStatic(sk, desc, resolvePt);
         passivesOut.push({
           id: pId.trim(),
           name,
-          ...(desc ? { desc } : {}),
+          ...(mechanics.desc ? { desc: mechanics.desc } : {}),
+          ...(mechanics.descPlain ? { descPlain: mechanics.descPlain } : {}),
           ...(iconName ? { iconName } : {}),
           ...(iconUrl ? { iconUrl } : {}),
+          ...(mechanics.skillType != null ? { skillType: mechanics.skillType } : {}),
+          ...(mechanics.targetFlags ? { targetFlags: mechanics.targetFlags } : {}),
+          ...(mechanics.chaseTriggers ? { chaseTriggers: mechanics.chaseTriggers } : {}),
+          ...(mechanics.chaseTriggerLabels ? { chaseTriggerLabels: mechanics.chaseTriggerLabels } : {}),
+          ...(mechanics.causesChaseStates ? { causesChaseStates: mechanics.causesChaseStates } : {}),
+          ...(mechanics.causesChaseStateLabels
+            ? { causesChaseStateLabels: mechanics.causesChaseStateLabels }
+            : {}),
+          ...(mechanics.appliedEffects ? { appliedEffects: mechanics.appliedEffects } : {}),
+          ...(mechanics.effectIds ? { effectIds: mechanics.effectIds } : {}),
+          ...(mechanics.effectDescs ? { effectDescs: mechanics.effectDescs } : {}),
         });
         totalSkillsMapped++;
         if (iconUrl) totalIconsMapped++;
@@ -1709,7 +2106,16 @@ async function ensureNinjaSkillsPack(catalog, mainSkelZips, cachedTables) {
     });
     totalVideosMapped += resolvedVids.videos.length;
 
+    const combatProfile = buildHeroCombatProfileStatic(
+      heroObj,
+      heroCode || '',
+      displayName || ninja.id,
+      skillsOut,
+      passivesOut
+    );
+
     if (
+      combatProfile ||
       Object.keys(skillsOut).length > 0 ||
       passivesOut.length > 0 ||
       voicesOut.length > 0 ||
@@ -1718,6 +2124,7 @@ async function ensureNinjaSkillsPack(catalog, mainSkelZips, cachedTables) {
       ninjasOut[ninja.id] = {
         ...(heroCode ? { heroCode } : {}),
         ...(displayName ? { displayName } : {}),
+        ...(combatProfile ? { combatProfile } : {}),
         skills: skillsOut,
         passives: passivesOut,
         ...(voicesOut.length > 0 ? { voices: voicesOut } : {}),
@@ -1745,7 +2152,7 @@ async function ensureNinjaSkillsPack(catalog, mainSkelZips, cachedTables) {
   }
 
   const payload = {
-    version: 2,
+    version: 3,
     catalogNinjaCount,
     origin,
     generatedAt: new Date().toISOString(),
@@ -1763,7 +2170,7 @@ async function ensureNinjaSkillsPack(catalog, mainSkelZips, cachedTables) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(NINJA_SKILLS_PACK_PATH, buf);
   console.log(
-    `[ensure-static-packs] Ninja media/skills pack v2 written: ninja-skills-pack.zip (${(buf.length / 1024).toFixed(1)} KB, ninjas=${Object.keys(ninjasOut).length}, skills=${totalSkillsMapped}, icons=${totalIconsMapped}, voices=${totalVoicesMapped}, videos=${totalVideosMapped}, sons=${Object.keys(compactSons).length}).`
+    `[ensure-static-packs] Ninja media/skills/combat pack v3 written: ninja-skills-pack.zip (${(buf.length / 1024).toFixed(1)} KB, ninjas=${Object.keys(ninjasOut).length}, skills=${totalSkillsMapped}, icons=${totalIconsMapped}, voices=${totalVoicesMapped}, videos=${totalVideosMapped}, sons=${Object.keys(compactSons).length}).`
   );
   return tables;
 }

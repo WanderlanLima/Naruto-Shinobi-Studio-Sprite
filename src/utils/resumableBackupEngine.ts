@@ -1,5 +1,6 @@
-import type { ExtractResponse, NinjaEntry } from '../types/sprite';
+import type { ExtractResponse, NinjaEntry, NinjaMediaProfile } from '../types/sprite';
 import { downloadBlob, extractSpineEffectRefs, parseAtlas } from './atlasParser';
+import { CHASE_SYSTEM_LEGEND } from './combatMechanicsParser';
 import {
   buildCorsRelayUrl,
   buildWsrvImageUrl,
@@ -1066,6 +1067,66 @@ export async function assembleAndSaveBackupJobZip(
       },
     };
     metaEntries.push(makeJsonZipEntry('_shinobi_backup/catalog.json', catalogPayload));
+
+    // Embed full media profiles (including skills, passives, combatProfile, chase mechanics, stats, voices, videos) & sons map
+    const skillsPack = await loadStaticNinjaSkillsPack();
+    if (skillsPack) {
+      const mediaProfilesOut: Record<string, NinjaMediaProfile> = {};
+      const combatNinjasOut: Record<string, unknown> = {};
+
+      for (const ninja of filteredNinjas) {
+        const entry =
+          skillsPack.ninjas[ninja.id] ||
+          skillsPack.ninjasLower.get(ninja.id.toLowerCase()) ||
+          (ninja.code
+            ? skillsPack.ninjas[ninja.code] || skillsPack.ninjasLower.get(ninja.code.toLowerCase())
+            : undefined);
+        if (!entry) continue;
+
+        const profile: NinjaMediaProfile = {
+          ninjaId: ninja.id,
+          heroCode: entry.heroCode || ninja.code,
+          displayName: entry.displayName || ninja.name,
+          ...(entry.combatProfile ? { combatProfile: entry.combatProfile } : {}),
+          skills: entry.skills || {},
+          passives: entry.passives || [],
+          passiveAura: null,
+          videos: entry.videos || [],
+          voices: entry.voices || [],
+          soundUrlMap: {},
+          videoUrlMap: entry.videoUrlMap || {},
+          originBase: job.origin,
+        };
+        mediaProfilesOut[ninja.id] = profile;
+        combatNinjasOut[ninja.id] = {
+          ninjaId: ninja.id,
+          heroCode: profile.heroCode,
+          displayName: profile.displayName,
+          combatProfile: profile.combatProfile,
+          skills: profile.skills,
+          passives: profile.passives,
+        };
+      }
+
+      if (Object.keys(mediaProfilesOut).length > 0) {
+        metaEntries.push(
+          makeJsonZipEntry('_shinobi_backup/media-profiles.json', mediaProfilesOut)
+        );
+        metaEntries.push(
+          makeJsonZipEntry('_shinobi_backup/combate_e_habilidades.json', {
+            schemaVersion: 'shinobi-combat-v1',
+            generatedAt: new Date().toISOString(),
+            origin: job.origin,
+            chaseSystemLegend: CHASE_SYSTEM_LEGEND,
+            totalNinjas: Object.keys(combatNinjasOut).length,
+            ninjas: combatNinjasOut,
+          })
+        );
+      }
+      if (Object.keys(skillsPack.sons).length > 0) {
+        metaEntries.push(makeJsonZipEntry('_shinobi_backup/sons.json', skillsPack.sons));
+      }
+    }
   }
 
   const totalEntries = job.completedPaths.length + metaEntries.length;

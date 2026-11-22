@@ -784,6 +784,126 @@ export async function mountBackupZipFiles(
       }
     }
 
+    const bulkCombatEntry = localExact.get('_shinobi_backup/combate_e_habilidades.json');
+    if (bulkCombatEntry) {
+      try {
+        const blob = await readEntryBlobAsync(bulkCombatEntry);
+        const parsedCombat = JSON.parse(await blob.text()) as {
+          ninjas?: Record<
+            string,
+            {
+              ninjaId?: string;
+              heroCode?: string;
+              displayName?: string;
+              combatProfile?: NinjaMediaProfile['combatProfile'];
+              skills?: NinjaMediaProfile['skills'];
+              passives?: NinjaMediaProfile['passives'];
+            }
+          >;
+        };
+        if (parsedCombat?.ninjas && typeof parsedCombat.ninjas === 'object') {
+          for (const [id, entry] of Object.entries(parsedCombat.ninjas)) {
+            if (!entry) continue;
+            const existing = mediaProfilesById.get(id) || mediaProfilesByLower.get(id.toLowerCase());
+            const merged: NinjaMediaProfile = existing
+              ? {
+                  ...existing,
+                  heroCode: existing.heroCode || entry.heroCode,
+                  displayName: existing.displayName || entry.displayName,
+                  combatProfile: existing.combatProfile || entry.combatProfile,
+                  skills:
+                    existing.skills && Object.keys(existing.skills).length > 0
+                      ? existing.skills
+                      : entry.skills || existing.skills,
+                  passives:
+                    existing.passives && existing.passives.length > 0
+                      ? existing.passives
+                      : entry.passives || existing.passives,
+                }
+              : {
+                  ninjaId: entry.ninjaId || id,
+                  heroCode: entry.heroCode,
+                  displayName: entry.displayName,
+                  combatProfile: entry.combatProfile,
+                  skills: entry.skills || {},
+                  passives: entry.passives || [],
+                  passiveAura: null,
+                  videos: [],
+                  voices: [],
+                  soundUrlMap: {},
+                  videoUrlMap: {},
+                  originBase: mountedOrigin,
+                };
+            mediaProfilesById.set(id, merged);
+            mediaProfilesByLower.set(id.toLowerCase(), merged);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // Also hydrate single-character or batch exported ZIPs that contain combate_e_habilidades.json
+    for (const [entryPath, entryRef] of localExact.entries()) {
+      const lowerPath = entryPath.toLowerCase();
+      if (
+        lowerPath === '_shinobi_backup/combate_e_habilidades.json' ||
+        !(
+          lowerPath === 'combate_e_habilidades.json' ||
+          lowerPath.endsWith('/combate_e_habilidades.json')
+        )
+      ) {
+        continue;
+      }
+      try {
+        const blob = await readEntryBlobAsync(entryRef);
+        const parsedSingle = JSON.parse(await blob.text()) as {
+          ninjaId?: string;
+          heroCode?: string;
+          displayName?: string;
+          combatProfile?: NinjaMediaProfile['combatProfile'];
+          skills?: NinjaMediaProfile['skills'];
+          passives?: NinjaMediaProfile['passives'];
+        };
+        const id = typeof parsedSingle?.ninjaId === 'string' ? parsedSingle.ninjaId.trim() : '';
+        if (!id) continue;
+        const existing = mediaProfilesById.get(id) || mediaProfilesByLower.get(id.toLowerCase());
+        const merged: NinjaMediaProfile = existing
+          ? {
+              ...existing,
+              heroCode: existing.heroCode || parsedSingle.heroCode,
+              displayName: existing.displayName || parsedSingle.displayName,
+              combatProfile: existing.combatProfile || parsedSingle.combatProfile,
+              skills:
+                existing.skills && Object.keys(existing.skills).length > 0
+                  ? existing.skills
+                  : parsedSingle.skills || existing.skills,
+              passives:
+                existing.passives && existing.passives.length > 0
+                  ? existing.passives
+                  : parsedSingle.passives || existing.passives,
+            }
+          : {
+              ninjaId: id,
+              heroCode: parsedSingle.heroCode,
+              displayName: parsedSingle.displayName,
+              combatProfile: parsedSingle.combatProfile,
+              skills: parsedSingle.skills || {},
+              passives: parsedSingle.passives || [],
+              passiveAura: null,
+              videos: [],
+              voices: [],
+              soundUrlMap: {},
+              videoUrlMap: {},
+              originBase: mountedOrigin,
+            };
+        mediaProfilesById.set(id, merged);
+        mediaProfilesByLower.set(id.toLowerCase(), merged);
+      } catch {
+        // ignore invalid single combat json
+      }
+    }
+
     const sonsEntry = localExact.get('_shinobi_backup/sons.json');
     if (sonsEntry) {
       try {

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { once } from 'node:events';
 import type express from 'express';
+import { CHASE_SYSTEM_LEGEND } from './src/utils/combatMechanicsParser.ts';
 
 export interface BackupNinjaEntry {
   id: string;
@@ -1052,6 +1053,29 @@ export function registerBackupRoutes(app: express.Express, deps: BackupRouteDeps
     await zip.addJson('_shinobi_backup/catalog.json', filteredCatalog);
     await zip.addJson('_shinobi_backup/media-profiles.json', mediaProfiles);
     await zip.addJson('_shinobi_backup/sons.json', tables.sons);
+    await zip.addJson('_shinobi_backup/combate_e_habilidades.json', {
+      schemaVersion: 'shinobi-combat-v1',
+      generatedAt: new Date().toISOString(),
+      origin,
+      chaseSystemLegend: CHASE_SYSTEM_LEGEND,
+      totalNinjas: Object.keys(mediaProfiles).length,
+      ninjas: Object.fromEntries(
+        Object.entries(mediaProfiles).map(([id, prof]) => {
+          const p = prof as Record<string, unknown>;
+          return [
+            id,
+            {
+              ninjaId: id,
+              heroCode: p.heroCode,
+              displayName: p.displayName,
+              combatProfile: p.combatProfile,
+              skills: p.skills,
+              passives: p.passives,
+            },
+          ];
+        })
+      ),
+    });
 
     // Phase 2: Fetch linked particle Spine packages (noe_*) & passive auras, parse THEIR atlas pages too!
     if (cfg.includeParticles) {
@@ -1277,6 +1301,29 @@ export function registerBackupRoutes(app: express.Express, deps: BackupRouteDeps
         await zip.addJson('_shinobi_backup/catalog.json', catalog);
         await zip.addJson('_shinobi_backup/media-profiles.json', mediaProfiles);
         await zip.addJson('_shinobi_backup/sons.json', tables.sons);
+        await zip.addJson('_shinobi_backup/combate_e_habilidades.json', {
+          schemaVersion: 'shinobi-combat-v1',
+          generatedAt: new Date().toISOString(),
+          origin,
+          chaseSystemLegend: CHASE_SYSTEM_LEGEND,
+          totalNinjas: Object.keys(mediaProfiles).length,
+          ninjas: Object.fromEntries(
+            Object.entries(mediaProfiles).map(([id, prof]) => {
+              const p = prof as Record<string, unknown>;
+              return [
+                id,
+                {
+                  ninjaId: id,
+                  heroCode: p.heroCode,
+                  displayName: p.displayName,
+                  combatProfile: p.combatProfile,
+                  skills: p.skills,
+                  passives: p.passives,
+                },
+              ];
+            })
+          ),
+        });
       }
 
       await streamRemotePathsToZip(

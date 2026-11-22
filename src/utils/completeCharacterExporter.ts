@@ -26,6 +26,7 @@ import {
   renderSpineFrameToCanvas,
   resolveEffectiveAnimationName,
 } from './atlasParser';
+import { CHASE_SYSTEM_LEGEND } from './combatMechanicsParser';
 import {
   fetchNinjaBundle,
   resolveAssetFetchUrl,
@@ -308,12 +309,16 @@ export function buildCharacterInstructionsJson(
   return JSON.stringify(
     {
       characterId: ninjaId,
+      heroCode: mediaProfile?.heroCode,
       displayName: mediaProfile?.displayName,
       atlasFile: `${ninjaId}.atlas`,
       skeletonFile: `${ninjaId}.json`,
+      combatFile: 'combate_e_habilidades.json',
       effectScope: scope,
       notes:
-        'As definicoes completas de ossos, slots, keyframes e eventos @CMD ficam no arquivo .json (skeleton). Icones das skills em qualidade maxima ficam em icones_skills/, particulas (incluindo aura passiva idle) ficam em particulas/<spineId>/, videos de ultimate em videos/*.mp4 e vozes/efeitos sonoros em audios/*.mp3.',
+        'As definicoes completas de ossos, slots, keyframes e eventos @CMD ficam no arquivo .json (skeleton). As mecanicas de combate, gatilhos de perseguicao (Queda/Flutuacao/Empurrao), efeitos/debuffs aplicados e atributos base ficam em combate_e_habilidades.json (e resumidos abaixo). Icones das skills em qualidade maxima ficam em icones_skills/, particulas em particulas/<spineId>/, videos de ultimate em videos/*.mp4 e vozes/efeitos sonoros em audios/*.mp3.',
+      chaseSystemLegend: CHASE_SYSTEM_LEGEND,
+      combatProfile: mediaProfile?.combatProfile,
       skills: skillsWithIconFile,
       passives: passivesWithIconFile,
       passiveAura: mediaProfile?.passiveAura
@@ -346,6 +351,59 @@ export function buildCharacterInstructionsJson(
           : undefined,
       missingEffects: missingEffects && missingEffects.length > 0 ? missingEffects : undefined,
       animations,
+    },
+    null,
+    2
+  );
+}
+
+/**
+ * Builds a dedicated, game-engine-ready JSON describing the character's combat mechanics:
+ * chase combo triggers & caused states (fall/popup/launcher/back), applied debuffs/buffs,
+ * target types, elements, passives, and base combat attributes.
+ */
+export function buildCharacterCombatJson(
+  ninjaId: string,
+  mediaProfile?: NinjaMediaProfile | null
+): string | null {
+  if (!mediaProfile) return null;
+  const hasSkills = mediaProfile.skills && Object.keys(mediaProfile.skills).length > 0;
+  const hasPassives = mediaProfile.passives && mediaProfile.passives.length > 0;
+  if (!mediaProfile.combatProfile && !hasSkills && !hasPassives) return null;
+
+  const skillsWithIconFile = hasSkills
+    ? Object.fromEntries(
+        Object.entries(mediaProfile.skills).map(([k, sk]) => [
+          k,
+          {
+            ...sk,
+            iconFile: sk.iconUrl
+              ? buildSkillIconRelPathForAnim(sk.animKey, sk.name, sk.iconUrl)
+              : undefined,
+          },
+        ])
+      )
+    : {};
+
+  const passivesWithIconFile = hasPassives
+    ? mediaProfile.passives.map((p, idx) => ({
+        ...p,
+        iconFile: p.iconUrl
+          ? buildPassiveIconRelPath(idx, p.name, p.iconUrl)
+          : undefined,
+      }))
+    : [];
+
+  return JSON.stringify(
+    {
+      schemaVersion: 'shinobi-combat-v1',
+      characterId: ninjaId,
+      heroCode: mediaProfile.heroCode,
+      displayName: mediaProfile.displayName,
+      chaseSystemLegend: CHASE_SYSTEM_LEGEND,
+      combatProfile: mediaProfile.combatProfile,
+      skills: skillsWithIconFile,
+      passives: passivesWithIconFile,
     },
     null,
     2
@@ -924,7 +982,7 @@ export async function collectCharacterCompleteFiles(
     }
   }
 
-  // 3. Export animation instructions JSON + linked effect bundles into particulas/
+  // 3. Export animation instructions JSON + dedicated combat/skills/chase mechanics JSON
   if (
     baseData.skeleton &&
     (options.includeLinkedEffects ||
@@ -945,6 +1003,11 @@ export async function collectCharacterCompleteFiles(
         options.mediaProfile
       )
     );
+  }
+
+  const combatJson = buildCharacterCombatJson(baseData.ninja.id, options.mediaProfile);
+  if (combatJson) {
+    pushFile('combate_e_habilidades.json', combatJson);
   }
 
   if (options.includeLinkedEffects && options.effectScope !== 'base') {

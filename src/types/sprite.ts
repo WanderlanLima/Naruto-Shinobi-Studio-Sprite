@@ -177,22 +177,122 @@ export interface PassiveAuraDef {
   layers: PassiveAuraLayerDef[];
 }
 
+export type ChaseStateCode = 'fall' | 'popup' | 'launcher' | 'back';
+
+export type SkillTargetType =
+  | 'single_enemy'
+  | 'enemy_row'
+  | 'enemy_col'
+  | 'all_enemies'
+  | 'multi_enemy_3'
+  | 'random_enemies'
+  | 'all_allies'
+  | 'self_or_custom';
+
 export interface NinjaSkillInfo {
   id: string;
   animKey: string;
   slotLabel: string;
   name: string;
   desc?: string;
+  descPlain?: string;
+  descShort?: string;
+  descInBattle?: string;
   iconName?: string;
   iconUrl?: string;
+  skillType?: number;
+  damageCategories?: string[];
+  elements?: string[];
+  targetFlags?: string[];
+  targetType?: SkillTargetType;
+  targetLabel?: string;
+  actionFlags?: string;
+  chaseTriggers?: ChaseStateCode[];
+  chaseTriggerLabels?: string[];
+  causesChaseStates?: ChaseStateCode[];
+  causesChaseStateLabels?: string[];
+  appliedEffects?: string[];
+  effectIds?: string[];
+  effectDescs?: Record<string, string>;
 }
 
 export interface NinjaPassiveInfo {
   id: string;
   name: string;
   desc?: string;
+  descPlain?: string;
   iconName?: string;
   iconUrl?: string;
+  skillType?: number;
+  targetFlags?: string[];
+  chaseTriggers?: ChaseStateCode[];
+  chaseTriggerLabels?: string[];
+  causesChaseStates?: ChaseStateCode[];
+  causesChaseStateLabels?: string[];
+  appliedEffects?: string[];
+  effectIds?: string[];
+  effectDescs?: Record<string, string>;
+}
+
+export interface NinjaChaseComboLink {
+  slot: string;
+  skillId: string;
+  skillName: string;
+  requiresStates?: ChaseStateCode[];
+  requiresStateLabels?: string[];
+  causesStates?: ChaseStateCode[];
+  causesStateLabels?: string[];
+  appliedEffects?: string[];
+}
+
+export interface NinjaBaseStats {
+  hp?: number;
+  attack?: number;
+  defense?: number;
+  hpGrowth?: number;
+  attackGrowth?: number;
+  defenseGrowth?: number;
+  crit?: number;
+  uncrit?: number;
+  critDeepen?: number;
+  block?: number;
+  unblock?: number;
+  blockDeepen?: number;
+  hurtBonus?: number;
+  hurtReduction?: number;
+  skillRate?: number;
+  lifesteal?: number;
+  control?: number;
+  uncontrol?: number;
+  cure?: number;
+  ultimateDamage?: number;
+  ultimateDefense?: number;
+}
+
+export interface NinjaCombatProfile {
+  heroCode: string;
+  name: string;
+  shortDesc?: string;
+  rolePosition?: string;
+  combatRole?: string;
+  combatRoleLabel?: string;
+  natureId?: number;
+  nature?: string;
+  natureLabel?: string;
+  quality?: number;
+  star?: number;
+  maxStar?: number;
+  teamId?: string;
+  tags?: string[];
+  baseStats?: NinjaBaseStats;
+  chakraAnger?: {
+    base?: number;
+    rules?: Record<string, unknown>;
+  };
+  chaseComboSummary: {
+    initiators: NinjaChaseComboLink[];
+    chasers: NinjaChaseComboLink[];
+  };
 }
 
 export interface NinjaVoiceClip {
@@ -215,6 +315,7 @@ export interface NinjaMediaProfile {
   ninjaId: string;
   heroCode?: string;
   displayName?: string;
+  combatProfile?: NinjaCombatProfile;
   skills: Record<string, NinjaSkillInfo>;
   passives: NinjaPassiveInfo[];
   passiveAura: PassiveAuraDef | null;

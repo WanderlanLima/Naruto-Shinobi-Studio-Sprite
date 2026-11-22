@@ -32,6 +32,7 @@ import {
   saveNinjaFilesToStore,
 } from '../utils/batchDownloadStore';
 import {
+  buildCharacterCombatJson,
   buildCharacterInstructionsJson,
   collectCharacterCompleteFiles,
   collectCharacterEffectPlan,
@@ -505,10 +506,7 @@ export function BatchZipModal({
         const rawItems: Array<{ path: string; data: Blob | ArrayBuffer | Uint8Array | string }> = [];
         const folderPrefix = getSpineFolderPrefix(ninja);
 
-        const mediaProfile =
-          activeIncludeMediaAndAuras || activeIncludeSkillIcons
-            ? await fetchNinjaMediaProfile(ninja, bundle.skeleton)
-            : null;
+        const mediaProfile = await fetchNinjaMediaProfile(ninja, bundle.skeleton);
 
         const appendLinkedEffectsIfNeeded = async (sliceFrames: boolean) => {
           const effectBundles = new Map<string, ParsedEffectAsset | null>();
@@ -724,6 +722,18 @@ export function BatchZipModal({
               });
             }
             await appendLinkedEffectsIfNeeded(true);
+          }
+        }
+
+        // Always export structured combat, skills, chase combos & effects JSON in non-complete modes
+        // (complete-animated already includes combate_e_habilidades.json via collectCharacterCompleteFiles)
+        if (activeMode !== 'complete-animated' && mediaProfile) {
+          const combatJson = buildCharacterCombatJson(ninja.id, mediaProfile);
+          if (combatJson) {
+            rawItems.push({
+              path: `${folderPrefix}/combate_e_habilidades.json`,
+              data: combatJson,
+            });
           }
         }
 
@@ -1025,22 +1035,22 @@ export function BatchZipModal({
                 {
                   id: 'idle-only',
                   label: '1 Sprite Principal por Pacote (PNG)',
-                  desc: 'Rápido e leve — extrai a pose principal de cada pacote em PNG transparente.',
+                  desc: 'Rápido e leve — extrai a pose principal em PNG + combate_e_habilidades.json.',
                 },
                 {
                   id: 'all-sliced',
                   label: 'Todos os Frames Fatiados (Pastas + PNGs)',
-                  desc: 'Fatia todos os frames de cada pacote em pastas (+ .atlas, .json e partículas opcionais).',
+                  desc: 'Fatia todos os frames em pastas (+ .atlas, .json, combate_e_habilidades.json e partículas opcionais).',
                 },
                 {
                   id: 'raw-bundle',
                   label: 'Pacotes Originais (.webp + .atlas + .json)',
-                  desc: 'Baixa as folhas de textura originais organizadas em pastas por categoria.',
+                  desc: 'Baixa folhas originais + combate_e_habilidades.json organizados em pastas por categoria.',
                 },
                 {
                   id: 'complete-animated',
                   label: 'Personagem Completo (Animações + Partículas + Originais)',
-                  desc: 'Inclui originais, frames, partículas (noe_*), animacoes_instrucoes.json e todas as animações renderizadas juntas.',
+                  desc: 'Inclui originais, frames, partículas (noe_*), animacoes_instrucoes.json, combate_e_habilidades.json e animações renderizadas.',
                 },
               ] as const
             ).map((opt) => (

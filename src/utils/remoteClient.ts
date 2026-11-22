@@ -2,6 +2,7 @@ import JSZip from 'jszip';
 import type {
   ExtractResponse,
   NinjaBundleResponse,
+  NinjaCombatProfile,
   NinjaEntry,
   NinjaMediaProfile,
   NinjaPassiveInfo,
@@ -70,6 +71,7 @@ interface StaticEffectsAtlasPack {
 interface StaticNinjaSkillsEntry {
   heroCode?: string;
   displayName?: string;
+  combatProfile?: NinjaCombatProfile;
   skills?: Record<string, NinjaSkillInfo>;
   passives?: NinjaPassiveInfo[];
   voices?: NinjaVoiceClip[];
@@ -388,10 +390,29 @@ function mergeStaticSkillsIntoProfile(
         mergedSkills[animKey] = { ...staticSkill };
       } else {
         mergedSkills[animKey] = {
+          ...staticSkill,
           ...existing,
           iconName: existing.iconName || staticSkill.iconName,
           iconUrl: existing.iconUrl || staticSkill.iconUrl,
           desc: existing.desc || staticSkill.desc,
+          descPlain: existing.descPlain || staticSkill.descPlain,
+          chaseTriggers: existing.chaseTriggers?.length
+            ? existing.chaseTriggers
+            : staticSkill.chaseTriggers,
+          chaseTriggerLabels: existing.chaseTriggerLabels?.length
+            ? existing.chaseTriggerLabels
+            : staticSkill.chaseTriggerLabels,
+          causesChaseStates: existing.causesChaseStates?.length
+            ? existing.causesChaseStates
+            : staticSkill.causesChaseStates,
+          causesChaseStateLabels: existing.causesChaseStateLabels?.length
+            ? existing.causesChaseStateLabels
+            : staticSkill.causesChaseStateLabels,
+          appliedEffects: existing.appliedEffects?.length
+            ? existing.appliedEffects
+            : staticSkill.appliedEffects,
+          effectIds: existing.effectIds?.length ? existing.effectIds : staticSkill.effectIds,
+          effectDescs: existing.effectDescs || staticSkill.effectDescs,
         };
       }
     }
@@ -407,10 +428,12 @@ function mergeStaticSkillsIntoProfile(
         const sp = byId.get(p.id);
         return sp
           ? {
+              ...sp,
               ...p,
               iconName: p.iconName || sp.iconName,
               iconUrl: p.iconUrl || sp.iconUrl,
               desc: p.desc || sp.desc,
+              descPlain: p.descPlain || sp.descPlain,
             }
           : p;
       });
@@ -453,6 +476,7 @@ function mergeStaticSkillsIntoProfile(
     ...profile,
     heroCode: profile.heroCode || entry.heroCode,
     displayName: profile.displayName || entry.displayName,
+    combatProfile: profile.combatProfile || entry.combatProfile,
     skills: mergedSkills,
     passives: mergedPassives,
     voices: mergedVoices,
