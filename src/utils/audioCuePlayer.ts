@@ -7,6 +7,33 @@ import type { SpineAudioEventRef } from '../types/sprite';
 class AudioCuePlayer {
   private activeAudios = new Set<HTMLAudioElement>();
   private preloadedUrls = new Set<string>();
+  private unlocked = false;
+
+  unlock() {
+    if (this.unlocked || typeof window === 'undefined') return;
+    this.unlocked = true;
+    try {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtx) {
+        const ctx = new AudioCtx();
+        if (ctx.state === 'suspended') {
+          void ctx.resume().catch(() => {});
+        }
+        const buf = ctx.createBuffer(1, 1, 22050);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.start(0);
+        setTimeout(() => {
+          void ctx.close().catch(() => {});
+        }, 250);
+      }
+    } catch {
+      // ignore unlock errors
+    }
+  }
 
   preloadAudioUrls(urls: string[]) {
     if (typeof Audio === 'undefined') return;

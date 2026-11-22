@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowLeft,
@@ -73,6 +73,7 @@ import {
   fetchNinjaBundle,
   fetchNinjaMediaProfile,
   resolveAssetFetchUrl,
+  resolveMediaPlayUrl,
   resolveMediaSoundUrl,
   resolveMediaVideoUrl,
 } from '../utils/remoteClient';
@@ -200,8 +201,8 @@ const DEFAULT_ANIM_PT_LABELS: Record<string, string> = {
 };
 
 const PLAYER_STAGE_RENDER_OPTIONS: RenderSpineFrameOptions = {
-  fillRatio: 0.62,
-  maxAutoFitScale: 1.35,
+  fillRatio: 0.54,
+  maxAutoFitScale: 1.0,
   followFramePose: true,
 };
 
@@ -300,6 +301,7 @@ export function StudioStage({
     key: string;
     resumePlaying: boolean;
   } | null>(null);
+  const [videoAutoplayMuted, setVideoAutoplayMuted] = useState(false);
 
   const [playerDetached, setPlayerDetached] = useState(false);
   const [dockHeight, setDockHeight] = useState(0);
@@ -353,6 +355,7 @@ export function StudioStage({
     setError(null);
     setSelectedRegion(null);
     setCurrentTime(0);
+    setAutoFit(true);
     setZoom(1);
     setPan({ x: 0, y: 0 });
     savedScrollYRef.current = null;
@@ -368,6 +371,7 @@ export function StudioStage({
     setShowPassiveAura(true);
     setPassiveAuraPhase('loop');
     setActiveVideoOverlay(null);
+    setVideoAutoplayMuted(false);
     setPlayingVoiceKey(null);
     audioCuePlayer.stopAll();
     animTimeRef.current = 0;
@@ -762,10 +766,41 @@ export function StudioStage({
     const urls = activeAudioRefs
       .map((ref) => resolveMediaSoundUrl(ref.soundName, mediaProfile, ninja.atlasUrl))
       .filter((u): u is string => Boolean(u))
-      .map((u) => resolveAssetFetchUrl(u))
+      .map((u) => resolveMediaPlayUrl(u))
       .filter((u): u is string => Boolean(u));
     audioCuePlayer.preloadAudioUrls(urls);
   }, [ninja, activeAudioRefs, mediaProfile]);
+
+  const startVideoAutoplay = useCallback(
+    (video: HTMLVideoElement | null) => {
+      if (!video || video.ended) return;
+      video.playsInline = true;
+      video.volume = soundVolume;
+      video.muted = soundMuted;
+      setVideoAutoplayMuted(false);
+      const playPromise = video.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(() => {
+          if (!video.muted) {
+            video.muted = true;
+            setVideoAutoplayMuted(true);
+            void video.play().catch(() => {});
+          }
+        });
+      }
+    },
+    [soundMuted, soundVolume]
+  );
+
+  useEffect(() => {
+    if (!activeVideoOverlay) {
+      setVideoAutoplayMuted(false);
+      return;
+    }
+    const video = videoElemRef.current;
+    if (!video) return;
+    startVideoAutoplay(video);
+  }, [activeVideoOverlay, startVideoAutoplay]);
 
   // Keep active audio elements in sync with volume/mute controls & clean up on unmount
   useEffect(() => {
@@ -776,10 +811,10 @@ export function StudioStage({
       audioCuePlayer.setVolume(soundVolume);
     }
     if (videoElemRef.current) {
-      videoElemRef.current.muted = soundMuted;
+      videoElemRef.current.muted = soundMuted || videoAutoplayMuted;
       videoElemRef.current.volume = soundVolume;
     }
-  }, [soundMuted, soundVolume]);
+  }, [soundMuted, soundVolume, videoAutoplayMuted]);
 
   useEffect(() => {
     return () => {
@@ -975,7 +1010,7 @@ export function StudioStage({
       if (!ninja) return null;
       const raw = resolveMediaSoundUrl(soundName, mediaProfile, ninja.atlasUrl);
       if (!raw) return null;
-      const resolved = resolveAssetFetchUrl(raw);
+      const resolved = resolveMediaPlayUrl(raw);
       return resolved || null;
     };
 
@@ -1015,7 +1050,7 @@ export function StudioStage({
         );
         if (triggerRef) {
           const rawVideoUrl = resolveMediaVideoUrl(triggerRef, mediaProfile, ninja.atlasUrl);
-          const playUrl = rawVideoUrl ? resolveAssetFetchUrl(rawVideoUrl) : '';
+          const playUrl = rawVideoUrl ? resolveMediaPlayUrl(rawVideoUrl) : '';
           if (rawVideoUrl && playUrl) {
             videoTriggeredCycleRef.current = true;
             animTimeRef.current = next;
@@ -1445,13 +1480,32 @@ export function StudioStage({
   const handleDownloadRemoteMedia = async (rawUrl: string, filename: string) => {
     try {
       const fetchUrl = resolveAssetFetchUrl(rawUrl);
-      if (!fetchUrl) return;
-      const resp = await fetch(fetchUrl);
-      if (!resp.ok) return;
-      const blob = await resp.blob();
-      downloadBlob(blob, filename);
+      if (fetchUrl) {
+        const resp = await fetch(fetchUrl);
+        if (resp.ok) {
+          const blob = await resp.blob();
+          if (blob.size > 0) {
+            downloadBlob(blob, filename);
+            return;
+          }
+        }
+      }
     } catch {
-      // ignore download failure
+      // fall through to direct link download
+    }
+
+    // Direct anchor download fallback (works in static GitHub Pages mode even if CORS relay blocks large MP4/MP3)
+    try {
+      const a = document.createElement('a');
+      a.href = resolveMediaPlayUrl(rawUrl) || rawUrl;
+      a.download = filename;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch {
+      // ignore fallback failure
     }
   };
 
@@ -1532,13 +1586,14 @@ export function StudioStage({
   };
 
   const handleToggleVoicePreview = (key: string, rawUrl: string) => {
+    audioCuePlayer.unlock();
     if (playingVoiceKey === key) {
       audioCuePlayer.stopAll();
       setPlayingVoiceKey(null);
       return;
     }
     audioCuePlayer.stopAll();
-    const playUrl = resolveAssetFetchUrl(rawUrl);
+    const playUrl = resolveMediaPlayUrl(rawUrl);
     if (!playUrl) {
       setPlayingVoiceKey(null);
       return;
@@ -1892,12 +1947,13 @@ export function StudioStage({
                             <button
                               type="button"
                               onClick={() => {
+                                audioCuePlayer.unlock();
                                 const first = activeVideoRefs[0];
                                 const rawUrl =
                                   first &&
                                   resolveMediaVideoUrl(first, mediaProfile, ninja.atlasUrl);
                                 if (!rawUrl || !first) return;
-                                const playUrl = resolveAssetFetchUrl(rawUrl);
+                                const playUrl = resolveMediaPlayUrl(rawUrl);
                                 if (!playUrl) return;
                                 setActiveVideoOverlay({
                                   playUrl,
@@ -1917,7 +1973,10 @@ export function StudioStage({
                         <div className="flex items-center gap-1.5 rounded border border-slate-800 bg-[#0B0F17] px-2 py-1">
                           <button
                             type="button"
-                            onClick={() => setSoundMuted((m) => !m)}
+                            onClick={() => {
+                              audioCuePlayer.unlock();
+                              setSoundMuted((m) => !m);
+                            }}
                             aria-label={soundMuted ? 'Ativar som' : 'Silenciar som'}
                             title={soundMuted ? 'Ativar som' : 'Silenciar som'}
                             className={`inline-flex items-center gap-1 text-xs font-medium cursor-pointer ${
@@ -2121,15 +2180,24 @@ export function StudioStage({
                         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/92 p-3">
                           <div className="relative flex h-full w-full max-w-[640px] flex-col items-center justify-center">
                             <video
+                              key={activeVideoOverlay.playUrl}
                               ref={videoElemRef}
                               src={activeVideoOverlay.playUrl}
                               autoPlay
                               playsInline
+                              preload="auto"
                               controls
-                              muted={soundMuted}
+                              muted={soundMuted || videoAutoplayMuted}
                               onLoadedMetadata={(e) => {
                                 e.currentTarget.volume = soundVolume;
-                                e.currentTarget.muted = soundMuted;
+                                if (e.currentTarget.paused && !e.currentTarget.ended) {
+                                  startVideoAutoplay(e.currentTarget);
+                                }
+                              }}
+                              onCanPlay={(e) => {
+                                if (e.currentTarget.paused && !e.currentTarget.ended) {
+                                  startVideoAutoplay(e.currentTarget);
+                                }
                               }}
                               onEnded={() => {
                                 const resume = activeVideoOverlay.resumePlaying;
@@ -2146,6 +2214,24 @@ export function StudioStage({
                                 {activeVideoOverlay.label}
                               </span>
                               <div className="flex items-center gap-2">
+                                {videoAutoplayMuted && !soundMuted && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      audioCuePlayer.unlock();
+                                      setVideoAutoplayMuted(false);
+                                      if (videoElemRef.current) {
+                                        videoElemRef.current.muted = false;
+                                        videoElemRef.current.volume = soundVolume;
+                                        void videoElemRef.current.play().catch(() => {});
+                                      }
+                                    }}
+                                    className="inline-flex items-center gap-1 rounded border border-emerald-500/50 bg-emerald-950/60 px-2.5 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/70 cursor-pointer"
+                                  >
+                                    <Volume2 className="h-3 w-3" aria-hidden="true" />
+                                    <span>Ativar som</span>
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() =>
@@ -2194,7 +2280,10 @@ export function StudioStage({
 
                     <button
                       type="button"
-                      onClick={() => setIsPlaying((p) => !p)}
+                      onClick={() => {
+                        audioCuePlayer.unlock();
+                        setIsPlaying((p) => !p);
+                      }}
                       className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 cursor-pointer"
                     >
                       {isPlaying ? (
@@ -2554,7 +2643,7 @@ export function StudioStage({
                   onChange={(e) => setAnimFilter(e.target.value)}
                   placeholder="Buscar animação..."
                   aria-label="Filtrar animações"
-                  className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
+                  className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 text-base sm:text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
                 />
                 <div className="max-h-[360px] space-y-1 overflow-y-auto pr-1">
                   {filteredAnimNames.map((anim) => {
@@ -2575,6 +2664,7 @@ export function StudioStage({
                         key={anim}
                         type="button"
                         onClick={() => {
+                          audioCuePlayer.unlock();
                           setSelectedAnim(anim);
                           setCurrentTime(0);
                           animTimeRef.current = 0;
@@ -2752,6 +2842,7 @@ export function StudioStage({
                               <button
                                 type="button"
                                 onClick={() => {
+                                  audioCuePlayer.unlock();
                                   const effRefs = animEffectMap.get(matchedAnim) || [];
                                   const hasP = effRefs.some((r) => r.isSelfOrScreen);
                                   const hasI = !hasP && effRefs.length > 0;
@@ -2855,7 +2946,8 @@ export function StudioStage({
                           <button
                             type="button"
                             onClick={() => {
-                              const playUrl = resolveAssetFetchUrl(vid.url);
+                              audioCuePlayer.unlock();
+                              const playUrl = resolveMediaPlayUrl(vid.url);
                               if (!playUrl) return;
                               setStageMode('player');
                               setActiveVideoOverlay({

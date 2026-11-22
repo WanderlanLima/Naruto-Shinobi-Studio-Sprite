@@ -1784,6 +1784,17 @@ async function createServer() {
       // Also merge playable classic heroes from JotaGame tables (herois.json + RoleModel.json)
       // whose Spine .atlas + .json live directly in /acervo/asset/spine/ (not listed in spine-hd / spine-astc)
       const jotaTables = await loadJotaGameTables(activeOrigin, activeHtml);
+      if (jotaTables && jotaTables.fileSet.size > 0) {
+        // Remove secondary texture pages from spine-astc (e.g. jiuxinnaipifu2.webp, shuimenpifu2.webp)
+        // that have no .atlas of their own and are only extra pages of a multi-page Spine atlas
+        for (const [id, entry] of Array.from(ninjaMap.entries())) {
+          if (entry.sourceIndex !== 'spine-astc') continue;
+          const atlasRel = `acervo/asset/spine/${id}.atlas`;
+          if (!jotaTables.fileSet.has(atlasRel) && !jotaTables.fileByLower.has(atlasRel.toLowerCase())) {
+            ninjaMap.delete(id);
+          }
+        }
+      }
       const existingLowerIds = new Set(Array.from(ninjaMap.keys()).map((k) => k.toLowerCase()));
       if (jotaTables) {
         const { fileSet, herois, roleModels } = jotaTables;

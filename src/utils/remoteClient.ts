@@ -7,6 +7,7 @@ import type {
   NinjaPassiveInfo,
   NinjaSkillInfo,
   NinjaVideoClip,
+  NinjaVoiceClip,
   PassiveAuraDef,
   SpineSkeleton,
   SpineVideoEventRef,
@@ -37,9 +38,9 @@ const LEGACY_BROKEN_PROXIES = new Set([
 ]);
 
 const FALLBACK_TEXT_PROXIES = [
-  'https://api.codetabs.com/v1/proxy?quest=',
   'https://api.allorigins.win/raw?url=',
   'https://api.cors.lol/?url=',
+  'https://api.codetabs.com/v1/proxy?quest=',
 ];
 
 let backendStatus: 'unknown' | 'available' | 'static' = 'unknown';
@@ -71,9 +72,15 @@ interface StaticNinjaSkillsEntry {
   displayName?: string;
   skills?: Record<string, NinjaSkillInfo>;
   passives?: NinjaPassiveInfo[];
+  voices?: NinjaVoiceClip[];
+  videos?: NinjaVideoClip[];
+  videoUrlMap?: Record<string, string>;
 }
 
 interface StaticNinjaSkillsPack {
+  origin: string;
+  sons: Record<string, string>;
+  sonsLower: Map<string, string>;
   ninjas: Record<string, StaticNinjaSkillsEntry>;
   ninjasLower: Map<string, StaticNinjaSkillsEntry>;
 }
@@ -313,14 +320,27 @@ export async function loadStaticNinjaSkillsPack(): Promise<StaticNinjaSkillsPack
           return null;
         }
         const parsed = JSON.parse(await skillsFile.async('text')) as {
+          origin?: string;
+          sons?: Record<string, string>;
           ninjas?: Record<string, StaticNinjaSkillsEntry>;
         };
+        const origin =
+          typeof parsed?.origin === 'string' && parsed.origin
+            ? parsed.origin.replace(/\/+$/, '')
+            : 'https://naruto.jotagame.com';
+        const sons = parsed?.sons && typeof parsed.sons === 'object' ? parsed.sons : {};
+        const sonsLower = new Map<string, string>();
+        for (const [k, v] of Object.entries(sons)) {
+          if (typeof v === 'string' && v) {
+            sonsLower.set(k.toLowerCase(), v);
+          }
+        }
         const ninjas = parsed?.ninjas && typeof parsed.ninjas === 'object' ? parsed.ninjas : {};
         const ninjasLower = new Map<string, StaticNinjaSkillsEntry>();
         for (const [k, v] of Object.entries(ninjas)) {
           ninjasLower.set(k.toLowerCase(), v);
         }
-        return { ninjas, ninjasLower };
+        return { origin, sons, sonsLower, ninjas, ninjasLower };
       } catch {
         staticSkillsPackPromise = null;
         return null;
@@ -332,9 +352,33 @@ export async function loadStaticNinjaSkillsPack(): Promise<StaticNinjaSkillsPack
 
 function mergeStaticSkillsIntoProfile(
   profile: NinjaMediaProfile,
-  entry: StaticNinjaSkillsEntry | undefined
+  entry: StaticNinjaSkillsEntry | undefined,
+  skillsPack?: StaticNinjaSkillsPack | null
 ): NinjaMediaProfile {
-  if (!entry) return profile;
+  const originBase = profile.originBase || skillsPack?.origin || 'https://naruto.jotagame.com';
+
+  // Resolve any sound keys using the bundled sons.json path map
+  const mergedSoundUrlMap: Record<string, string> = { ...(profile.soundUrlMap || {}) };
+  if (skillsPack && Object.keys(skillsPack.sons).length > 0) {
+    for (const sKey of Object.keys(mergedSoundUrlMap)) {
+      const clean = sKey.trim().replace(/\.mp3$/i, '');
+      const mapped =
+        skillsPack.sons[clean] ||
+        skillsPack.sons[sKey] ||
+        skillsPack.sonsLower.get(clean.toLowerCase());
+      if (mapped) {
+        mergedSoundUrlMap[sKey] = `${originBase}/${mapped.replace(/^\/+/, '')}`;
+        mergedSoundUrlMap[clean] = `${originBase}/${mapped.replace(/^\/+/, '')}`;
+      }
+    }
+  }
+
+  if (!entry) {
+    return {
+      ...profile,
+      soundUrlMap: mergedSoundUrlMap,
+    };
+  }
 
   const mergedSkills: Record<string, NinjaSkillInfo> = { ...(profile.skills || {}) };
   if (entry.skills) {
@@ -373,12 +417,48 @@ function mergeStaticSkillsIntoProfile(
     }
   }
 
+  const mergedVoices: NinjaVoiceClip[] = [...(profile.voices || [])];
+  if (entry.voices && entry.voices.length > 0) {
+    const seenVoice = new Set(mergedVoices.map((v) => `${v.category}::${v.key}`.toLowerCase()));
+    for (const sv of entry.voices) {
+      const dedupeKey = `${sv.category}::${sv.key}`.toLowerCase();
+      if (!seenVoice.has(dedupeKey)) {
+        seenVoice.add(dedupeKey);
+        mergedVoices.push({ ...sv });
+      }
+      if (sv.key && sv.url && !mergedSoundUrlMap[sv.key]) {
+        mergedSoundUrlMap[sv.key] = sv.url;
+      }
+    }
+  }
+
+  const mergedVideoUrlMap: Record<string, string> = {
+    ...(entry.videoUrlMap || {}),
+    ...(profile.videoUrlMap || {}),
+  };
+  const mergedVideos: NinjaVideoClip[] = [...(profile.videos || [])];
+  if (entry.videos && entry.videos.length > 0) {
+    const seenVidUrl = new Set(mergedVideos.map((v) => v.url.toLowerCase()));
+    const seenVidKey = new Set(mergedVideos.map((v) => v.key.toLowerCase()));
+    for (const sv of entry.videos) {
+      if (seenVidUrl.has(sv.url.toLowerCase()) || seenVidKey.has(sv.key.toLowerCase())) continue;
+      seenVidUrl.add(sv.url.toLowerCase());
+      seenVidKey.add(sv.key.toLowerCase());
+      mergedVideos.push({ ...sv });
+      if (!mergedVideoUrlMap[sv.key]) mergedVideoUrlMap[sv.key] = sv.url;
+    }
+  }
+
   return {
     ...profile,
     heroCode: profile.heroCode || entry.heroCode,
     displayName: profile.displayName || entry.displayName,
     skills: mergedSkills,
     passives: mergedPassives,
+    voices: mergedVoices,
+    videos: mergedVideos,
+    soundUrlMap: mergedSoundUrlMap,
+    videoUrlMap: mergedVideoUrlMap,
   };
 }
 
@@ -558,6 +638,34 @@ export function resolveAssetFetchUrl(targetUrl: string): string {
   }
 
   return buildCorsRelayUrl(targetUrl, FALLBACK_TEXT_PROXIES[0]);
+}
+
+/**
+ * Resolves a playable URL for HTML5 <audio> and <video> elements.
+ * Unlike fetch()/canvas reads, cross-origin <audio>/<video> elements play directly
+ * from the origin server with native HTTP Range streaming (zero CORS proxy needed).
+ */
+export function resolveMediaPlayUrl(targetUrl: string): string {
+  if (!targetUrl) return '';
+  if (targetUrl.startsWith('blob:') || targetUrl.startsWith('data:')) {
+    return targetUrl;
+  }
+
+  if (isOfflineBackupActive()) {
+    const offlineUrl = resolveOfflineAssetUrlSync(targetUrl);
+    if (offlineUrl) return offlineUrl;
+    if (isStrictOfflineMode()) return '';
+  }
+
+  if (backendStatus !== 'static') {
+    return `/api/proxy?url=${encodeURIComponent(targetUrl)}`;
+  }
+
+  if (/\.(mp3|mp4|m4a|ogg|wav|webm)(\?|$)/i.test(targetUrl)) {
+    return targetUrl;
+  }
+
+  return resolveAssetFetchUrl(targetUrl);
 }
 
 export function getNinjaThumbUrl(atlasUrl: string, skeletonUrl: string): string | null {
@@ -1291,10 +1399,13 @@ export async function fetchNinjaMediaProfile(
     const skillsPack = await loadStaticNinjaSkillsPack();
     const staticEntry =
       skillsPack?.ninjas[ninja.id] || skillsPack?.ninjasLower.get(ninja.id.toLowerCase());
-    if (staticEntry) {
-      fallbackProfile = mergeStaticSkillsIntoProfile(fallbackProfile, staticEntry);
+    if (staticEntry || skillsPack) {
+      fallbackProfile = mergeStaticSkillsIntoProfile(fallbackProfile, staticEntry, skillsPack);
     }
-    return fallbackProfile;
+    return {
+      ...fallbackProfile,
+      videos: attachVideoAnimTiming(fallbackProfile.videos || []),
+    };
   })();
 
   if (mediaProfileCache.size >= 40) {

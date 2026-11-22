@@ -546,7 +546,7 @@ export function NinjaCatalog({
                 onChange={(e) => onSearchChange(e.target.value)}
                 placeholder="Buscar nome ou ID (ex: Tsunade, Naruto, 100301)..."
                 aria-label="Filtrar pacotes Spine por nome ou ID"
-                className="w-full rounded-lg border border-slate-800 bg-[#131A26] py-2 pl-9 pr-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
+                className="w-full rounded-lg border border-slate-800 bg-[#131A26] py-2 pl-9 pr-3 text-base sm:text-sm text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
               />
             </div>
 
@@ -556,7 +556,7 @@ export function NinjaCatalog({
                 onSortByChange(e.target.value as 'id' | 'name' | 'largest' | 'smallest')
               }
               aria-label="Ordenar pacotes"
-              className="w-full sm:w-auto rounded-lg border border-slate-800 bg-[#131A26] px-3 py-2 text-xs sm:text-sm text-slate-200 focus:border-orange-500 focus:outline-none cursor-pointer"
+              className="w-full sm:w-auto rounded-lg border border-slate-800 bg-[#131A26] px-3 py-2 text-base sm:text-sm text-slate-200 focus:border-orange-500 focus:outline-none cursor-pointer"
             >
               <option value="id">Ordenar: ID</option>
               <option value="name">Ordenar: Nome (A–Z)</option>

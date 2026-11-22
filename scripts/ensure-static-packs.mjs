@@ -566,7 +566,731 @@ async function fetchOriginManifest() {
   return { origin, man };
 }
 
-async function ensureBackupManifestPack(catalog, cachedManifest) {
+const KNOWN_VDFNO_VIDEOS = {
+  vdfno_100304: ['vdfno_MINGRENjlm'],
+  vdfno_100306: ['vdfno_ZUOZHU_xznh'],
+  vdfno_100307: ['vdfno_qilin'],
+  vdfno_100308: ['vdfno_5sskCP'],
+  vdfno_100320: ['vdfno_tengkongpao'],
+  vdfno_10032091: ['vdfno_tengkongpao'],
+  vdfno_10032092: ['vdfno_tengkongpao'],
+  vdfno_100349: ['vdfno_21001304'],
+  vdfno_100350: ['vdfno_fengyingCP'],
+  vdfno_100365: ['vdfno_3kksswlq'],
+  vdfno_100384: ['vdfno_wujizhuansheng'],
+  vdfno_100407: ['vdfno_Yongzhuanggangshou'],
+  vdfno_100409: ['vdfno_YUANFEIsgfj'],
+  vdfno_100423: ['vdfno_YOUyd_start'],
+  vdfno_100427: ['vdfno_shujiejianglin'],
+  vdfno_100432: ['vdfno_erdaidazhao'],
+  vdfno_100447: ['vdfno_Hongdouaoyi'],
+  vdfno_100467: ['vdfno_XIEdzh'],
+  vdfno_100473: ['vdfno_DDLc318f'],
+  vdfno_100503: ['vdfno_DAHE_shujiejianglin'],
+  vdfno_100511: ['vdfno_DAITUbanwdmx'],
+  vdfno_100518: ['vdfno_xiaonan_shizhizhiwu'],
+  vdfno_100529: ['vdfno_PEATDdbtx'],
+  vdfno_100534: ['vdfno_hanzo'],
+  vdfno_100536: ['vdfno_shuiyingCP'],
+  vdfno_100541: ['vdfno_TUYING'],
+  vdfno_100578: ['vdfno_maohuo'],
+  vdfno_100582: ['vdfno_SHICANGhuanggaifeimo'],
+  vdfno_100584: ['vdfno_LAOZI'],
+  vdfno_100590: ['vdfno_3utkhypm'],
+  vdfno_100613: ['vdfno_luosha'],
+  vdfno_100633: ['vdfno_TYLX'],
+  vdfno_100634: ['vdfno_yuzhiboban_aoyi'],
+  vdfno_100638: ['vdfno_zhishui2'],
+  vdfno_100646: ['vdfno_5nrtCP'],
+};
+
+const SPECIAL_HERO_VIDEO_ALIASES = {
+  jifengmingren: ['jfmingren_texie'],
+  mingrenjwckl: ['jiuweimingren_donghua'],
+  mingrensiwei: ['siweimingren_texie'],
+  didala: ['ddl_texie'],
+  didalapifu: ['ddl_texie'],
+  xcddl: ['ddl_texie'],
+  huituchangmen: ['changmen_aoyi'],
+  banzang: ['banzang_aoyi'],
+  sidaileiying: ['leiying_texie'],
+  sidaileiyingpifu: ['leiying_texie'],
+  sandaileiying: ['sandaileiyingtexie_left'],
+  qiandaipopo: ['qiandai_texie'],
+  qilabi: ['qilabi_texie', 'qilabi_texie2', 'qilabi_unskill'],
+  qilabiweishou: ['qlbwssp_left'],
+  qianshoufeijian1: ['qsfjsp_left'],
+  qianshouzhujian1: ['huituzhujiansp_left', 'huituzhujianpifusp_left'],
+  renzhankakaxi: ['pbkakaxi_texie', 'pbkakaxi2_texie_left'],
+  renzhankakaxipifu: ['pbkakaxi_texie', 'pbkakaxi2_texie_left'],
+  anbukakaxi: ['anbukakaxi_texie'],
+  xianrenzilaiye: ['xrzly_texie'],
+  xznhzuozhu: ['xznhsp'],
+  xznhzzpifu: ['xznhsp'],
+  yuanfeirizhan: ['yfrz_texie'],
+  yuanfeirizhan2: ['zdfyf_texie'],
+  huitusandai: ['huituyfrz_left'],
+  erwei: ['erweitexie1_left'],
+  you: ['you_texie', 'you_unskill'],
+  youtangzhuang: ['you_texie', 'you_unskill'],
+  youtangzhuangb: ['you_texie', 'you_unskill'],
+  baimianju: ['baimianju_texie', 'mianjunantexie'],
+  dyyjiaodu: ['jiaodu2_texie', 'jiaodu_texie'],
+  huitujiaodu: ['jiaodu_texie', 'jiaodu2_texie'],
+  jingmenkai: ['kai_texie'],
+  jingmenkaipifu: ['kai_texie'],
+  shuimen: ['shuimen_texie'],
+  shuimenpifu: ['shuimen_texie'],
+  shuimenvippifu: ['shuimen_texie'],
+  tiandaochaopifu: ['peien_texie'],
+  bhgspifu: ['bhgs_texie'],
+  bhgspt: ['bhgs_texie'],
+  bhgsptpifu: ['bhgs_texie'],
+  gangshouxinchun: ['gangshou_texie'],
+  guijiaopifu: ['guijiao_texie'],
+  guijiaomaozi: ['guijiao_texie'],
+  dayemumaozi: ['dayemu_texie'],
+  feiduanpifu: ['feiduan_texie'],
+  chuangshengfeiduan: ['feiduan_texie'],
+  xiaonanyonghzuang: ['xiaonan_texie'],
+  xianrenmingrenpifu: ['xianrenmingren_texie'],
+  zhaomeimingpifu: ['zhaomeiming_texie'],
+  zhaomeimingyongzhuang: ['zhaomeiming_texie'],
+  zilaiyepifu: ['zilaiye_texie'],
+  yuzhiboban: ['yuzhibobantexie'],
+  yuzhibobanpifu: ['yuzhibobantexie'],
+  woailuorjdzpifu: ['woailuorjdz_texie'],
+  sasuke: ['Sasuke_texie'],
+  shedou: ['xianrendou_texie'],
+  shedoupifu: ['xianrendou_texie'],
+  renzhanchutianpifu: ['jfchutian_texie'],
+  ningcirenzhanpifu: ['jfningci_texie'],
+};
+
+function classifySpinePackageKind(id) {
+  const lower = id.toLowerCase();
+  if (lower.startsWith('vdfno_')) return 'character';
+  if (
+    lower.includes('_effect') ||
+    lower.includes('_highteffect') ||
+    lower.includes('_ground') ||
+    lower.includes('_tx') ||
+    lower.includes('texiao') ||
+    lower.includes('huomiao') ||
+    lower.startsWith('efeito') ||
+    lower.startsWith('fx_') ||
+    lower.startsWith('ef_')
+  ) {
+    return 'effect';
+  }
+  return 'summon_skin';
+}
+
+function stripSkinSuffix(raw) {
+  return raw
+    .toLowerCase()
+    .replace(
+      /(?:vippifu|ptpifu|chaopifu|pifu|maozi|xinchun|yongzhuang|yonghzuang|tangzhuangb|tangzhuang|mianju)$/i,
+      ''
+    );
+}
+
+function resolveSoundUrlFromTables(origin, soundKey, sons, fileSet, soundFileByLower) {
+  const clean = String(soundKey || '').trim().replace(/\.mp3$/i, '');
+  if (!clean) return null;
+
+  const fromSons = sons?.[clean] || sons?.[soundKey];
+  if (typeof fromSons === 'string' && fromSons.trim()) {
+    const rel = fromSons.trim().replace(/^\/+/, '');
+    if (!fileSet.size || fileSet.has(rel)) {
+      return `${origin}/${rel}`;
+    }
+    const lowerMatch = soundFileByLower.get(rel.toLowerCase());
+    if (lowerMatch) return `${origin}/${lowerMatch}`;
+    return `${origin}/${rel}`;
+  }
+
+  const candidates = [];
+  if (/^nos_/i.test(clean)) {
+    candidates.push(`acervo/som/nos/${clean.slice(4)}.mp3`);
+  }
+  if (/^die_/i.test(clean)) {
+    candidates.push(`acervo/som/Die/${clean}.mp3`);
+  }
+  candidates.push(
+    `acervo/som/${clean}.mp3`,
+    `acervo/som/lines/${clean}.mp3`,
+    `acervo/som/AFaoyi/${clean}.mp3`
+  );
+  if (fileSet.size > 0) {
+    for (const c of candidates) {
+      if (fileSet.has(c)) return `${origin}/${c}`;
+      const lowerMatch = soundFileByLower.get(c.toLowerCase());
+      if (lowerMatch) return `${origin}/${lowerMatch}`;
+    }
+  }
+  return `${origin}/${candidates[0]}`;
+}
+
+function resolveAllHeroVideosFromTables(tables, opts) {
+  const { origin, heroVideoByLower, recruitVideoByLower } = tables;
+  const videos = [];
+  const videoUrlMap = {};
+  const seenUrls = new Set();
+
+  const pushVideo = (key, relPath, kind, label) => {
+    const fullUrl = `${origin}/${relPath}`;
+    const canonicalBase = relPath
+      .replace(/^acervo\/video\/(?:hero|recruit)\//i, '')
+      .replace(/\.mp4$/i, '');
+    videoUrlMap[key] = fullUrl;
+    videoUrlMap[canonicalBase] = fullUrl;
+    if (seenUrls.has(fullUrl)) return;
+    seenUrls.add(fullUrl);
+    videos.push({
+      key: canonicalBase,
+      label:
+        label ||
+        (kind === 'recruit'
+          ? 'Vídeo de Recrutamento / Apresentação'
+          : `Vídeo Ultimate (${canonicalBase})`),
+      kind,
+      url: fullUrl,
+    });
+  };
+
+  for (const vidSource of opts.requestedVideos || []) {
+    const clean = String(vidSource || '').trim().replace(/\.mp4$/i, '');
+    if (!clean) continue;
+    const low = clean.toLowerCase();
+    const rel =
+      heroVideoByLower.get(low) ||
+      heroVideoByLower.get(`${low}_left`) ||
+      heroVideoByLower.get(`${low}_right`) ||
+      recruitVideoByLower.get(low);
+    if (rel) {
+      pushVideo(vidSource, rel, rel.includes('/recruit/') ? 'recruit' : 'ultimate');
+    }
+  }
+
+  const idLow = String(opts.ninjaId || '').toLowerCase();
+  const vdfKeys = KNOWN_VDFNO_VIDEOS[idLow];
+  if (vdfKeys) {
+    for (const k of vdfKeys) {
+      const rel = heroVideoByLower.get(k.toLowerCase());
+      if (rel) pushVideo(k, rel, 'ultimate');
+    }
+  }
+
+  const candidateTags = new Set();
+  const addTag = (val) => {
+    if (typeof val !== 'string') return;
+    const t = val.trim();
+    if (!t || t.toLowerCase().startsWith('vdfno_')) return;
+    const tl = t.toLowerCase();
+    candidateTags.add(tl);
+    const stripped = stripSkinSuffix(tl);
+    if (stripped && stripped.length >= 3) candidateTags.add(stripped);
+  };
+
+  const modelo = opts.heroObj?.modelo;
+  const baseModelo = opts.baseHeroObj?.modelo;
+
+  if (!idLow.startsWith('vdfno_')) {
+    addTag(opts.ninjaId);
+    addTag(opts.rmObj?.Tag);
+    addTag(opts.rmObj?.Animation);
+    addTag(opts.baseRmObj?.Tag);
+    addTag(opts.baseRmObj?.Animation);
+    addTag(modelo?.spine);
+    addTag(modelo?.tag);
+    addTag(baseModelo?.spine);
+    addTag(baseModelo?.tag);
+  }
+
+  for (const feat of opts.requestedFeatures || []) {
+    const fl = String(feat || '').trim().toLowerCase();
+    if (!fl || fl === 'tongyongtexie') continue;
+    const stem = fl.replace(/(?:pifu)?texie\d*$/i, '').replace(/pifu$/i, '');
+    if (stem && stem.length >= 3) {
+      candidateTags.add(stem);
+      const stripped = stripSkinSuffix(stem);
+      if (stripped && stripped.length >= 3) candidateTags.add(stripped);
+    }
+  }
+
+  for (const tag of candidateTags) {
+    const aliases = SPECIAL_HERO_VIDEO_ALIASES[tag];
+    if (aliases) {
+      for (const alias of aliases) {
+        const rel = heroVideoByLower.get(alias.toLowerCase());
+        if (rel) pushVideo(alias, rel, 'ultimate');
+      }
+    }
+    const probeBases = [
+      `${tag}_texie`,
+      `${tag}_aoyi`,
+      `${tag}_unskill`,
+      `${tag}_donghua`,
+      `${tag}texie`,
+      `${tag}_texie_left`,
+      `${tag}texie_left`,
+      `${tag}texie1_left`,
+    ];
+    for (const p of probeBases) {
+      const rel = heroVideoByLower.get(p);
+      if (rel) pushVideo(p, rel, 'ultimate');
+    }
+  }
+
+  const isVdfno = idLow.startsWith('vdfno_');
+  const rmMatchesVdfno =
+    !isVdfno ||
+    String(opts.rmObj?.Tag || '').toLowerCase() === idLow ||
+    String(opts.rmObj?.Animation || '').toLowerCase() === idLow;
+  const recruitKeys = [
+    rmMatchesVdfno ? opts.rmObj?.HeroVideo : undefined,
+    !isVdfno ? opts.baseRmObj?.HeroVideo : undefined,
+    modelo?.video,
+    !isVdfno ? baseModelo?.video : undefined,
+  ];
+  for (const rk of recruitKeys) {
+    if (typeof rk !== 'string' || !rk.trim()) continue;
+    const clean = rk.trim().replace(/\.mp4$/i, '');
+    const rel =
+      recruitVideoByLower.get(clean.toLowerCase()) || heroVideoByLower.get(clean.toLowerCase());
+    if (rel) {
+      pushVideo(clean, rel, 'recruit', 'Vídeo de Recrutamento / Apresentação');
+    }
+  }
+
+  return { videos, videoUrlMap };
+}
+
+async function fetchOriginManifestAndTables() {
+  const manifestBundle = await fetchOriginManifest();
+  if (!manifestBundle) return null;
+  const { origin, man } = manifestBundle;
+  const v = man.dadosVersao || '0';
+
+  const fileSet = new Set();
+  const fileByLower = new Map();
+  const soundFileByLower = new Map();
+  const heroVideoByLower = new Map();
+  const recruitVideoByLower = new Map();
+  const fileSizeByPath = new Map();
+
+  for (const entry of Object.values(man.arquivos || {})) {
+    const rel = entry?.url;
+    if (!rel) continue;
+    fileSet.add(rel);
+    fileSizeByPath.set(rel, Number(entry.bytes || 0));
+    const low = rel.toLowerCase();
+    fileByLower.set(low, rel);
+    if (low.startsWith('acervo/som/') && low.endsWith('.mp3')) {
+      soundFileByLower.set(low, rel);
+    }
+    if (low.startsWith('acervo/video/hero/') && low.endsWith('.mp4')) {
+      const base = low.slice('acervo/video/hero/'.length, -4);
+      heroVideoByLower.set(base, rel);
+    } else if (low.startsWith('acervo/video/recruit/') && low.endsWith('.mp4')) {
+      const base = low.slice('acervo/video/recruit/'.length, -4);
+      recruitVideoByLower.set(base, rel);
+    }
+  }
+
+  const master = Buffer.from(JOTA_DD.map((val, i) => val ^ JOTA_CD[i]));
+  const nomeKey = crypto.createHmac('sha256', master).update('nome').digest();
+  const dadosKey = crypto.createHmac('sha256', master).update('dados').digest();
+
+  const fetchDados = async (pathStr) => {
+    const slug = crypto
+      .createHmac('sha256', nomeKey)
+      .update(pathStr)
+      .digest()
+      .subarray(0, 16)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    const resp = await fetch(`${origin}/d/${slug}?v=${v}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; ShinobiSpriteStudioBuild/1.0)',
+        Referer: `${origin}/`,
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${pathStr}`);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const decipher = crypto.createDecipheriv('aes-256-gcm', dadosKey, buf.subarray(0, 12));
+    decipher.setAuthTag(buf.subarray(buf.length - 16));
+    const dec = Buffer.concat([
+      decipher.update(buf.subarray(12, buf.length - 16)),
+      decipher.final(),
+    ]);
+    return JSON.parse(zlib.gunzipSync(dec).toString('utf8'));
+  };
+
+  let herois = {};
+  let pt = {};
+  let roleModels = {};
+  let skins = {};
+  let skills = {};
+  let sons = {};
+  try {
+    [herois, pt, roleModels, skins, skills, sons] = await Promise.all([
+      fetchDados('dados/jogo/herois.json'),
+      fetchDados('dados/jogo/pt.json'),
+      fetchDados('dados/tabelas/json/RoleModel.json'),
+      fetchDados('dados/tabelas/json/SkinConfig.json').catch(() => ({})),
+      fetchDados('dados/jogo/skills.json'),
+      fetchDados('dados/jogo/sons.json').catch(() => ({})),
+    ]);
+  } catch (err) {
+    console.warn('[ensure-static-packs] Failed to decrypt origin tables:', err?.message || err);
+    return null;
+  }
+
+  return {
+    origin,
+    man,
+    fileSet,
+    fileByLower,
+    soundFileByLower,
+    heroVideoByLower,
+    recruitVideoByLower,
+    fileSizeByPath,
+    herois,
+    pt,
+    roleModels,
+    skins,
+    skills,
+    sons,
+  };
+}
+
+async function syncStaticCatalogFromOrigin(existingCatalog, tablesBundle) {
+  const origin = 'https://naruto.jotagame.com';
+  const defaultSpineBase = `${origin}/acervo/asset/spine`;
+
+  const [hdText, astcText] = await Promise.all([
+    fetchWithRetry(`${origin}/acervo/asset/spine-hd/indice.json`, 2),
+    fetchWithRetry(`${origin}/acervo/asset/spine-astc/lista.json`, 2),
+  ]);
+
+  if (!hdText || !astcText) {
+    console.warn('[ensure-static-packs] Could not fetch live spine-hd/spine-astc indexes; keeping existing catalog.');
+    return existingCatalog;
+  }
+
+  let hdData = {};
+  let astcData = {};
+  try {
+    hdData = JSON.parse(hdText);
+    astcData = JSON.parse(astcText);
+  } catch {
+    console.warn('[ensure-static-packs] Invalid JSON in live spine indexes; keeping existing catalog.');
+    return existingCatalog;
+  }
+
+  const tables = tablesBundle || (await fetchOriginManifestAndTables());
+  const ninjasRaw = [];
+  const sheets = [];
+
+  for (const [key, obj] of Object.entries(hdData || {})) {
+    if (!obj || typeof obj !== 'object') continue;
+    if (typeof obj.w === 'number' && typeof obj.h === 'number' && typeof obj.bytes !== 'number' && !key.includes('.')) {
+      const codeMatch = key.match(/(\d+)$/);
+      ninjasRaw.push({
+        id: key,
+        code: codeMatch ? codeMatch[1] : key,
+        width: Math.round(obj.w),
+        height: Math.round(obj.h),
+        offsetX: typeof obj.x === 'number' ? Number(obj.x.toFixed(1)) : 0,
+        offsetY: typeof obj.y === 'number' ? Number(obj.y.toFixed(1)) : 0,
+        atlasUrl: `${defaultSpineBase}/${key}.atlas`,
+        skeletonUrl: `${defaultSpineBase}/${key}.json`,
+        kind: classifySpinePackageKind(key),
+        sourceIndex: 'spine-hd',
+      });
+    }
+  }
+
+  for (const [key, obj] of Object.entries(astcData || {})) {
+    if (!obj || typeof obj !== 'object') continue;
+    if (/\.(webp|png|jpe?g)$/i.test(key) && typeof obj.w === 'number' && typeof obj.h === 'number') {
+      const isNoSheet = key.toLowerCase().startsWith('no_');
+      sheets.push({
+        name: key,
+        url: `${defaultSpineBase}/${key}`,
+        width: obj.w,
+        height: obj.h,
+        bytes: typeof obj.bytes === 'number' ? obj.bytes : undefined,
+        sheetKind: isNoSheet ? 'astc_sheet' : 'spine_sheet',
+      });
+      if (!isNoSheet && !key.toLowerCase().startsWith('vdfno_')) {
+        const baseId = key.replace(/\.(webp|png|jpe?g)$/i, '');
+        const codeMatch = baseId.match(/(\d+)$/);
+        ninjasRaw.push({
+          id: baseId,
+          code: codeMatch ? codeMatch[1] : baseId,
+          width: Math.round(obj.w),
+          height: Math.round(obj.h),
+          offsetX: 0,
+          offsetY: 0,
+          atlasUrl: `${defaultSpineBase}/${baseId}.atlas`,
+          skeletonUrl: `${defaultSpineBase}/${baseId}.json`,
+          kind: classifySpinePackageKind(baseId),
+          sourceIndex: 'spine-astc',
+        });
+      }
+    }
+  }
+
+  const ninjaMap = new Map();
+  for (const n of ninjasRaw) {
+    if (
+      n.sourceIndex === 'spine-astc' &&
+      tables &&
+      tables.fileSet.size > 0
+    ) {
+      const atlasRel = `acervo/asset/spine/${n.id}.atlas`;
+      if (!tables.fileSet.has(atlasRel) && !tables.fileByLower.has(atlasRel.toLowerCase())) {
+        continue;
+      }
+    }
+    const prev = ninjaMap.get(n.id);
+    if (!prev || (prev.sourceIndex !== 'spine-hd' && n.sourceIndex === 'spine-hd')) {
+      ninjaMap.set(n.id, n);
+    }
+  }
+
+  // Preserve any existing code-discovered special Spine entries (like huomiao)
+  const existingById = new Map((existingCatalog?.ninjas || []).map((n) => [n.id, n]));
+  const existingLowerIds = new Set(Array.from(ninjaMap.keys()).map((k) => k.toLowerCase()));
+  for (const prev of existingCatalog?.ninjas || []) {
+    if (prev.sourceIndex === 'code' && !existingLowerIds.has(String(prev.id).toLowerCase())) {
+      existingLowerIds.add(String(prev.id).toLowerCase());
+      ninjaMap.set(prev.id, {
+        id: prev.id,
+        code: prev.code,
+        width: prev.width,
+        height: prev.height,
+        offsetX: prev.offsetX || 0,
+        offsetY: prev.offsetY || 0,
+        atlasUrl: prev.atlasUrl,
+        skeletonUrl: prev.skeletonUrl,
+        kind: prev.kind,
+        sourceIndex: 'code',
+      });
+    }
+  }
+
+  // Merge playable classic heroes from herois.json + RoleModel.json (exact parity with server.ts)
+  if (tables) {
+    const { fileSet, herois, roleModels } = tables;
+    const maybeAddPlayableSpine = (spineId, codeVal, w, h) => {
+      const cleanId = String(spineId || '').trim();
+      if (!cleanId) return;
+      const low = cleanId.toLowerCase();
+      if (existingLowerIds.has(low)) return;
+      if (
+        !fileSet.has(`acervo/asset/spine/${cleanId}.atlas`) ||
+        !fileSet.has(`acervo/asset/spine/${cleanId}.json`)
+      ) {
+        return;
+      }
+      existingLowerIds.add(low);
+      ninjaMap.set(cleanId, {
+        id: cleanId,
+        code: codeVal || cleanId,
+        width: Math.max(64, Math.round(w || 180)),
+        height: Math.max(64, Math.round(h || 180)),
+        offsetX: 0,
+        offsetY: 0,
+        atlasUrl: `${defaultSpineBase}/${cleanId}.atlas`,
+        skeletonUrl: `${defaultSpineBase}/${cleanId}.json`,
+        kind: 'character',
+        sourceIndex: 'code',
+      });
+    };
+
+    for (const [heroCode, hObj] of Object.entries(herois || {})) {
+      if (!hObj || typeof hObj !== 'object') continue;
+      const modelo = hObj.modelo;
+      const sp = typeof modelo?.spine === 'string' ? modelo.spine : '';
+      if (!sp) continue;
+      maybeAddPlayableSpine(sp, heroCode, Number(modelo?.largura) || 180, Number(modelo?.altura) || 180);
+    }
+
+    for (const [rmCode, rmObj] of Object.entries(roleModels || {})) {
+      if (!rmObj || typeof rmObj !== 'object') continue;
+      const sp =
+        (typeof rmObj.Animation === 'string' && rmObj.Animation) ||
+        (typeof rmObj.Tag === 'string' && rmObj.Tag) ||
+        '';
+      if (!sp) continue;
+      const numId = Number(rmObj.Id ?? rmCode);
+      if ((Number.isFinite(numId) && numId >= 100000 && numId < 200000) || Boolean(rmObj.HeroVideo)) {
+        maybeAddPlayableSpine(sp, String(rmObj.Id ?? rmCode), Number(rmObj.Width) || 180, Number(rmObj.Height) || 180);
+      }
+    }
+  }
+
+  const uniqueNinjasRaw = Array.from(ninjaMap.values()).sort((a, b) =>
+    a.id.localeCompare(b.id, undefined, { numeric: true })
+  );
+
+  let finalNinjas = uniqueNinjasRaw;
+  if (tables) {
+    const { fileSet, herois, pt, roleModels, skins } = tables;
+    const resolvePt = (link) => {
+      if (!link) return undefined;
+      const key = String(link).replace(/^Translate\.Id:/, '');
+      const val = pt[key];
+      if (!val) return undefined;
+      const resolved = Array.isArray(val) ? String(val[0] || '') : String(val);
+      return resolved.trim() || undefined;
+    };
+
+    const byTag = new Map();
+    for (const rm of Object.values(roleModels || {})) {
+      if (!rm || typeof rm !== 'object') continue;
+      for (const k of [rm.Tag, rm.Animation, rm.SpineAnim]) {
+        if (typeof k === 'string' && k && !byTag.has(k.toLowerCase())) {
+          byTag.set(k.toLowerCase(), rm);
+        }
+      }
+    }
+
+    const skinByModel = new Map();
+    for (const sk of Object.values(skins || {})) {
+      if (sk && typeof sk === 'object' && sk.roleModel != null) {
+        skinByModel.set(String(sk.roleModel), sk);
+      }
+    }
+
+    const pickExistingAsset = (candidates) => {
+      for (const rel of candidates) {
+        if (typeof rel !== 'string' || !rel) continue;
+        const clean = rel.replace(/^\/+/, '');
+        const ptBase = clean.startsWith('acervo/') ? clean : `acervo/language/pt/${clean}`;
+        const ptWebp = ptBase.replace(/\.png$/i, '.webp');
+        if (fileSet.has(ptWebp)) return `${origin}/${ptWebp}`;
+        if (fileSet.has(ptBase)) return `${origin}/${ptBase}`;
+      }
+      return undefined;
+    };
+
+    finalNinjas = uniqueNinjasRaw.map((n) => {
+      const prev = existingById.get(n.id);
+      const idLow = n.id.toLowerCase();
+      const code6 = n.code.length === 8 && n.code.startsWith('100') ? n.code.slice(0, 6) : n.code;
+      const rm = byTag.get(idLow) || roleModels[n.code] || roleModels[code6];
+      const modelCode = rm?.model != null ? String(rm.model) : code6;
+
+      let name =
+        (rm && resolvePt(rm.__link_name)) ||
+        (rm?.model != null
+          ? resolvePt(roleModels[String(rm.model)]?.__link_name) || resolvePt(`HeroBase_${rm.model}_name`)
+          : undefined) ||
+        resolvePt(herois[n.code]?.__link_name) ||
+        resolvePt(`HeroBase_${n.code}_name`) ||
+        resolvePt(`HeroBase_${code6}_name`);
+
+      const sk = skinByModel.get(String(rm?.Id ?? n.code));
+      if (sk) {
+        const skName = resolvePt(sk.__link_name);
+        if (skName && name && !name.includes(skName)) {
+          name = `${name} [${skName}]`;
+        } else if (skName && !name) {
+          name = skName;
+        }
+      }
+
+      const nameArtUrl = pickExistingAsset([
+        rm?.NamePic,
+        `asset/heros/${n.code}/namepic_${n.code}.png`,
+        `asset/heros/${modelCode}/namepic_${modelCode}.png`,
+        rm?.NewnamePic,
+        `asset/heros/Newname/newnamepic_${n.code}.png`,
+        `asset/heros/Newname/newnamepic_${modelCode}.png`,
+      ]);
+
+      let hasVideo = false;
+      if (n.kind !== 'effect') {
+        const baseModelKey = rm?.model != null ? String(rm.model) : undefined;
+        const baseRmObj = baseModelKey ? roleModels[baseModelKey] : undefined;
+        const heroObj =
+          herois[n.code] || herois[code6] || (baseModelKey ? herois[baseModelKey] : undefined);
+        const baseHeroObj = baseModelKey ? herois[baseModelKey] : undefined;
+        const resolvedVids = resolveAllHeroVideosFromTables(tables, {
+          ninjaId: n.id,
+          code: n.code,
+          rmObj: rm,
+          baseRmObj,
+          heroObj,
+          baseHeroObj,
+        });
+        hasVideo = resolvedVids.videos.length > 0;
+      }
+
+      const finalName = name || prev?.name;
+      const finalArt = nameArtUrl || prev?.nameArtUrl;
+      return {
+        ...n,
+        ...(finalName ? { name: finalName } : {}),
+        ...(finalArt ? { nameArtUrl: finalArt } : {}),
+        ...(hasVideo ? { hasVideo: true } : {}),
+      };
+    });
+  }
+
+  const sheetMap = new Map();
+  for (const s of sheets) sheetMap.set(s.name, s);
+  const uniqueSheets = Array.from(sheetMap.values()).sort((a, b) =>
+    a.name.localeCompare(b.name, undefined, { numeric: true })
+  );
+
+  const existingAssets = Array.isArray(existingCatalog?.assets) ? existingCatalog.assets : [];
+  const nextCatalog = {
+    sourceUrl: existingCatalog?.sourceUrl || `${origin}/`,
+    resolvedGameUrl: existingCatalog?.resolvedGameUrl || `${origin}/jogar?app=1`,
+    gameTitle: existingCatalog?.gameTitle || 'Shinobi: Destino dos Hokages',
+    ninjas: finalNinjas,
+    sheets: uniqueSheets,
+    assets: existingAssets,
+    stats: {
+      scannedScripts: existingCatalog?.stats?.scannedScripts || 0,
+      discoveredAssets: existingAssets.length,
+      totalNinjas: finalNinjas.length,
+      totalSheets: uniqueSheets.length,
+      elapsedMs: existingCatalog?.stats?.elapsedMs || 0,
+    },
+  };
+
+  const prevCount = existingCatalog?.ninjas?.length || 0;
+  const prevIds = (existingCatalog?.ninjas || []).map((n) => n.id).join(',');
+  const nextIds = finalNinjas.map((n) => n.id).join(',');
+  const prevSheetCount = existingCatalog?.sheets?.length || 0;
+
+  if (prevIds !== nextIds || prevSheetCount !== uniqueSheets.length) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(CATALOG_PATH, JSON.stringify(nextCatalog));
+    console.log(
+      `[ensure-static-packs] Synced public/data/naruto-catalog.json: ${prevCount} -> ${finalNinjas.length} Spine packs, ${prevSheetCount} -> ${uniqueSheets.length} sheets.`
+    );
+  } else {
+    console.log(
+      `[ensure-static-packs] Catalog up-to-date: ${finalNinjas.length} Spine packs, ${uniqueSheets.length} sheets.`
+    );
+  }
+
+  return { catalog: nextCatalog, tables };
+}
+
+async function ensureBackupManifestPack(catalog, cachedTables) {
+  const catalogNinjaCount = Array.isArray(catalog.ninjas) ? catalog.ninjas.length : 0;
   const existing = await tryLoadZip(BACKUP_MANIFEST_PACK_PATH);
   if (existing && existing.file('backup-manifest.json')) {
     try {
@@ -574,13 +1298,14 @@ async function ensureBackupManifestPack(catalog, cachedManifest) {
       if (
         parsed &&
         parsed.skillIconsIncluded === true &&
+        parsed.catalogNinjaCount === catalogNinjaCount &&
         Array.isArray(parsed.spriteFiles) &&
         parsed.spriteFiles.length > 0
       ) {
         console.log(
-          `[ensure-static-packs] Backup manifest OK (sprites=${parsed.spriteFiles.length}, particles=${parsed.particleFiles?.length || 0}, videos=${parsed.videoFiles?.length || 0}, audios=${parsed.audioFiles?.length || 0}, assets=${parsed.assetFiles?.length || 0}).`
+          `[ensure-static-packs] Backup manifest OK (ninjas=${catalogNinjaCount}, sprites=${parsed.spriteFiles.length}, particles=${parsed.particleFiles?.length || 0}, videos=${parsed.videoFiles?.length || 0}, audios=${parsed.audioFiles?.length || 0}, assets=${parsed.assetFiles?.length || 0}).`
         );
-        return cachedManifest;
+        return cachedTables;
       }
     } catch {
       // rebuild below
@@ -588,21 +1313,12 @@ async function ensureBackupManifestPack(catalog, cachedManifest) {
   }
 
   console.log('[ensure-static-packs] Building public/data/backup-manifest.zip from origin...');
-  const manifestBundle = cachedManifest || (await fetchOriginManifest());
-  if (!manifestBundle) {
+  const tables = cachedTables || (await fetchOriginManifestAndTables());
+  if (!tables) {
     console.warn('[ensure-static-packs] Could not fetch origin manifest for backup-manifest.zip; skipping.');
-    return cachedManifest;
+    return cachedTables;
   }
-  const { origin, man } = manifestBundle;
-
-  const fileSet = new Set();
-  const fileSizeByPath = new Map();
-  for (const entry of Object.values(man.arquivos || {})) {
-    const rel = entry?.url;
-    if (!rel) continue;
-    fileSet.add(rel);
-    fileSizeByPath.set(rel, Number(entry.bytes || 0));
-  }
+  const { origin, fileSet, fileSizeByPath } = tables;
 
   const baseSet = new Set();
   const ninjas = Array.isArray(catalog.ninjas) ? catalog.ninjas : [];
@@ -683,6 +1399,7 @@ async function ensureBackupManifestPack(catalog, cachedManifest) {
   const manifestPayload = {
     origin,
     generatedAt: new Date().toISOString(),
+    catalogNinjaCount,
     skillIconsIncluded: true,
     baseFiles: toSizedPairs(baseSet),
     videoFiles: toSizedPairs(videoFiles),
@@ -704,88 +1421,80 @@ async function ensureBackupManifestPack(catalog, cachedManifest) {
   console.log(
     `[ensure-static-packs] Backup manifest written: backup-manifest.zip (${(buf.length / 1024).toFixed(1)} KB, base=${manifestPayload.baseFiles.length}, sprites=${manifestPayload.spriteFiles.length}, particles=${manifestPayload.particleFiles.length}, videos=${manifestPayload.videoFiles.length}, audios=${manifestPayload.audioFiles.length}, assets=${manifestPayload.assetFiles.length}).`
   );
-  return manifestBundle;
+  return tables;
 }
 
-async function ensureNinjaSkillsPack(catalog, cachedManifest) {
+async function ensureNinjaSkillsPack(catalog, mainSkelZips, cachedTables) {
+  const catalogNinjaCount = Array.isArray(catalog.ninjas) ? catalog.ninjas.length : 0;
   const existing = await tryLoadZip(NINJA_SKILLS_PACK_PATH);
   if (existing && existing.file('ninja-skills.json')) {
     try {
       const parsed = JSON.parse(await existing.file('ninja-skills.json').async('text'));
       const count = parsed?.ninjas ? Object.keys(parsed.ninjas).length : 0;
-      if (parsed?.version === 1 && count > 0) {
-        console.log(`[ensure-static-packs] Ninja skills pack OK (${count} ninjas with skill icons).`);
-        return cachedManifest;
+      if (
+        parsed?.version === 2 &&
+        parsed?.catalogNinjaCount === catalogNinjaCount &&
+        count > 0 &&
+        parsed?.sons &&
+        typeof parsed.sons === 'object'
+      ) {
+        console.log(
+          `[ensure-static-packs] Ninja media/skills pack v2 OK (${count} ninjas, ${Object.keys(parsed.sons).length} sound mappings).`
+        );
+        return cachedTables;
       }
     } catch {
       // rebuild below
     }
   }
 
-  console.log('[ensure-static-packs] Building public/data/ninja-skills-pack.zip from origin tables...');
-  const manifestBundle = cachedManifest || (await fetchOriginManifest());
-  if (!manifestBundle) {
-    console.warn('[ensure-static-packs] Could not fetch origin manifest for ninja-skills-pack.zip; skipping.');
-    return cachedManifest;
+  console.log('[ensure-static-packs] Building public/data/ninja-skills-pack.zip (v2: skills, icons, voices, videos, sons)...');
+  const tables = cachedTables || (await fetchOriginManifestAndTables());
+  if (!tables) {
+    console.warn('[ensure-static-packs] Could not fetch origin tables for ninja-skills-pack.zip; skipping.');
+    return cachedTables;
   }
-  const { origin, man } = manifestBundle;
-  const v = man.dadosVersao || '0';
+  const { origin, fileSet, fileByLower, soundFileByLower, herois, pt, roleModels, skills, sons } = tables;
 
-  const fileSet = new Set();
-  const fileByLower = new Map();
-  for (const entry of Object.values(man.arquivos || {})) {
-    const rel = entry?.url;
-    if (!rel) continue;
-    fileSet.add(rel);
-    fileByLower.set(rel.toLowerCase(), rel);
-  }
-
-  const master = Buffer.from(JOTA_DD.map((val, i) => val ^ JOTA_CD[i]));
-  const nomeKey = crypto.createHmac('sha256', master).update('nome').digest();
-  const dadosKey = crypto.createHmac('sha256', master).update('dados').digest();
-
-  const fetchDados = async (pathStr) => {
-    const slug = crypto
-      .createHmac('sha256', nomeKey)
-      .update(pathStr)
-      .digest()
-      .subarray(0, 16)
-      .toString('base64')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
-    const resp = await fetch(`${origin}/d/${slug}?v=${v}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; ShinobiSpriteStudioBuild/1.0)',
-        Referer: `${origin}/`,
-      },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${pathStr}`);
-    const buf = Buffer.from(await resp.arrayBuffer());
-    const decipher = crypto.createDecipheriv('aes-256-gcm', dadosKey, buf.subarray(0, 12));
-    decipher.setAuthTag(buf.subarray(buf.length - 16));
-    const dec = Buffer.concat([
-      decipher.update(buf.subarray(12, buf.length - 16)),
-      decipher.final(),
-    ]);
-    return JSON.parse(zlib.gunzipSync(dec).toString('utf8'));
-  };
-
-  let herois;
-  let pt;
-  let roleModels;
-  let skills;
-  try {
-    [herois, pt, roleModels, skills] = await Promise.all([
-      fetchDados('dados/jogo/herois.json'),
-      fetchDados('dados/jogo/pt.json'),
-      fetchDados('dados/tabelas/json/RoleModel.json'),
-      fetchDados('dados/jogo/skills.json'),
-    ]);
-  } catch (err) {
-    console.warn('[ensure-static-packs] Failed to decrypt game tables for ninja-skills-pack.zip:', err?.message || err);
-    return manifestBundle;
+  // Scan packed skeletons for {PLAYVEDIO:...} and {SHOWFEATURE:...} refs per ninja
+  const skelVideoRefsByLower = new Map();
+  const skelFeatureRefsByLower = new Map();
+  for (const skelZip of mainSkelZips || []) {
+    for (const [name, entry] of Object.entries(skelZip.files)) {
+      if (entry.dir || !name.endsWith('.json')) continue;
+      const ninjaIdLow = name.slice(0, -'.json'.length).toLowerCase();
+      let skel;
+      try {
+        skel = JSON.parse(await entry.async('text'));
+      } catch {
+        continue;
+      }
+      const vids = new Set();
+      const feats = new Set();
+      for (const anim of Object.values(skel?.animations || {})) {
+        for (const ev of anim?.events || []) {
+          if (!ev?.string) continue;
+          for (const m of ev.string.matchAll(/\{([A-Za-z0-9_]+):([^}]+)\}/g)) {
+            const cmd = m[1].toUpperCase();
+            const body = m[2];
+            if (cmd === 'PLAYVEDIO' || cmd === 'PLAYVIDEO') {
+              const sm = body.match(/source\s*=\s*["']([^"']+)["']/i);
+              if (sm?.[1]) vids.add(sm[1].trim());
+            } else if (cmd === 'SHOWFEATURE') {
+              const fm = body.match(/file\s*=\s*["']([^"']+)["']/i);
+              if (fm?.[1]) {
+                for (const part of fm[1].split(',')) {
+                  const p = part.trim();
+                  if (p) feats.add(p);
+                }
+              }
+            }
+          }
+        }
+      }
+      if (vids.size > 0) skelVideoRefsByLower.set(ninjaIdLow, Array.from(vids));
+      if (feats.size > 0) skelFeatureRefsByLower.set(ninjaIdLow, Array.from(feats));
+    }
   }
 
   const resolvePt = (val) => {
@@ -854,6 +1563,8 @@ async function ensureNinjaSkillsPack(catalog, cachedManifest) {
   const ninjasOut = {};
   let totalSkillsMapped = 0;
   let totalIconsMapped = 0;
+  let totalVoicesMapped = 0;
+  let totalVideosMapped = 0;
   const ninjas = Array.isArray(catalog.ninjas) ? catalog.ninjas : [];
 
   for (const ninja of ninjas) {
@@ -862,6 +1573,7 @@ async function ensureNinjaSkillsPack(catalog, cachedManifest) {
     const code6 = code.length === 8 && code.startsWith('100') ? code.slice(0, 6) : code;
 
     const rmObj = rmByTagOrAnim.get(idLow) || roleModels?.[code] || roleModels?.[code6];
+    const baseRmObj = rmObj?.model != null ? roleModels?.[String(rmObj.model)] : undefined;
     const baseHeroObj = rmObj?.model != null ? herois?.[String(rmObj.model)] : undefined;
     const heroObj =
       (rmObj?.Id != null ? herois?.[String(rmObj.Id)] : undefined) ||
@@ -870,12 +1582,10 @@ async function ensureNinjaSkillsPack(catalog, cachedManifest) {
       herois?.[code] ||
       herois?.[code6];
 
-    if (!heroObj) continue;
-
     const heroCode =
-      heroObj.Id != null ? String(heroObj.Id) : rmObj?.Id != null ? String(rmObj.Id) : code6 || code;
+      heroObj?.Id != null ? String(heroObj.Id) : rmObj?.Id != null ? String(rmObj.Id) : code6 || code;
     const displayName =
-      (typeof heroObj.name === 'string' && heroObj.name.trim()) ||
+      (typeof heroObj?.name === 'string' && heroObj.name.trim()) ||
       (rmObj?.__link_name ? resolvePt(rmObj.__link_name) : undefined) ||
       ninja.name ||
       undefined;
@@ -901,49 +1611,145 @@ async function ensureNinjaSkillsPack(catalog, cachedManifest) {
       if (iconUrl) totalIconsMapped++;
     };
 
-    addSkill('attack', 'Ataque Normal', heroObj.normalskill);
-    addSkill('skill', 'Habilidade', heroObj.skill);
-    addSkill('UniqueSkill', 'Ôgi (Ultimate)', heroObj.superskill);
-    addSkill('chase1', 'Perseguição 1', heroObj.chase);
-    addSkill('chase2', 'Perseguição 2', heroObj.chase2);
-    addSkill('chase3', 'Perseguição 3', heroObj.chase3);
-
     const passivesOut = [];
-    const passiveList = Array.isArray(heroObj.passive) ? heroObj.passive : [];
-    for (const pId of passiveList) {
-      if (typeof pId !== 'string' || !pId.trim()) continue;
-      if (pId === 'hero_hurt' || pId === 'hero_unhurt') continue;
-      const sk = skills?.[pId.trim()];
-      if (!sk) continue;
-      const name = resolvePt(sk.name);
-      if (!name) continue;
-      const desc = resolvePt(sk.desc);
-      const { iconName, iconUrl } = resolveSkillIconUrl(sk.icon);
-      passivesOut.push({
-        id: pId.trim(),
-        name,
-        ...(desc ? { desc } : {}),
-        ...(iconName ? { iconName } : {}),
-        ...(iconUrl ? { iconUrl } : {}),
-      });
-      totalSkillsMapped++;
-      if (iconUrl) totalIconsMapped++;
+    if (heroObj) {
+      addSkill('attack', 'Ataque Normal', heroObj.normalskill);
+      addSkill('skill', 'Habilidade', heroObj.skill);
+      addSkill('UniqueSkill', 'Ôgi (Ultimate)', heroObj.superskill);
+      addSkill('chase1', 'Perseguição 1', heroObj.chase);
+      addSkill('chase2', 'Perseguição 2', heroObj.chase2);
+      addSkill('chase3', 'Perseguição 3', heroObj.chase3);
+
+      const passiveList = Array.isArray(heroObj.passive) ? heroObj.passive : [];
+      for (const pId of passiveList) {
+        if (typeof pId !== 'string' || !pId.trim()) continue;
+        if (pId === 'hero_hurt' || pId === 'hero_unhurt') continue;
+        const sk = skills?.[pId.trim()];
+        if (!sk) continue;
+        const name = resolvePt(sk.name);
+        if (!name) continue;
+        const desc = resolvePt(sk.desc);
+        const { iconName, iconUrl } = resolveSkillIconUrl(sk.icon);
+        passivesOut.push({
+          id: pId.trim(),
+          name,
+          ...(desc ? { desc } : {}),
+          ...(iconName ? { iconName } : {}),
+          ...(iconUrl ? { iconUrl } : {}),
+        });
+        totalSkillsMapped++;
+        if (iconUrl) totalIconsMapped++;
+      }
     }
 
-    if (Object.keys(skillsOut).length > 0 || passivesOut.length > 0) {
+    // Voices (exact parity with server.ts)
+    const voicesOut = [];
+    const seenVoiceKeys = new Set();
+    const pushVoice = (category, label, keyVal) => {
+      const keys = Array.isArray(keyVal)
+        ? keyVal
+        : typeof keyVal === 'string' && keyVal.trim()
+        ? [keyVal.trim()]
+        : [];
+      for (const k of keys) {
+        if (typeof k !== 'string' || !k.trim()) continue;
+        const cleanKey = k.trim();
+        const url = resolveSoundUrlFromTables(origin, cleanKey, sons, fileSet, soundFileByLower);
+        if (!url) continue;
+        const dedupeKey = `${category}::${cleanKey}`;
+        if (seenVoiceKeys.has(dedupeKey)) continue;
+        seenVoiceKeys.add(dedupeKey);
+        voicesOut.push({ key: cleanKey, category, label, url });
+        totalVoicesMapped++;
+      }
+    };
+
+    const modelo = heroObj?.modelo;
+    const vozesRoot = modelo?.vozes;
+    const vdfVozes =
+      vozesRoot?.[heroCode] ||
+      vozesRoot?.[code6] ||
+      (vozesRoot && typeof vozesRoot === 'object' ? Object.values(vozesRoot)[0] : undefined) ||
+      rmObj?.VdfVozes;
+
+    if (vdfVozes && typeof vdfVozes === 'object') {
+      pushVoice('batalha', 'Voz de Batalha', vdfVozes.batalha);
+      pushVoice('transformacao', 'Transformação / Especial', vdfVozes.transformacao);
+      pushVoice('despertar', 'Despertar', vdfVozes.despertar);
+      pushVoice('subir_estrela', 'Subir Estrela', vdfVozes.subir_estrela);
+    }
+
+    const modeloAudio = modelo?.audio;
+    if (modeloAudio && typeof modeloAudio === 'object') {
+      pushVoice('luta', 'Entrada em Luta', modeloAudio.luta);
+      pushVoice('skill', 'Voz de Habilidade', modeloAudio.skill);
+      pushVoice('unica', 'Voz de Ôgi', modeloAudio.unica);
+      pushVoice('dor', 'Recebendo Dano', modeloAudio.dor);
+      pushVoice('morte', 'Voz de Derrota', modeloAudio.morte);
+    }
+    for (const rmCandidate of [rmObj, baseRmObj]) {
+      if (!rmCandidate) continue;
+      pushVoice('luta', 'Entrada em Luta', rmCandidate.FightingAudio);
+      pushVoice('skill', 'Voz de Habilidade', rmCandidate.SkillAudio);
+      pushVoice('unica', 'Voz de Ôgi', rmCandidate.Uniquevoice);
+      pushVoice('dor', 'Recebendo Dano', rmCandidate.UnderAttackAudio);
+      pushVoice('morte', 'Voz de Derrota', rmCandidate.DeadAudio);
+    }
+
+    // Videos (exact parity with server.ts, including skeleton {PLAYVEDIO}/{SHOWFEATURE})
+    const resolvedVids = resolveAllHeroVideosFromTables(tables, {
+      ninjaId: ninja.id,
+      code,
+      rmObj,
+      baseRmObj,
+      heroObj,
+      baseHeroObj,
+      requestedVideos: skelVideoRefsByLower.get(idLow),
+      requestedFeatures: skelFeatureRefsByLower.get(idLow),
+    });
+    totalVideosMapped += resolvedVids.videos.length;
+
+    if (
+      Object.keys(skillsOut).length > 0 ||
+      passivesOut.length > 0 ||
+      voicesOut.length > 0 ||
+      resolvedVids.videos.length > 0
+    ) {
       ninjasOut[ninja.id] = {
         ...(heroCode ? { heroCode } : {}),
         ...(displayName ? { displayName } : {}),
         skills: skillsOut,
         passives: passivesOut,
+        ...(voicesOut.length > 0 ? { voices: voicesOut } : {}),
+        ...(resolvedVids.videos.length > 0 ? { videos: resolvedVids.videos } : {}),
+        ...(Object.keys(resolvedVids.videoUrlMap).length > 0
+          ? { videoUrlMap: resolvedVids.videoUrlMap }
+          : {}),
       };
     }
   }
 
+  // Build compact global sound map (sons.json + manifest sound filenames for case-accurate resolution)
+  const compactSons = {};
+  for (const [k, v] of Object.entries(sons || {})) {
+    if (typeof v === 'string' && v.trim()) {
+      compactSons[k] = v.trim().replace(/^\/+/, '');
+    }
+  }
+  for (const rel of soundFileByLower.values()) {
+    const file = rel.split('/').pop() || '';
+    const stem = file.replace(/\.mp3$/i, '');
+    if (stem && !compactSons[stem]) {
+      compactSons[stem] = rel;
+    }
+  }
+
   const payload = {
-    version: 1,
+    version: 2,
+    catalogNinjaCount,
     origin,
     generatedAt: new Date().toISOString(),
+    sons: compactSons,
     ninjas: ninjasOut,
   };
 
@@ -957,23 +1763,34 @@ async function ensureNinjaSkillsPack(catalog, cachedManifest) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(NINJA_SKILLS_PACK_PATH, buf);
   console.log(
-    `[ensure-static-packs] Ninja skills pack written: ninja-skills-pack.zip (${(buf.length / 1024).toFixed(1)} KB, ninjas=${Object.keys(ninjasOut).length}, skills=${totalSkillsMapped}, icons=${totalIconsMapped}).`
+    `[ensure-static-packs] Ninja media/skills pack v2 written: ninja-skills-pack.zip (${(buf.length / 1024).toFixed(1)} KB, ninjas=${Object.keys(ninjasOut).length}, skills=${totalSkillsMapped}, icons=${totalIconsMapped}, voices=${totalVoicesMapped}, videos=${totalVideosMapped}, sons=${Object.keys(compactSons).length}).`
   );
-  return manifestBundle;
+  return tables;
 }
 
 async function main() {
-  if (!fs.existsSync(CATALOG_PATH)) {
-    console.warn('[ensure-static-packs] public/data/naruto-catalog.json not found; skipping.');
+  let existingCatalog = null;
+  if (fs.existsSync(CATALOG_PATH)) {
+    try {
+      existingCatalog = JSON.parse(fs.readFileSync(CATALOG_PATH, 'utf8'));
+    } catch {
+      existingCatalog = null;
+    }
+  }
+
+  const synced = await syncStaticCatalogFromOrigin(existingCatalog, null);
+  const catalog = synced?.catalog || existingCatalog;
+  if (!catalog) {
+    console.warn('[ensure-static-packs] public/data/naruto-catalog.json not found and origin sync unavailable; skipping.');
     return;
   }
 
-  const catalog = JSON.parse(fs.readFileSync(CATALOG_PATH, 'utf8'));
+  let cachedTables = synced?.tables || null;
   const ninjas = Array.isArray(catalog.ninjas) ? catalog.ninjas : [];
   const { existingAtlasZip, chunkZips } = await ensureMainPacks(ninjas);
   await ensureEffectPacks(ninjas, existingAtlasZip, chunkZips);
-  let cachedManifest = await ensureBackupManifestPack(catalog, null);
-  await ensureNinjaSkillsPack(catalog, cachedManifest);
+  cachedTables = await ensureBackupManifestPack(catalog, cachedTables);
+  await ensureNinjaSkillsPack(catalog, chunkZips, cachedTables);
 }
 
 main().catch((err) => {
