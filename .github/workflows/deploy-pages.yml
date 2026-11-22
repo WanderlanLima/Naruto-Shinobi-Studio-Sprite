@@ -39,7 +39,8 @@ jobs:
         run: |
           test -s dist/data/naruto-catalog.json
           test -s dist/data/naruto-atlas-pack.zip
-          ls -lh dist/data dist/data/skeletons
+          test -s dist/data/effects-atlas-pack.zip
+          ls -lh dist/data dist/data/skeletons dist/data/effects-skeletons
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

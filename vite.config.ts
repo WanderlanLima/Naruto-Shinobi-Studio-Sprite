@@ -18,7 +18,11 @@ function resolveBasePath(): string {
 
 function computeStaticPackVersion(): string {
   const parts: string[] = [];
-  for (const rel of ['public/data/naruto-catalog.json', 'public/data/naruto-atlas-pack.zip']) {
+  for (const rel of [
+    'public/data/naruto-catalog.json',
+    'public/data/naruto-atlas-pack.zip',
+    'public/data/effects-atlas-pack.zip',
+  ]) {
     const full = path.resolve(__dirname, rel);
     try {
       const st = fs.statSync(full);

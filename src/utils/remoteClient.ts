@@ -58,11 +58,19 @@ interface StaticAtlasPack {
   idleMap: Record<string, IdleMapEntry>;
 }
 
+interface StaticEffectsAtlasPack {
+  zip: JSZip;
+  chunkMap: Record<string, number>;
+  chunkMapLower: Map<string, number>;
+}
+
 declare const __STATIC_PACK_VERSION__: string | undefined;
 
 let staticPackPromise: Promise<StaticAtlasPack | null> | null = null;
+let staticEffectsPackPromise: Promise<StaticEffectsAtlasPack | null> | null = null;
 let lastStaticPackError: string | null = null;
 const skeletonChunkCache = new Map<number, Promise<JSZip | null>>();
+const effectSkeletonChunkCache = new Map<number, Promise<JSZip | null>>();
 
 const STATIC_BASE = import.meta.env.BASE_URL || './';
 const STATIC_PACK_VERSION =
@@ -172,6 +180,75 @@ async function loadStaticSkeleton(ninjaId: string, chunkIndex: number): Promise<
   } catch {
     return null;
   }
+}
+
+async function loadStaticEffectSkeleton(
+  spineId: string,
+  chunkIndex: number
+): Promise<SpineSkeleton | null> {
+  let chunkPromise = effectSkeletonChunkCache.get(chunkIndex);
+  if (!chunkPromise) {
+    chunkPromise = (async () => {
+      const { zip } = await fetchStaticZip(`data/effects-skeletons/eff-${chunkIndex}.zip`);
+      if (!zip) {
+        effectSkeletonChunkCache.delete(chunkIndex);
+        return null;
+      }
+      return zip;
+    })();
+    effectSkeletonChunkCache.set(chunkIndex, chunkPromise);
+  }
+  const zip = await chunkPromise;
+  if (!zip) return null;
+  let file = zip.file(`${spineId}.json`);
+  if (!file) {
+    const lowTarget = `${spineId}.json`.toLowerCase();
+    for (const [k, v] of Object.entries(zip.files)) {
+      if (!v.dir && k.toLowerCase() === lowTarget) {
+        file = v;
+        break;
+      }
+    }
+  }
+  if (!file) return null;
+  try {
+    return JSON.parse(await file.async('text')) as SpineSkeleton;
+  } catch {
+    return null;
+  }
+}
+
+async function loadStaticEffectsAtlasPack(): Promise<StaticEffectsAtlasPack | null> {
+  if (!staticEffectsPackPromise) {
+    staticEffectsPackPromise = (async () => {
+      const { zip } = await fetchStaticZip('data/effects-atlas-pack.zip');
+      if (!zip) {
+        staticEffectsPackPromise = null;
+        return null;
+      }
+      try {
+        const indexFile = zip.file('effects-index.json');
+        let chunkMap: Record<string, number> = {};
+        if (indexFile) {
+          const parsed = JSON.parse(await indexFile.async('text')) as {
+            chunks?: Record<string, number>;
+          };
+          if (parsed?.chunks && typeof parsed.chunks === 'object') {
+            chunkMap = parsed.chunks;
+          }
+        }
+        const chunkMapLower = new Map<string, number>();
+        for (const [k, v] of Object.entries(chunkMap)) {
+          chunkMapLower.set(k.toLowerCase(), v);
+        }
+        return { zip, chunkMap, chunkMapLower };
+      } catch {
+        staticEffectsPackPromise = null;
+        return null;
+      }
+    })();
+  }
+  return staticEffectsPackPromise;
 }
 
 async function loadStaticAtlasPack(): Promise<StaticAtlasPack | null> {
@@ -504,6 +581,7 @@ export async function fetchNinjaBundle(
   let atlasText = '';
   let idleFrameName: string | undefined;
   let skeletonChunkIdx: number | undefined;
+  let effectSkeletonChunkIdx: number | undefined;
   let staticDiagReason = '';
 
   if (ninjaId) {
@@ -531,8 +609,33 @@ export async function fetchNinjaBundle(
         idleFrameName = entry?.frame;
         skeletonChunkIdx = entry?.s;
       } else {
-        const totalPacked = Object.keys(pack.idleMap).length;
-        staticDiagReason = `"${ninjaId}.atlas" ausente no pacote estático (${totalPacked} itens carregados)`;
+        // Fallback to companion combat particle/effect static pack
+        const effectsPack = await loadStaticEffectsAtlasPack();
+        if (effectsPack) {
+          let effAtlas = effectsPack.zip.file(`atlas/${ninjaId}.atlas`) ?? null;
+          let effResolvedId = ninjaId;
+          if (!effAtlas) {
+            const targetLow = `atlas/${ninjaId}.atlas`.toLowerCase();
+            for (const [k, v] of Object.entries(effectsPack.zip.files)) {
+              if (!v.dir && k.toLowerCase() === targetLow) {
+                effAtlas = v;
+                effResolvedId = k.slice('atlas/'.length, -'.atlas'.length);
+                break;
+              }
+            }
+          }
+          if (effAtlas) {
+            atlasText = await effAtlas.async('text');
+            effectSkeletonChunkIdx =
+              effectsPack.chunkMap[effResolvedId] ??
+              effectsPack.chunkMap[ninjaId] ??
+              effectsPack.chunkMapLower.get(ninjaId.toLowerCase());
+          }
+        }
+        if (!atlasText) {
+          const totalPacked = Object.keys(pack.idleMap).length;
+          staticDiagReason = `"${ninjaId}.atlas" ausente nos pacotes estáticos (${totalPacked} ninjas carregados)`;
+        }
       }
     }
   } else {
@@ -554,6 +657,8 @@ export async function fetchNinjaBundle(
   if (!options?.skipSkeleton) {
     if (ninjaId && typeof skeletonChunkIdx === 'number') {
       skeleton = await loadStaticSkeleton(ninjaId, skeletonChunkIdx);
+    } else if (ninjaId && typeof effectSkeletonChunkIdx === 'number') {
+      skeleton = await loadStaticEffectSkeleton(ninjaId, effectSkeletonChunkIdx);
     }
     if (!skeleton && skeletonUrl) {
       const skelResp = await fetchTextViaRelays(skeletonUrl, 4500);
