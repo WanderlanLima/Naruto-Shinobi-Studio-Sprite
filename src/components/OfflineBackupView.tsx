@@ -8,6 +8,7 @@ import {
   ChevronUp,
   Clapperboard,
   Copy,
+  Database,
   Download,
   FileText,
   FolderOpen,
@@ -34,7 +35,10 @@ import {
   downloadDirectUnixScript,
   downloadDirectUrlList,
   downloadDirectWindowsScript,
+  downloadFullGameMirrorUnixScript,
+  downloadFullGameMirrorWindowsScript,
   testCorsProxyForMedia,
+  type FullGameMirrorScope,
 } from '../utils/directBackupScript';
 import {
   mountBackupZipFiles,
@@ -654,6 +658,51 @@ export function OfflineBackupView({
       } else downloadDirectUrlList(spec);
     } catch (err) {
       setPlanError(err instanceof Error ? err.message : 'Erro ao gerar script de download direto.');
+    } finally {
+      setExportingDirectKey(null);
+    }
+  };
+
+  const handleExportFullGameMirror = async (
+    scope: FullGameMirrorScope,
+    format: 'sh' | 'ps1'
+  ) => {
+    const key = `mirror-${scope}-${format}`;
+    setExportingDirectKey(key);
+    setPlanError(null);
+    try {
+      const bundle = await ensureStaticBundle();
+      const metaArchiveBase64 = await buildBackupMetaArchiveBase64({
+        origin: bundle.origin,
+        moduleId: scope === 'all_files' ? 'mirror_all_files' : 'mirror_database_only',
+        label:
+          scope === 'all_files'
+            ? 'Cópia Completa do Jogo — Todos os Arquivos (~81.000+)'
+            : 'Banco de Dados Completo do Jogo (3.215 tabelas JSON + Código)',
+        expectedFiles: scope === 'all_files' ? 81176 : 3600,
+        ninjasForCatalog: ninjas,
+        includeCatalogMeta: true,
+      });
+
+      if (format === 'sh') {
+        const scriptName = downloadFullGameMirrorUnixScript({
+          origin: bundle.origin,
+          scope,
+          metaArchiveBase64,
+        });
+        setLastShScriptName(scriptName);
+        setShowAndroidGuide(true);
+      } else {
+        downloadFullGameMirrorWindowsScript({
+          origin: bundle.origin,
+          scope,
+          metaArchiveBase64,
+        });
+      }
+    } catch (err) {
+      setPlanError(
+        err instanceof Error ? err.message : 'Erro ao gerar script de extração completa do jogo.'
+      );
     } finally {
       setExportingDirectKey(null);
     }
@@ -1914,6 +1963,121 @@ export function OfflineBackupView({
                           </button>
                         )}
                       </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Full Game Mirror & Decrypted Database Section */}
+              <div className="rounded-xl border border-white/[0.08] bg-[#11141C] overflow-hidden">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] px-5 py-3.5">
+                  <div className="flex items-center gap-2">
+                    <Database className="h-4 w-4 text-orange-400 shrink-0" aria-hidden="true" />
+                    <h3 className="font-display text-sm font-semibold text-slate-100">
+                      Cópia completa do jogo &amp; Banco de Dados (recriar do zero)
+                    </h3>
+                  </div>
+                  <span className="font-mono text-[11px] text-slate-500 tabular-nums">
+                    Manifesto ao vivo · 81.176 arquivos · 3.215 tabelas JSON
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-white/[0.06]">
+                  {/* Full 81,176-file mirror */}
+                  <div className="flex flex-col justify-between gap-4 p-5">
+                    <div className="space-y-1.5">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="text-sm font-semibold text-slate-100">
+                          Todos os arquivos do jogo
+                        </span>
+                        <span className="font-mono text-xs text-slate-400 tabular-nums">
+                          ~13,0 GB
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 leading-relaxed">
+                        Baixa 100% do servidor: todos os sprites, mapas vivos, UI, retratos, itens,
+                        vídeos, áudios, scripts JS/CSS, libs Phaser/Spine e todas as{' '}
+                        <span className="text-slate-200 font-medium">3.215 tabelas</span>{' '}
+                        descriptografadas em JSON legível.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={Boolean(exportingDirectKey)}
+                        onClick={() => void handleExportFullGameMirror('all_files', 'sh')}
+                        className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors cursor-pointer"
+                      >
+                        <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>
+                          {exportingDirectKey === 'mirror-all_files-sh'
+                            ? 'Preparando...'
+                            : 'Android Termux (.sh)'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={Boolean(exportingDirectKey)}
+                        onClick={() => void handleExportFullGameMirror('all_files', 'ps1')}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs font-medium text-slate-200 hover:border-white/25 hover:text-white disabled:opacity-40 transition-colors cursor-pointer"
+                      >
+                        <Terminal className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                        <span>
+                          {exportingDirectKey === 'mirror-all_files-ps1'
+                            ? 'Gerando...'
+                            : 'Windows .ps1'}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Database + client code only */}
+                  <div className="flex flex-col justify-between gap-4 p-5">
+                    <div className="space-y-1.5">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="text-sm font-semibold text-slate-100">
+                          Somente Banco de Dados + Código
+                        </span>
+                        <span className="font-mono text-xs text-slate-400 tabular-nums">
+                          ~50 MB · ~15s
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 leading-relaxed">
+                        Baixa rapidamente todas as{' '}
+                        <span className="text-slate-200 font-medium">3.215 tabelas JSON</span>{' '}
+                        descriptografadas com nomes originais (<span className="font-mono text-slate-300">herois.json</span>,{' '}
+                        <span className="font-mono text-slate-300">skills.json</span>,{' '}
+                        <span className="font-mono text-slate-300">pt.json</span>,{' '}
+                        <span className="font-mono text-slate-300">RoleModel.json</span>), layouts de tela, scripts JS/CSS e libs.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={Boolean(exportingDirectKey)}
+                        onClick={() => void handleExportFullGameMirror('database_only', 'sh')}
+                        className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg border border-orange-500/40 bg-orange-500/10 px-3.5 py-2 text-xs font-semibold text-orange-300 hover:bg-orange-500/20 disabled:opacity-40 transition-colors cursor-pointer"
+                      >
+                        <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>
+                          {exportingDirectKey === 'mirror-database_only-sh'
+                            ? 'Preparando...'
+                            : 'Android Termux (.sh)'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={Boolean(exportingDirectKey)}
+                        onClick={() => void handleExportFullGameMirror('database_only', 'ps1')}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs font-medium text-slate-200 hover:border-white/25 hover:text-white disabled:opacity-40 transition-colors cursor-pointer"
+                      >
+                        <Terminal className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                        <span>
+                          {exportingDirectKey === 'mirror-database_only-ps1'
+                            ? 'Gerando...'
+                            : 'Windows .ps1'}
+                        </span>
+                      </button>
                     </div>
                   </div>
                 </div>
