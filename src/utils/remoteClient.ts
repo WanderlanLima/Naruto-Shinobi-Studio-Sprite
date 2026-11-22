@@ -58,27 +58,99 @@ interface StaticAtlasPack {
   idleMap: Record<string, IdleMapEntry>;
 }
 
+declare const __STATIC_PACK_VERSION__: string | undefined;
+
 let staticPackPromise: Promise<StaticAtlasPack | null> | null = null;
+let lastStaticPackError: string | null = null;
 const skeletonChunkCache = new Map<number, Promise<JSZip | null>>();
 
 const STATIC_BASE = import.meta.env.BASE_URL || './';
+const STATIC_PACK_VERSION =
+  typeof __STATIC_PACK_VERSION__ === 'string' && __STATIC_PACK_VERSION__
+    ? __STATIC_PACK_VERSION__
+    : 'v2';
+
+function buildStaticDataCandidates(relPath: string): string[] {
+  const cleanRel = relPath.replace(/^\/+/, '');
+  const withVersion = `${cleanRel}?v=${encodeURIComponent(STATIC_PACK_VERSION)}`;
+  const candidates: string[] = [];
+  const pushUnique = (u: string) => {
+    if (u && !candidates.includes(u)) candidates.push(u);
+  };
+
+  if (typeof window !== 'undefined' && window.location?.href) {
+    try {
+      const baseResolved = new URL(STATIC_BASE, window.location.href);
+      pushUnique(new URL(withVersion, baseResolved).toString());
+    } catch {
+      // ignore invalid base
+    }
+    try {
+      pushUnique(new URL(withVersion, window.location.href).toString());
+    } catch {
+      // ignore
+    }
+    try {
+      const dirHref = window.location.href.endsWith('/')
+        ? window.location.href
+        : `${window.location.href.replace(/\/[^/]*$/, '/')}`;
+      pushUnique(new URL(withVersion, dirHref).toString());
+    } catch {
+      // ignore
+    }
+  }
+
+  pushUnique(`${STATIC_BASE}${withVersion}`);
+  pushUnique(`./${withVersion}`);
+  return candidates;
+}
+
+function hasZipMagicBytes(buf: ArrayBuffer): boolean {
+  if (buf.byteLength < 22) return false;
+  const view = new Uint8Array(buf, 0, 4);
+  return view[0] === 0x50 && view[1] === 0x4b && (view[2] === 0x03 || view[2] === 0x05);
+}
+
+async function fetchStaticZip(relPath: string): Promise<{ zip: JSZip | null; error: string | null }> {
+  const candidates = buildStaticDataCandidates(relPath);
+  const errors: string[] = [];
+
+  for (const url of candidates) {
+    try {
+      const resp = await fetch(url, { cache: 'no-cache' });
+      if (!resp.ok) {
+        errors.push(`HTTP ${resp.status} em ${url}`);
+        continue;
+      }
+      const buf = await resp.arrayBuffer();
+      if (!hasZipMagicBytes(buf)) {
+        const ct = resp.headers.get('content-type') || 'desconhecido';
+        errors.push(`Resposta não-ZIP (${ct}, ${buf.byteLength}B) em ${url}`);
+        continue;
+      }
+      const zip = await JSZip.loadAsync(buf);
+      return { zip, error: null };
+    } catch (err) {
+      errors.push(`${err instanceof Error ? err.message : 'erro'} em ${url}`);
+    }
+  }
+
+  return {
+    zip: null,
+    error: errors[0] || `Falha ao baixar ${relPath}`,
+  };
+}
 
 async function loadStaticSkeleton(ninjaId: string, chunkIndex: number): Promise<SpineSkeleton | null> {
   let chunkPromise = skeletonChunkCache.get(chunkIndex);
   if (!chunkPromise) {
     chunkPromise = (async () => {
-      try {
-        const resp = await fetch(`${STATIC_BASE}data/skeletons/skel-${chunkIndex}.zip`);
-        if (!resp.ok) {
-          skeletonChunkCache.delete(chunkIndex);
-          return null;
-        }
-        const buf = await resp.arrayBuffer();
-        return await JSZip.loadAsync(buf);
-      } catch {
+      const { zip } = await fetchStaticZip(`data/skeletons/skel-${chunkIndex}.zip`);
+      if (!zip) {
         skeletonChunkCache.delete(chunkIndex);
         return null;
       }
+      return zip;
     })();
     skeletonChunkCache.set(chunkIndex, chunkPromise);
   }
@@ -105,20 +177,21 @@ async function loadStaticSkeleton(ninjaId: string, chunkIndex: number): Promise<
 async function loadStaticAtlasPack(): Promise<StaticAtlasPack | null> {
   if (!staticPackPromise) {
     staticPackPromise = (async () => {
+      const { zip, error } = await fetchStaticZip('data/naruto-atlas-pack.zip');
+      if (!zip) {
+        lastStaticPackError = error;
+        staticPackPromise = null;
+        return null;
+      }
       try {
-        const resp = await fetch(`${STATIC_BASE}data/naruto-atlas-pack.zip`);
-        if (!resp.ok) {
-          staticPackPromise = null;
-          return null;
-        }
-        const buf = await resp.arrayBuffer();
-        const zip = await JSZip.loadAsync(buf);
         const idleFile = zip.file('idle-map.json');
         const idleMap: Record<string, IdleMapEntry> = idleFile
           ? (JSON.parse(await idleFile.async('text')) as Record<string, IdleMapEntry>)
           : {};
+        lastStaticPackError = null;
         return { zip, idleMap };
-      } catch {
+      } catch (err) {
+        lastStaticPackError = err instanceof Error ? err.message : 'Erro ao ler idle-map.json';
         staticPackPromise = null;
         return null;
       }
@@ -293,9 +366,7 @@ export async function extractGameCatalog(targetUrl: string): Promise<ExtractResp
         }
         return data;
       }
-      if (resp.status === 404 || resp.status === 405) {
-        backendStatus = 'static';
-      }
+      backendStatus = 'static';
     } catch (err) {
       if (
         err instanceof Error &&
@@ -311,9 +382,17 @@ export async function extractGameCatalog(targetUrl: string): Promise<ExtractResp
   // Static / GitHub Pages fallback
   const normalized = targetUrl.toLowerCase();
   if (normalized.includes('naruto.jotagame.com')) {
-    const staticResp = await fetch(`${STATIC_BASE}data/naruto-catalog.json`);
-    if (staticResp.ok) {
-      return (await staticResp.json()) as ExtractResponse;
+    for (const candidateUrl of buildStaticDataCandidates('data/naruto-catalog.json')) {
+      try {
+        const staticResp = await fetch(candidateUrl, { cache: 'no-cache' });
+        if (!staticResp.ok) continue;
+        const ct = staticResp.headers.get('content-type') || '';
+        const text = await staticResp.text();
+        if (ct.includes('text/html') || text.trimStart().startsWith('<')) continue;
+        return JSON.parse(text) as ExtractResponse;
+      } catch {
+        // try next candidate
+      }
     }
   }
 
@@ -407,9 +486,7 @@ export async function fetchNinjaBundle(
         }
         return data;
       }
-      if (resp.status === 404 || resp.status === 405) {
-        backendStatus = 'static';
-      }
+      backendStatus = 'static';
     } catch (err) {
       if (
         err instanceof Error &&
@@ -427,34 +504,47 @@ export async function fetchNinjaBundle(
   let atlasText = '';
   let idleFrameName: string | undefined;
   let skeletonChunkIdx: number | undefined;
+  let staticDiagReason = '';
 
   if (ninjaId) {
     const pack = await loadStaticAtlasPack();
-    let packedAtlas = pack?.zip.file(`atlas/${ninjaId}.atlas`) ?? null;
-    let resolvedId = ninjaId;
-    if (!packedAtlas && pack) {
-      const targetLow = `atlas/${ninjaId}.atlas`.toLowerCase();
-      for (const [k, v] of Object.entries(pack.zip.files)) {
-        if (!v.dir && k.toLowerCase() === targetLow) {
-          packedAtlas = v;
-          resolvedId = k.slice('atlas/'.length, -'.atlas'.length);
-          break;
+    if (!pack) {
+      staticDiagReason = lastStaticPackError
+        ? `Pacote estático indisponível (${lastStaticPackError})`
+        : 'Pacote estático data/naruto-atlas-pack.zip indisponível';
+    } else {
+      let packedAtlas = pack.zip.file(`atlas/${ninjaId}.atlas`) ?? null;
+      let resolvedId = ninjaId;
+      if (!packedAtlas) {
+        const targetLow = `atlas/${ninjaId}.atlas`.toLowerCase();
+        for (const [k, v] of Object.entries(pack.zip.files)) {
+          if (!v.dir && k.toLowerCase() === targetLow) {
+            packedAtlas = v;
+            resolvedId = k.slice('atlas/'.length, -'.atlas'.length);
+            break;
+          }
         }
       }
+      if (packedAtlas) {
+        atlasText = await packedAtlas.async('text');
+        const entry = pack.idleMap[resolvedId] || pack.idleMap[ninjaId];
+        idleFrameName = entry?.frame;
+        skeletonChunkIdx = entry?.s;
+      } else {
+        const totalPacked = Object.keys(pack.idleMap).length;
+        staticDiagReason = `"${ninjaId}.atlas" ausente no pacote estático (${totalPacked} itens carregados)`;
+      }
     }
-    if (packedAtlas) {
-      atlasText = await packedAtlas.async('text');
-      const entry = pack?.idleMap[resolvedId] || pack?.idleMap[ninjaId];
-      idleFrameName = entry?.frame;
-      skeletonChunkIdx = entry?.s;
-    }
+  } else {
+    staticDiagReason = `ID de atlas não reconhecido em "${atlasUrl}"`;
   }
 
   if (!atlasText) {
     const atlasResp = await fetchTextViaRelays(atlasUrl, 7000);
     if (!atlasResp) {
+      const detail = staticDiagReason ? ` [${staticDiagReason}]` : '';
       throw new Error(
-        'Não foi possível carregar o .atlas em modo estático pelos proxies públicos. Use a aba "Backup Offline" para abrir seu arquivo .zip local ou configure um Proxy CORS próprio.'
+        `Não foi possível carregar o .atlas em modo estático.${detail} Use a aba "Backup Offline" para abrir seu arquivo .zip local ou configure um Proxy CORS próprio.`
       );
     }
     atlasText = await atlasResp.text();
@@ -853,6 +943,9 @@ export async function fetchNinjaMediaProfile(
             passiveAura: data.passiveAura ?? resolveFallbackPassiveAura(ninja),
             videos: attachVideoAnimTiming(data.videos || []),
           };
+        }
+        if (!contentType.includes('application/json')) {
+          backendStatus = 'static';
         }
       } catch {
         // fall through to local deterministic profile

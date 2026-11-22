@@ -29,10 +29,17 @@ jobs:
         uses: actions/configure-pages@v5
       - name: Install dependencies
         run: npm install --legacy-peer-deps --no-audit --no-fund
+      - name: Ensure static atlas & skeleton packs
+        run: node scripts/ensure-static-packs.mjs
       - name: Build static bundle
         env:
           VITE_BASE_PATH: ${{ steps.pages.outputs.base_path }}/
         run: npm run build
+      - name: Verify static data packs in dist
+        run: |
+          test -s dist/data/naruto-catalog.json
+          test -s dist/data/naruto-atlas-pack.zip
+          ls -lh dist/data dist/data/skeletons
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

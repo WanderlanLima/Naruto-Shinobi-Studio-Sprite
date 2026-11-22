@@ -16,12 +16,30 @@ function resolveBasePath(): string {
   return withLeading.endsWith('/') ? withLeading : `${withLeading}/`;
 }
 
+function computeStaticPackVersion(): string {
+  const parts: string[] = [];
+  for (const rel of ['public/data/naruto-catalog.json', 'public/data/naruto-atlas-pack.zip']) {
+    const full = path.resolve(__dirname, rel);
+    try {
+      const st = fs.statSync(full);
+      parts.push(`${st.size.toString(36)}-${Math.floor(st.mtimeMs / 1000).toString(36)}`);
+    } catch {
+      parts.push('missing');
+    }
+  }
+  return parts.join('_');
+}
+
 export default defineConfig(() => {
   const base = resolveBasePath();
+  const staticPackVersion = computeStaticPackVersion();
 
   return {
     // Uses exact GitHub Pages subpath (/repo/) in CI and relative './' for local/portable builds
     base,
+    define: {
+      __STATIC_PACK_VERSION__: JSON.stringify(staticPackVersion),
+    },
     plugins: [
       react(),
       tailwindcss(),
@@ -68,7 +86,9 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,json}'],
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          globIgnores: ['**/data/**'],
+          navigateFallbackDenylist: [/\/data\//, /\/api\//, /\.(?:zip|json|png|webp|mp4|mp3)$/i],
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           cleanupOutdatedCaches: true,
           clientsClaim: true,
