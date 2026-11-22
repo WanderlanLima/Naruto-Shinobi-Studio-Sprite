@@ -22,6 +22,8 @@ function computeStaticPackVersion(): string {
     'public/data/naruto-catalog.json',
     'public/data/naruto-atlas-pack.zip',
     'public/data/effects-atlas-pack.zip',
+    'public/data/backup-manifest.zip',
+    'public/data/ninja-skills-pack.zip',
   ]) {
     const full = path.resolve(__dirname, rel);
     try {

@@ -1221,7 +1221,7 @@ function buildNinjaMediaProfileFromTables(
     requestedFeatures?: string[];
   }
 ): Record<string, unknown> {
-  const { origin, herois, pt, roleModels, skills, sons, fileSet, soundFileByLower } = tables;
+  const { origin, herois, pt, roleModels, skills, sons, fileSet, fileByLower, soundFileByLower } = tables;
   const ninjaId = params.ninjaId;
   const code = params.code || '';
   const idLow = ninjaId.toLowerCase();
@@ -1236,11 +1236,59 @@ function buildNinjaMediaProfileFromTables(
 
   const skillsOut: Record<
     string,
-    { id: string; animKey: string; slotLabel: string; name: string; desc?: string }
+    {
+      id: string;
+      animKey: string;
+      slotLabel: string;
+      name: string;
+      desc?: string;
+      iconName?: string;
+      iconUrl?: string;
+    }
   > = {};
-  const passivesOut: Array<{ id: string; name: string; desc?: string }> = [];
+  const passivesOut: Array<{
+    id: string;
+    name: string;
+    desc?: string;
+    iconName?: string;
+    iconUrl?: string;
+  }> = [];
   const voicesOut: Array<{ key: string; category: string; label: string; url: string }> = [];
   const soundUrlMap: Record<string, string> = {};
+
+  const resolveSkillIconUrl = (
+    iconVal: unknown
+  ): { iconName?: string; iconUrl?: string } => {
+    if (typeof iconVal !== 'string' || !iconVal.trim()) return {};
+    const raw = iconVal.trim().replace(/^\/+/, '');
+    const stem = raw.replace(/\.(png|webp|jpe?g)$/i, '');
+    const iconName = stem.split('/').pop() || stem;
+    const candidates = raw.includes('/')
+      ? [
+          `${stem}.png`,
+          `${stem}.webp`,
+          raw,
+          `acervo/asset/items/${iconName}.png`,
+          `acervo/asset/items/${iconName}.webp`,
+        ]
+      : [
+          `acervo/asset/items/${stem}.png`,
+          `acervo/asset/items/${stem}.webp`,
+          `acervo/asset/ui/icon/${stem}.png`,
+          `acervo/asset/ui/icon/${stem}.webp`,
+        ];
+
+    for (const c of candidates) {
+      if (fileSet.has(c)) {
+        return { iconName, iconUrl: `${origin}/${c}` };
+      }
+      const lowerMatch = fileByLower.get(c.toLowerCase());
+      if (lowerMatch) {
+        return { iconName, iconUrl: `${origin}/${lowerMatch}` };
+      }
+    }
+    return { iconName };
+  };
 
   const resolvePt = (val: unknown): string | undefined => {
     if (!val) return undefined;
@@ -1293,7 +1341,7 @@ function buildNinjaMediaProfileFromTables(
     }
   }
   if (!heroObj) {
-    heroObj = herois[code] || herois[code6];
+    heroObj = herois[code] || herois[code6] || baseHeroObj;
   }
 
   if (heroObj?.Id != null) {
@@ -1314,12 +1362,15 @@ function buildNinjaMediaProfileFromTables(
     if (!sk) return;
     const name = resolvePt(sk.name) || skillId.trim();
     const desc = resolvePt(sk.desc);
+    const { iconName, iconUrl } = resolveSkillIconUrl(sk.icon);
     skillsOut[animKey] = {
       id: skillId.trim(),
       animKey,
       slotLabel,
       name,
       ...(desc ? { desc } : {}),
+      ...(iconName ? { iconName } : {}),
+      ...(iconUrl ? { iconUrl } : {}),
     };
   };
 
@@ -1340,10 +1391,13 @@ function buildNinjaMediaProfileFromTables(
       const name = resolvePt(sk.name);
       if (!name) continue;
       const desc = resolvePt(sk.desc);
+      const { iconName, iconUrl } = resolveSkillIconUrl(sk.icon);
       passivesOut.push({
         id: pId.trim(),
         name,
         ...(desc ? { desc } : {}),
+        ...(iconName ? { iconName } : {}),
+        ...(iconUrl ? { iconUrl } : {}),
       });
     }
   }

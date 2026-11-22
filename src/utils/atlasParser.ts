@@ -2,6 +2,7 @@ import { GIFEncoder, applyPalette, quantize } from 'gifenc';
 import type {
   AtlasPage,
   AtlasRegion,
+  AtlasRegionSprite,
   CompositeSpineLayer,
   SlicedFrame,
   SpineAnimationData,
@@ -13,6 +14,7 @@ import type {
   SpineSlotDef,
   SpineSkeleton,
   SpineVideoEventRef,
+  SpriteRegionSource,
 } from '../types/sprite';
 import { createZipWorkerSession } from './zipWorkerClient';
 import {
@@ -151,28 +153,32 @@ export function loadImageElement(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(img);
+    img.decoding = 'async';
+    img.onload = () => {
+      if (typeof img.decode === 'function') {
+        img
+          .decode()
+          .then(() => resolve(img))
+          .catch(() => resolve(img));
+      } else {
+        resolve(img);
+      }
+    };
     img.onerror = () => reject(new Error(`Falha ao carregar imagem: ${src}`));
     img.src = src;
   });
 }
 
-export function extractRegionToCanvas(
+function drawAtlasRegionOnContext(
+  ctx: CanvasRenderingContext2D,
   region: AtlasRegion,
-  pageImage: HTMLImageElement
-): HTMLCanvasElement {
-  const outW = Math.max(1, region.origWidth || region.width);
-  const outH = Math.max(1, region.origHeight || region.height);
-  const canvas = document.createElement('canvas');
-  canvas.width = outW;
-  canvas.height = outH;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return canvas;
-
+  pageImage: HTMLImageElement,
+  outW: number,
+  outH: number
+) {
   const isRotated90 = region.rotate === 90;
   const srcW = isRotated90 ? region.height : region.width;
   const srcH = isRotated90 ? region.width : region.height;
-
   const destX = region.offsetX || 0;
   const destY = Math.max(0, outH - (region.offsetY || 0) - region.height);
 
@@ -205,6 +211,60 @@ export function extractRegionToCanvas(
     );
   }
   ctx.restore();
+}
+
+export function createAtlasRegionSprite(
+  region: AtlasRegion,
+  pageImage: HTMLImageElement
+): AtlasRegionSprite {
+  return {
+    kind: 'atlas-region',
+    image: pageImage,
+    region,
+    width: Math.max(1, region.origWidth || region.width),
+    height: Math.max(1, region.origHeight || region.height),
+  };
+}
+
+export function buildRegionSpriteMap(
+  pages: AtlasPage[],
+  pageImages: Record<string, HTMLImageElement>
+): Map<string, SpriteRegionSource> {
+  const map = new Map<string, SpriteRegionSource>();
+  for (const page of pages) {
+    const img = pageImages[page.name];
+    if (!img) continue;
+    for (const reg of page.regions) {
+      map.set(reg.name, createAtlasRegionSprite(reg, img));
+    }
+  }
+  return map;
+}
+
+export function isAtlasRegionSprite(
+  source: SpriteRegionSource
+): source is AtlasRegionSprite {
+  return (
+    typeof source === 'object' &&
+    source !== null &&
+    'kind' in source &&
+    source.kind === 'atlas-region'
+  );
+}
+
+export function extractRegionToCanvas(
+  region: AtlasRegion,
+  pageImage: HTMLImageElement
+): HTMLCanvasElement {
+  const outW = Math.max(1, region.origWidth || region.width);
+  const outH = Math.max(1, region.origHeight || region.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return canvas;
+
+  drawAtlasRegionOnContext(ctx, region, pageImage, outW, outH);
   return canvas;
 }
 
@@ -213,26 +273,40 @@ export function sliceAtlasRegions(
   pageImages: Record<string, HTMLImageElement>
 ): SlicedFrame[] {
   const frames: SlicedFrame[] = [];
+  // Reuse a single scratch canvas to avoid exhausting Android Chrome's GPU canvas surface limit
+  const scratch = document.createElement('canvas');
+  const ctx = scratch.getContext('2d');
+
   for (const page of pages) {
     const img = pageImages[page.name];
     if (!img) continue;
     for (let i = 0; i < page.regions.length; i++) {
       const region = page.regions[i];
-      const canvas = extractRegionToCanvas(region, img);
+      const outW = Math.max(1, region.origWidth || region.width);
+      const outH = Math.max(1, region.origHeight || region.height);
+      scratch.width = outW;
+      scratch.height = outH;
+      if (ctx) {
+        ctx.clearRect(0, 0, outW, outH);
+        drawAtlasRegionOnContext(ctx, region, img, outW, outH);
+      }
       frames.push({
         id: `${page.name}::${region.name}::${region.index}::${i}`,
         name: region.index >= 0 ? `${region.name}_${region.index}` : region.name,
-        width: canvas.width,
-        height: canvas.height,
+        width: outW,
+        height: outH,
         sourceX: region.x,
         sourceY: region.y,
         sourceWidth: region.width,
         sourceHeight: region.height,
         rotate: region.rotate,
-        dataUrl: canvas.toDataURL('image/png'),
+        dataUrl: scratch.toDataURL('image/png'),
       });
     }
   }
+  // Release GPU backing buffer immediately
+  scratch.width = 0;
+  scratch.height = 0;
   // Sort natural order (a0, a1, a2, ..., a10)
   return frames.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 }
@@ -803,31 +877,39 @@ function sampleSlotAlpha(
 
 let tintScratchCanvas: HTMLCanvasElement | null = null;
 function getTintedSpriteCanvas(
-  spriteCanvas: HTMLCanvasElement,
+  spriteSource: SpriteRegionSource,
   r: number,
   g: number,
   b: number
-): HTMLCanvasElement {
+): HTMLCanvasElement | null {
   if (!tintScratchCanvas && typeof document !== 'undefined') {
     tintScratchCanvas = document.createElement('canvas');
   }
-  if (!tintScratchCanvas) return spriteCanvas;
-  const w = Math.max(1, spriteCanvas.width);
-  const h = Math.max(1, spriteCanvas.height);
+  if (!tintScratchCanvas) return isAtlasRegionSprite(spriteSource) ? null : spriteSource;
+  const w = Math.max(1, spriteSource.width);
+  const h = Math.max(1, spriteSource.height);
   if (tintScratchCanvas.width !== w) tintScratchCanvas.width = w;
   if (tintScratchCanvas.height !== h) tintScratchCanvas.height = h;
   const tctx = tintScratchCanvas.getContext('2d');
-  if (!tctx) return spriteCanvas;
+  if (!tctx) return isAtlasRegionSprite(spriteSource) ? null : spriteSource;
+
+  const drawRaw = () => {
+    if (isAtlasRegionSprite(spriteSource)) {
+      drawAtlasRegionOnContext(tctx, spriteSource.region, spriteSource.image, w, h);
+    } else {
+      tctx.drawImage(spriteSource, 0, 0);
+    }
+  };
 
   tctx.globalCompositeOperation = 'source-over';
   tctx.clearRect(0, 0, w, h);
-  tctx.drawImage(spriteCanvas, 0, 0);
+  drawRaw();
   // Multiply RGB color while preserving the sprite's exact alpha channel
   tctx.globalCompositeOperation = 'multiply';
   tctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
   tctx.fillRect(0, 0, w, h);
   tctx.globalCompositeOperation = 'destination-in';
-  tctx.drawImage(spriteCanvas, 0, 0);
+  drawRaw();
   tctx.globalCompositeOperation = 'source-over';
   return tintScratchCanvas;
 }
@@ -938,7 +1020,7 @@ function collectSampleTimes(
 function accumulateSkeletonBoundsAtTime(
   skeleton: SpineSkeleton,
   animName: string,
-  regionCanvasMap: Map<string, HTMLCanvasElement>,
+  regionCanvasMap: Map<string, SpriteRegionSource>,
   t: number,
   boundsAcc: { minX: number; maxX: number; minY: number; maxY: number },
   filterOpts?: {
@@ -1033,7 +1115,7 @@ function accumulateSkeletonBoundsAtTime(
 export function computeAnimationWorldBounds(
   skeleton: SpineSkeleton,
   animName: string,
-  regionCanvasMap: Map<string, HTMLCanvasElement>,
+  regionCanvasMap: Map<string, SpriteRegionSource>,
   samples = 24
 ): AnimationWorldBounds {
   return computeCompositeAnimationWorldBounds(skeleton, animName, regionCanvasMap, [], samples);
@@ -1042,7 +1124,7 @@ export function computeAnimationWorldBounds(
 export function computeCompositeAnimationWorldBounds(
   skeleton: SpineSkeleton,
   animName: string,
-  regionCanvasMap: Map<string, HTMLCanvasElement>,
+  regionCanvasMap: Map<string, SpriteRegionSource>,
   compositeLayers: CompositeSpineLayer[] = [],
   samples = 24
 ): AnimationWorldBounds {
@@ -1161,7 +1243,7 @@ function drawSkeletonAtTime(
   skeleton: SpineSkeleton,
   animName: string,
   time: number,
-  regionCanvasMap: Map<string, HTMLCanvasElement>
+  regionCanvasMap: Map<string, SpriteRegionSource>
 ): number {
   const anim = skeleton.animations?.[animName];
   const slotsDef = skeleton.slots || [];
@@ -1180,13 +1262,13 @@ function drawSkeletonAtTime(
 
     const attInfo = skinAttachments[slot.name]?.[attachmentName];
     const regionKey = attInfo?.path || attInfo?.name || attachmentName;
-    const spriteCanvas = regionCanvasMap.get(regionKey);
-    if (!spriteCanvas) continue;
+    const spriteSource = regionCanvasMap.get(regionKey);
+    if (!spriteSource) continue;
 
     const needsTint = slotColor.r < 248 || slotColor.g < 248 || slotColor.b < 248;
-    const drawSource = needsTint
-      ? getTintedSpriteCanvas(spriteCanvas, slotColor.r, slotColor.g, slotColor.b)
-      : spriteCanvas;
+    const tintedCanvas = needsTint
+      ? getTintedSpriteCanvas(spriteSource, slotColor.r, slotColor.g, slotColor.b)
+      : null;
 
     const wm = getWorldMatrix(slot.bone);
     ctx.save();
@@ -1208,14 +1290,27 @@ function drawSkeletonAtTime(
     const arot = ((attInfo?.rotation || 0) * Math.PI) / 180;
     const asx = attInfo?.scaleX ?? 1;
     const asy = attInfo?.scaleY ?? 1;
-    const aw = attInfo?.width || spriteCanvas.width;
-    const ah = attInfo?.height || spriteCanvas.height;
+    const aw = attInfo?.width || spriteSource.width;
+    const ah = attInfo?.height || spriteSource.height;
 
     ctx.translate(ax, ay);
     if (arot !== 0) ctx.rotate(arot);
-    // Negate Y scale to draw upright canvas image inside Spine Y-up space
+    // Negate Y scale to draw upright image inside Spine Y-up space
     ctx.scale(asx, -asy);
-    ctx.drawImage(drawSource, -aw / 2, -ah / 2, aw, ah);
+
+    if (tintedCanvas) {
+      ctx.drawImage(tintedCanvas, -aw / 2, -ah / 2, aw, ah);
+    } else if (isAtlasRegionSprite(spriteSource)) {
+      const outW = spriteSource.width;
+      const outH = spriteSource.height;
+      ctx.translate(-aw / 2, -ah / 2);
+      if (aw !== outW || ah !== outH) {
+        ctx.scale(aw / outW, ah / outH);
+      }
+      drawAtlasRegionOnContext(ctx, spriteSource.region, spriteSource.image, outW, outH);
+    } else {
+      ctx.drawImage(spriteSource, -aw / 2, -ah / 2, aw, ah);
+    }
 
     ctx.restore();
     drawnSlots++;
@@ -1237,7 +1332,7 @@ export function renderSpineFrameToCanvas(
   skeleton: SpineSkeleton,
   animName: string,
   time: number,
-  regionCanvasMap: Map<string, HTMLCanvasElement>,
+  regionCanvasMap: Map<string, SpriteRegionSource>,
   zoom = 1,
   panX = 0,
   panY = 0,
@@ -1702,7 +1797,7 @@ function computeStripLayout(
 export function exportAnimationStripPng(
   skeleton: SpineSkeleton,
   animName: string,
-  regionCanvasMap: Map<string, HTMLCanvasElement>,
+  regionCanvasMap: Map<string, SpriteRegionSource>,
   fps = 24,
   compositeLayers: CompositeSpineLayer[] = []
 ): { dataUrl: string; frameCount: number; cellWidth: number; cellHeight: number } {
@@ -1764,7 +1859,7 @@ export function exportAnimationStripPng(
 export async function exportAnimationStripPngBlob(
   skeleton: SpineSkeleton,
   animName: string,
-  regionCanvasMap: Map<string, HTMLCanvasElement>,
+  regionCanvasMap: Map<string, SpriteRegionSource>,
   fps = 24,
   compositeLayers: CompositeSpineLayer[] = [],
   precomputedBounds?: AnimationWorldBounds | null
@@ -1830,7 +1925,7 @@ export async function exportAnimationStripPngBlob(
 export async function exportAnimationGif(
   skeleton: SpineSkeleton,
   animName: string,
-  regionCanvasMap: Map<string, HTMLCanvasElement>,
+  regionCanvasMap: Map<string, SpriteRegionSource>,
   options?: {
     fps?: number;
     bounds?: AnimationWorldBounds | null;

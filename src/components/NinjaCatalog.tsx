@@ -149,9 +149,19 @@ async function fetchNinjaThumbnail(ninja: NinjaEntry): Promise<string | null> {
       thumbCanvas.width = Math.max(1, Math.round(cropped.width * scale));
       thumbCanvas.height = Math.max(1, Math.round(cropped.height * scale));
       const ctx = thumbCanvas.getContext('2d');
-      if (!ctx) return null;
+      if (!ctx) {
+        cropped.width = 0;
+        cropped.height = 0;
+        thumbCanvas.width = 0;
+        thumbCanvas.height = 0;
+        return null;
+      }
       ctx.drawImage(cropped, 0, 0, thumbCanvas.width, thumbCanvas.height);
       const url = thumbCanvas.toDataURL('image/png');
+      cropped.width = 0;
+      cropped.height = 0;
+      thumbCanvas.width = 0;
+      thumbCanvas.height = 0;
       thumbnailCache.set(ninja.id, url);
       return url;
     } catch {

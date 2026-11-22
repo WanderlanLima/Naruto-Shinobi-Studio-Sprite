@@ -5,15 +5,16 @@ import type {
   NinjaMediaProfile,
   SpineCommandEffectRef,
   SpineSkeleton,
+  SpriteRegionSource,
 } from '../types/sprite';
 import {
+  buildRegionSpriteMap,
   canvasToPngBlob,
   computeCompositeAnimationWorldBounds,
   computeNativeExportCellSize,
   downloadBlob,
   exportAnimationGif,
   exportAnimationStripPngBlob,
-  extractRegionToCanvas,
   extractRegionToPngBlob,
   extractSpineAudioRefs,
   extractSpineEffectRefs,
@@ -43,6 +44,7 @@ export interface CompleteExportOptions {
   includeAnimGifs: boolean;
   includePassiveAura?: boolean;
   includeVideosAndAudio?: boolean;
+  includeSkillIcons?: boolean;
   mediaProfile?: NinjaMediaProfile | null;
   gifBg: 'transparent' | 'dark' | 'light' | 'chroma';
   fps?: number;
@@ -62,7 +64,7 @@ export interface BaseCharacterData {
   skeleton: SpineSkeleton | null;
   pageUrls: Record<string, string>;
   pageImages: Record<string, HTMLImageElement>;
-  regionCanvasMap: Map<string, HTMLCanvasElement>;
+  regionCanvasMap: Map<string, SpriteRegionSource>;
 }
 
 export interface CollectedCharacterFile {
@@ -77,7 +79,7 @@ export interface ParsedEffectAsset {
   pages: AtlasPage[];
   pageUrls: Record<string, string>;
   pageImages: Record<string, HTMLImageElement>;
-  regionCanvasMap: Map<string, HTMLCanvasElement>;
+  regionCanvasMap: Map<string, SpriteRegionSource>;
 }
 
 const PRIORITY_ANIM_ORDER = [
@@ -241,6 +243,9 @@ export function buildCharacterInstructionsJson(
       name: animName,
       effectiveAnimation: effectiveAnim !== animName ? effectiveAnim : undefined,
       skillLabel: skillMeta ? `${skillMeta.slotLabel}: ${skillMeta.name}` : undefined,
+      skillIconFile: skillMeta?.iconUrl
+        ? buildSkillIconRelPathForAnim(skillMeta.animKey, skillMeta.name, skillMeta.iconUrl)
+        : undefined,
       baseDurationSec,
       compositeDurationSec,
       effects: allRefs.map((ref) => ({
@@ -275,6 +280,31 @@ export function buildCharacterInstructionsJson(
     };
   });
 
+  const skillsWithIconFile =
+    mediaProfile?.skills && Object.keys(mediaProfile.skills).length > 0
+      ? Object.fromEntries(
+          Object.entries(mediaProfile.skills).map(([k, sk]) => [
+            k,
+            {
+              ...sk,
+              iconFile: sk.iconUrl
+                ? buildSkillIconRelPathForAnim(sk.animKey, sk.name, sk.iconUrl)
+                : undefined,
+            },
+          ])
+        )
+      : undefined;
+
+  const passivesWithIconFile =
+    mediaProfile?.passives && mediaProfile.passives.length > 0
+      ? mediaProfile.passives.map((p, idx) => ({
+          ...p,
+          iconFile: p.iconUrl
+            ? buildPassiveIconRelPath(idx, p.name, p.iconUrl)
+            : undefined,
+        }))
+      : undefined;
+
   return JSON.stringify(
     {
       characterId: ninjaId,
@@ -283,14 +313,9 @@ export function buildCharacterInstructionsJson(
       skeletonFile: `${ninjaId}.json`,
       effectScope: scope,
       notes:
-        'As definicoes completas de ossos, slots, keyframes e eventos @CMD ficam no arquivo .json (skeleton). Particulas (incluindo aura passiva idle) ficam em particulas/<spineId>/, videos de ultimate em videos/*.mp4 e vozes/efeitos sonoros em audios/*.mp3.',
-      skills: mediaProfile?.skills && Object.keys(mediaProfile.skills).length > 0
-        ? mediaProfile.skills
-        : undefined,
-      passives:
-        mediaProfile?.passives && mediaProfile.passives.length > 0
-          ? mediaProfile.passives
-          : undefined,
+        'As definicoes completas de ossos, slots, keyframes e eventos @CMD ficam no arquivo .json (skeleton). Icones das skills em qualidade maxima ficam em icones_skills/, particulas (incluindo aura passiva idle) ficam em particulas/<spineId>/, videos de ultimate em videos/*.mp4 e vozes/efeitos sonoros em audios/*.mp3.',
+      skills: skillsWithIconFile,
+      passives: passivesWithIconFile,
       passiveAura: mediaProfile?.passiveAura
         ? {
             id: mediaProfile.passiveAura.id,
@@ -390,14 +415,7 @@ export async function fetchParsedEffectAsset(
       );
       throwIfAborted(signal);
 
-      const regionCanvasMap = new Map<string, HTMLCanvasElement>();
-      for (const page of pages) {
-        const img = pageImages[page.name];
-        if (!img) continue;
-        for (const reg of page.regions) {
-          regionCanvasMap.set(reg.name, extractRegionToCanvas(reg, img));
-        }
-      }
+      const regionCanvasMap = buildRegionSpriteMap(pages, pageImages);
 
       return {
         spineId,
@@ -455,12 +473,174 @@ async function fetchBinaryAssetSafe(
   }
 }
 
+const SKILL_ICON_SLOT_PREFIX: Record<string, string> = {
+  attack: '01_ataque_normal',
+  skill: '02_habilidade',
+  UniqueSkill: '03_ultimate',
+  chase1: '04_perseguicao_1',
+  chase2: '05_perseguicao_2',
+  chase3: '06_perseguicao_3',
+};
+
+const SKILL_SLOT_ORDER = ['attack', 'skill', 'UniqueSkill', 'chase1', 'chase2', 'chase3'];
+
+function getUrlImageExt(url: string): string {
+  const m = url.split('?')[0].match(/\.(png|webp|jpe?g|gif)$/i);
+  if (!m) return 'png';
+  const ext = m[1].toLowerCase();
+  return ext === 'jpeg' ? 'jpg' : ext;
+}
+
+function detectImageExtFromBytes(buf: ArrayBuffer, fallbackExt: string): string {
+  const bytes = new Uint8Array(buf, 0, Math.min(12, buf.byteLength));
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    return 'png';
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return 'webp';
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'jpg';
+  }
+  return fallbackExt || 'png';
+}
+
+function sanitizeSkillSlug(name: string): string {
+  const clean = name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48);
+  return clean || 'skill';
+}
+
+export function buildSkillIconRelPathForAnim(
+  animKey: string,
+  skillName: string,
+  iconUrl: string
+): string {
+  const slotPrefix = SKILL_ICON_SLOT_PREFIX[animKey] || sanitizePathSegment(animKey);
+  const ext = getUrlImageExt(iconUrl);
+  return `icones_skills/${slotPrefix}_${sanitizeSkillSlug(skillName)}.${ext}`;
+}
+
+export function buildPassiveIconRelPath(
+  index: number,
+  passiveName: string,
+  iconUrl: string
+): string {
+  const ext = getUrlImageExt(iconUrl);
+  return `icones_skills/passiva_${String(index + 1).padStart(2, '0')}_${sanitizeSkillSlug(passiveName)}.${ext}`;
+}
+
+export interface SkillIconExportTarget {
+  baseRelPath: string;
+  url: string;
+  fallbackExt: string;
+}
+
+export function getOrderedSkillIconTargets(
+  mediaProfile: NinjaMediaProfile | null | undefined
+): SkillIconExportTarget[] {
+  if (!mediaProfile) return [];
+  const targets: SkillIconExportTarget[] = [];
+  const usedBase = new Set<string>();
+
+  const pushTarget = (baseRelPath: string, url: string) => {
+    let candidate = baseRelPath;
+    let suffix = 2;
+    while (usedBase.has(candidate.toLowerCase())) {
+      candidate = `${baseRelPath}_${suffix++}`;
+    }
+    usedBase.add(candidate.toLowerCase());
+    targets.push({ baseRelPath: candidate, url, fallbackExt: getUrlImageExt(url) });
+  };
+
+  const skillsMap = mediaProfile.skills || {};
+  const seenKeys = new Set<string>();
+  for (const key of SKILL_SLOT_ORDER) {
+    const sk = skillsMap[key];
+    if (!sk?.iconUrl) continue;
+    seenKeys.add(key);
+    const slotPrefix = SKILL_ICON_SLOT_PREFIX[key] || sanitizePathSegment(key);
+    pushTarget(`icones_skills/${slotPrefix}_${sanitizeSkillSlug(sk.name)}`, sk.iconUrl);
+  }
+  for (const [key, sk] of Object.entries(skillsMap)) {
+    if (seenKeys.has(key) || !sk?.iconUrl) continue;
+    pushTarget(`icones_skills/${sanitizePathSegment(key)}_${sanitizeSkillSlug(sk.name)}`, sk.iconUrl);
+  }
+
+  const passives = mediaProfile.passives || [];
+  passives.forEach((p, idx) => {
+    if (!p?.iconUrl) return;
+    pushTarget(
+      `icones_skills/passiva_${String(idx + 1).padStart(2, '0')}_${sanitizeSkillSlug(p.name)}`,
+      p.iconUrl
+    );
+  });
+
+  return targets;
+}
+
+export async function collectCharacterSkillIconFiles(
+  mediaProfile: NinjaMediaProfile | null | undefined,
+  folderPrefix?: string,
+  signal?: AbortSignal
+): Promise<CollectedCharacterFile[]> {
+  throwIfAborted(signal);
+  const targets = getOrderedSkillIconTargets(mediaProfile);
+  if (targets.length === 0) return [];
+
+  const prefix = folderPrefix ? `${folderPrefix.replace(/\/+$/, '')}/` : '';
+  const files: CollectedCharacterFile[] = [];
+  const used = new Set<string>();
+
+  for (let i = 0; i < targets.length; i += 6) {
+    throwIfAborted(signal);
+    const batch = targets.slice(i, i + 6);
+    const results = await Promise.all(
+      batch.map(async (item) => ({
+        item,
+        buf: await fetchBinaryAssetSafe(item.url, signal),
+      }))
+    );
+    for (const { item, buf } of results) {
+      if (!buf) continue;
+      const ext = detectImageExtFromBytes(buf, item.fallbackExt);
+      const fullPath = `${prefix}${item.baseRelPath}.${ext}`;
+      if (used.has(fullPath)) continue;
+      used.add(fullPath);
+      files.push({ path: fullPath, data: buf });
+    }
+  }
+
+  return files;
+}
+
 export async function collectCharacterMediaFiles(params: {
   ninja: NinjaEntry;
   skeleton: SpineSkeleton | null;
   mediaProfile?: NinjaMediaProfile | null;
   includePassiveAura?: boolean;
   includeVideosAndAudio?: boolean;
+  includeSkillIcons?: boolean;
   sliceAuraFrames?: boolean;
   folderPrefix?: string;
   signal?: AbortSignal;
@@ -605,6 +785,14 @@ export async function collectCharacterMediaFiles(params: {
     }
   }
 
+  // 3. Skill & Passive Icons (maximum lossless quality)
+  if (params.includeSkillIcons !== false && mediaProfile) {
+    const iconFiles = await collectCharacterSkillIconFiles(mediaProfile, undefined, params.signal);
+    for (const ic of iconFiles) {
+      push(ic.path, ic.data);
+    }
+  }
+
   return { files, passiveAuraAsset };
 }
 
@@ -705,15 +893,18 @@ export async function collectCharacterCompleteFiles(
     }
   }
 
-  // 2.5 Fetch passive idle aura, ultimate MP4 videos & MP3 voices/sounds
+  // 2.5 Fetch passive idle aura, ultimate MP4 videos, MP3 voices/sounds & skill icons
   let passiveAuraAsset: ParsedEffectAsset | null = null;
   const wantPassiveAura = options.includePassiveAura !== false && Boolean(options.mediaProfile?.passiveAura);
   const wantMediaFiles = options.includeVideosAndAudio !== false;
+  const wantSkillIcons =
+    options.includeSkillIcons !== false &&
+    getOrderedSkillIconTargets(options.mediaProfile).length > 0;
 
-  if (wantPassiveAura || wantMediaFiles) {
+  if (wantPassiveAura || wantMediaFiles || wantSkillIcons) {
     options.onProgress?.({
       phase: 'media',
-      message: `Baixando aura passiva, vídeos MP4 e vozes/áudios de ${baseData.ninja.id}...`,
+      message: `Baixando ícones das skills, aura passiva e mídias de ${baseData.ninja.id}...`,
       percent: 28,
     });
     const mediaResult = await collectCharacterMediaFiles({
@@ -722,6 +913,7 @@ export async function collectCharacterCompleteFiles(
       mediaProfile: options.mediaProfile,
       includePassiveAura: wantPassiveAura,
       includeVideosAndAudio: wantMediaFiles,
+      includeSkillIcons: wantSkillIcons,
       sliceAuraFrames: options.includeLinkedEffects || options.includeOriginalAndFrames,
       signal: options.signal,
       effectCache: options.effectCache,
@@ -739,7 +931,8 @@ export async function collectCharacterCompleteFiles(
       options.includeAnimPngsAndSheets ||
       options.includeAnimGifs ||
       wantPassiveAura ||
-      wantMediaFiles)
+      wantMediaFiles ||
+      wantSkillIcons)
   ) {
     pushFile(
       'animacoes_instrucoes.json',

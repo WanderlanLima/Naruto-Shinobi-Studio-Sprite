@@ -91,7 +91,8 @@ function buildLocalFileHeader(
 
 function buildCentralDirectoryAndEocd(
   records: CentralDirRecord[],
-  cdOffset: number
+  cdOffset: number,
+  archiveComment?: string
 ): Uint8Array[] {
   const cdParts: Uint8Array[] = [];
   let cdSize = 0;
@@ -172,7 +173,8 @@ function buildCentralDirectoryAndEocd(
     cdParts.push(loc);
   }
 
-  const eocd = new Uint8Array(22);
+  const commentBytes = archiveComment ? textEncoder.encode(archiveComment) : new Uint8Array(0);
+  const eocd = new Uint8Array(22 + commentBytes.byteLength);
   const eocdView = new DataView(eocd.buffer);
   eocdView.setUint32(0, 0x06054b50, true);
   eocdView.setUint16(4, 0, true);
@@ -181,7 +183,10 @@ function buildCentralDirectoryAndEocd(
   eocdView.setUint16(10, count >= MAX_U16 ? MAX_U16 : count, true);
   eocdView.setUint32(12, cdSize >= MAX_U32 ? MAX_U32 : cdSize, true);
   eocdView.setUint32(16, cdOffset >= MAX_U32 ? MAX_U32 : cdOffset, true);
-  eocdView.setUint16(20, 0, true);
+  eocdView.setUint16(20, commentBytes.byteLength, true);
+  if (commentBytes.byteLength > 0) {
+    eocd.set(commentBytes, 22);
+  }
   cdParts.push(eocd);
 
   return cdParts;
@@ -197,7 +202,8 @@ const yieldFrame = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 export async function assembleStreamingZipBlob(
   iterateEntries: () => AsyncIterable<StreamingZipEntry[]>,
   totalEntriesEstimate: number,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  archiveComment?: string
 ): Promise<Blob> {
   const zipParts: BlobPart[] = [];
   const records: CentralDirRecord[] = [];
@@ -280,7 +286,7 @@ export async function assembleStreamingZipBlob(
   flushStaging();
   staging = new Uint8Array(0);
 
-  const cdAndEocd = buildCentralDirectoryAndEocd(records, offset);
+  const cdAndEocd = buildCentralDirectoryAndEocd(records, offset, archiveComment);
   for (const part of cdAndEocd) {
     zipParts.push(part as BlobPart);
   }
@@ -297,7 +303,8 @@ export async function streamZipToWritable(
   iterateEntries: () => AsyncIterable<StreamingZipEntry[]>,
   writable: { write(data: BufferSource | Blob): Promise<void>; close(): Promise<void> },
   totalEntriesEstimate: number,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  archiveComment?: string
 ): Promise<void> {
   const records: CentralDirRecord[] = [];
   const { modTime, modDate } = getDosDateTime();
@@ -379,7 +386,7 @@ export async function streamZipToWritable(
   await flushStaging();
   staging = new Uint8Array(0);
 
-  const cdAndEocd = buildCentralDirectoryAndEocd(records, offset);
+  const cdAndEocd = buildCentralDirectoryAndEocd(records, offset, archiveComment);
   for (const part of cdAndEocd) {
     await writable.write(part as Uint8Array<ArrayBuffer>);
   }

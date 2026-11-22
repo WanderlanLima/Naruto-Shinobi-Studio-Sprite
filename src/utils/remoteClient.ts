@@ -4,6 +4,8 @@ import type {
   NinjaBundleResponse,
   NinjaEntry,
   NinjaMediaProfile,
+  NinjaPassiveInfo,
+  NinjaSkillInfo,
   NinjaVideoClip,
   PassiveAuraDef,
   SpineSkeleton,
@@ -64,10 +66,23 @@ interface StaticEffectsAtlasPack {
   chunkMapLower: Map<string, number>;
 }
 
+interface StaticNinjaSkillsEntry {
+  heroCode?: string;
+  displayName?: string;
+  skills?: Record<string, NinjaSkillInfo>;
+  passives?: NinjaPassiveInfo[];
+}
+
+interface StaticNinjaSkillsPack {
+  ninjas: Record<string, StaticNinjaSkillsEntry>;
+  ninjasLower: Map<string, StaticNinjaSkillsEntry>;
+}
+
 declare const __STATIC_PACK_VERSION__: string | undefined;
 
 let staticPackPromise: Promise<StaticAtlasPack | null> | null = null;
 let staticEffectsPackPromise: Promise<StaticEffectsAtlasPack | null> | null = null;
+let staticSkillsPackPromise: Promise<StaticNinjaSkillsPack | null> | null = null;
 let lastStaticPackError: string | null = null;
 const skeletonChunkCache = new Map<number, Promise<JSZip | null>>();
 const effectSkeletonChunkCache = new Map<number, Promise<JSZip | null>>();
@@ -119,7 +134,9 @@ function hasZipMagicBytes(buf: ArrayBuffer): boolean {
   return view[0] === 0x50 && view[1] === 0x4b && (view[2] === 0x03 || view[2] === 0x05);
 }
 
-async function fetchStaticZip(relPath: string): Promise<{ zip: JSZip | null; error: string | null }> {
+export async function fetchStaticZip(
+  relPath: string
+): Promise<{ zip: JSZip | null; error: string | null }> {
   const candidates = buildStaticDataCandidates(relPath);
   const errors: string[] = [];
 
@@ -251,7 +268,7 @@ async function loadStaticEffectsAtlasPack(): Promise<StaticEffectsAtlasPack | nu
   return staticEffectsPackPromise;
 }
 
-async function loadStaticAtlasPack(): Promise<StaticAtlasPack | null> {
+export async function loadStaticAtlasPack(): Promise<StaticAtlasPack | null> {
   if (!staticPackPromise) {
     staticPackPromise = (async () => {
       const { zip, error } = await fetchStaticZip('data/naruto-atlas-pack.zip');
@@ -275,6 +292,200 @@ async function loadStaticAtlasPack(): Promise<StaticAtlasPack | null> {
     })();
   }
   return staticPackPromise;
+}
+
+export async function loadStaticEffectsPack(): Promise<StaticEffectsAtlasPack | null> {
+  return loadStaticEffectsAtlasPack();
+}
+
+export async function loadStaticNinjaSkillsPack(): Promise<StaticNinjaSkillsPack | null> {
+  if (!staticSkillsPackPromise) {
+    staticSkillsPackPromise = (async () => {
+      const { zip } = await fetchStaticZip('data/ninja-skills-pack.zip');
+      if (!zip) {
+        staticSkillsPackPromise = null;
+        return null;
+      }
+      try {
+        const skillsFile = zip.file('ninja-skills.json');
+        if (!skillsFile) {
+          staticSkillsPackPromise = null;
+          return null;
+        }
+        const parsed = JSON.parse(await skillsFile.async('text')) as {
+          ninjas?: Record<string, StaticNinjaSkillsEntry>;
+        };
+        const ninjas = parsed?.ninjas && typeof parsed.ninjas === 'object' ? parsed.ninjas : {};
+        const ninjasLower = new Map<string, StaticNinjaSkillsEntry>();
+        for (const [k, v] of Object.entries(ninjas)) {
+          ninjasLower.set(k.toLowerCase(), v);
+        }
+        return { ninjas, ninjasLower };
+      } catch {
+        staticSkillsPackPromise = null;
+        return null;
+      }
+    })();
+  }
+  return staticSkillsPackPromise;
+}
+
+function mergeStaticSkillsIntoProfile(
+  profile: NinjaMediaProfile,
+  entry: StaticNinjaSkillsEntry | undefined
+): NinjaMediaProfile {
+  if (!entry) return profile;
+
+  const mergedSkills: Record<string, NinjaSkillInfo> = { ...(profile.skills || {}) };
+  if (entry.skills) {
+    for (const [animKey, staticSkill] of Object.entries(entry.skills)) {
+      const existing = mergedSkills[animKey];
+      if (!existing) {
+        mergedSkills[animKey] = { ...staticSkill };
+      } else {
+        mergedSkills[animKey] = {
+          ...existing,
+          iconName: existing.iconName || staticSkill.iconName,
+          iconUrl: existing.iconUrl || staticSkill.iconUrl,
+          desc: existing.desc || staticSkill.desc,
+        };
+      }
+    }
+  }
+
+  let mergedPassives = [...(profile.passives || [])];
+  if (entry.passives && entry.passives.length > 0) {
+    if (mergedPassives.length === 0) {
+      mergedPassives = entry.passives.map((p) => ({ ...p }));
+    } else {
+      const byId = new Map(entry.passives.map((p) => [p.id, p]));
+      mergedPassives = mergedPassives.map((p) => {
+        const sp = byId.get(p.id);
+        return sp
+          ? {
+              ...p,
+              iconName: p.iconName || sp.iconName,
+              iconUrl: p.iconUrl || sp.iconUrl,
+              desc: p.desc || sp.desc,
+            }
+          : p;
+      });
+    }
+  }
+
+  return {
+    ...profile,
+    heroCode: profile.heroCode || entry.heroCode,
+    displayName: profile.displayName || entry.displayName,
+    skills: mergedSkills,
+    passives: mergedPassives,
+  };
+}
+
+export async function readStaticPackFileBytes(relPath: string): Promise<Uint8Array | null> {
+  const clean = relPath.replace(/^\/+/, '');
+  const low = clean.toLowerCase();
+  const isSpineDir =
+    low.startsWith('acervo/asset/spine/') || low.startsWith('acervo/asset/spine-no-estados/');
+  if (!isSpineDir) return null;
+
+  const fileName = clean.split('/').pop() || '';
+  const isAtlas = fileName.toLowerCase().endsWith('.atlas');
+  const isJson = fileName.toLowerCase().endsWith('.json');
+  if (!isAtlas && !isJson) return null;
+
+  const stem = fileName.slice(0, isAtlas ? -6 : -5);
+  const stemLow = stem.toLowerCase();
+
+  // Check main atlas/skeleton pack first
+  const mainPack = await loadStaticAtlasPack();
+  if (mainPack) {
+    if (isAtlas) {
+      const f = mainPack.zip.file(`atlas/${stem}.atlas`);
+      if (f) return await f.async('uint8array');
+    } else if (isJson) {
+      const idleEntry = mainPack.idleMap[stem];
+      if (typeof idleEntry?.s === 'number') {
+        const chunkPromise =
+          skeletonChunkCache.get(idleEntry.s) ||
+          (async () => {
+            const { zip } = await fetchStaticZip(`data/skeletons/skel-${idleEntry.s}.zip`);
+            return zip;
+          })();
+        if (!skeletonChunkCache.has(idleEntry.s)) {
+          skeletonChunkCache.set(idleEntry.s, chunkPromise);
+        }
+        const chunkZip = await chunkPromise;
+        const sf = chunkZip?.file(`${stem}.json`);
+        if (sf) return await sf.async('uint8array');
+      }
+    }
+  }
+
+  // Check companion combat particles pack
+  const effPack = await loadStaticEffectsAtlasPack();
+  if (effPack) {
+    if (isAtlas) {
+      let f = effPack.zip.file(`atlas/${stem}.atlas`);
+      if (!f) {
+        const target = `atlas/${stemLow}.atlas`;
+        for (const [k, v] of Object.entries(effPack.zip.files)) {
+          if (!v.dir && k.toLowerCase() === target) {
+            f = v;
+            break;
+          }
+        }
+      }
+      if (f) return await f.async('uint8array');
+    } else if (isJson) {
+      const chunkIdx = effPack.chunkMap[stem] ?? effPack.chunkMapLower.get(stemLow);
+      if (typeof chunkIdx === 'number') {
+        let chunkPromise = effectSkeletonChunkCache.get(chunkIdx);
+        if (!chunkPromise) {
+          chunkPromise = (async () => {
+            const { zip } = await fetchStaticZip(`data/effects-skeletons/eff-${chunkIdx}.zip`);
+            if (!zip) {
+              effectSkeletonChunkCache.delete(chunkIdx);
+              return null;
+            }
+            return zip;
+          })();
+          effectSkeletonChunkCache.set(chunkIdx, chunkPromise);
+        }
+        const chunkZip = await chunkPromise;
+        if (chunkZip) {
+          let sf = chunkZip.file(`${stem}.json`);
+          if (!sf) {
+            const target = `${stemLow}.json`;
+            for (const [k, v] of Object.entries(chunkZip.files)) {
+              if (!v.dir && k.toLowerCase() === target) {
+                sf = v;
+                break;
+              }
+            }
+          }
+          if (sf) return await sf.async('uint8array');
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+export async function fetchStaticCatalogJson(): Promise<ExtractResponse | null> {
+  for (const candidateUrl of buildStaticDataCandidates('data/naruto-catalog.json')) {
+    try {
+      const resp = await fetch(candidateUrl, { cache: 'no-cache' });
+      if (!resp.ok) continue;
+      const text = await resp.text();
+      if (text.trimStart().startsWith('<')) continue;
+      return JSON.parse(text) as ExtractResponse;
+    } catch {
+      // try next
+    }
+  }
+  return null;
 }
 
 export function getSavedCorsProxy(): string {
@@ -302,6 +513,10 @@ export function setSavedCorsProxy(url: string) {
 
 export function isStaticHostingMode(): boolean {
   return backendStatus === 'static';
+}
+
+export function markStaticHostingMode(): void {
+  backendStatus = 'static';
 }
 
 export function buildCorsRelayUrl(targetUrl: string, proxyPrefix = getSavedCorsProxy()): string {
@@ -1013,11 +1228,26 @@ export async function fetchNinjaMediaProfile(
         }
       }
 
-      return {
+      let finalOfflineProfile: NinjaMediaProfile = {
         ...baseProfile,
         passiveAura: baseProfile.passiveAura ?? resolveFallbackPassiveAura(ninja),
         videos: attachVideoAnimTiming(baseProfile.videos),
       };
+
+      // Enrich skill icons from bundled static skills pack if an older offline ZIP lacks iconUrl
+      const hasAnyOfflineIcon =
+        Object.values(finalOfflineProfile.skills || {}).some((s) => Boolean(s.iconUrl)) ||
+        (finalOfflineProfile.passives || []).some((p) => Boolean(p.iconUrl));
+      if (!hasAnyOfflineIcon) {
+        const skillsPack = await loadStaticNinjaSkillsPack();
+        const staticEntry =
+          skillsPack?.ninjas[ninja.id] || skillsPack?.ninjasLower.get(ninja.id.toLowerCase());
+        if (staticEntry) {
+          finalOfflineProfile = mergeStaticSkillsIntoProfile(finalOfflineProfile, staticEntry);
+        }
+      }
+
+      return finalOfflineProfile;
     }
 
     if (backendStatus !== 'static') {
@@ -1053,11 +1283,18 @@ export async function fetchNinjaMediaProfile(
           backendStatus = 'static';
         }
       } catch {
-        // fall through to local deterministic profile
+        // fall through to local deterministic profile + static skills pack
       }
     }
 
-    return buildFallbackMediaProfile(ninja, skeleton);
+    let fallbackProfile = buildFallbackMediaProfile(ninja, skeleton);
+    const skillsPack = await loadStaticNinjaSkillsPack();
+    const staticEntry =
+      skillsPack?.ninjas[ninja.id] || skillsPack?.ninjasLower.get(ninja.id.toLowerCase());
+    if (staticEntry) {
+      fallbackProfile = mergeStaticSkillsIntoProfile(fallbackProfile, staticEntry);
+    }
+    return fallbackProfile;
   })();
 
   if (mediaProfileCache.size >= 40) {

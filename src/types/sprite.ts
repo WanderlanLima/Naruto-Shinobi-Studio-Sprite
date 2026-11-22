@@ -183,6 +183,16 @@ export interface NinjaSkillInfo {
   slotLabel: string;
   name: string;
   desc?: string;
+  iconName?: string;
+  iconUrl?: string;
+}
+
+export interface NinjaPassiveInfo {
+  id: string;
+  name: string;
+  desc?: string;
+  iconName?: string;
+  iconUrl?: string;
 }
 
 export interface NinjaVoiceClip {
@@ -206,7 +216,7 @@ export interface NinjaMediaProfile {
   heroCode?: string;
   displayName?: string;
   skills: Record<string, NinjaSkillInfo>;
-  passives: Array<{ id: string; name: string; desc?: string }>;
+  passives: NinjaPassiveInfo[];
   passiveAura: PassiveAuraDef | null;
   videos: NinjaVideoClip[];
   voices: NinjaVoiceClip[];
@@ -215,11 +225,21 @@ export interface NinjaMediaProfile {
   originBase: string;
 }
 
+export interface AtlasRegionSprite {
+  kind: 'atlas-region';
+  image: HTMLImageElement;
+  region: AtlasRegion;
+  width: number;
+  height: number;
+}
+
+export type SpriteRegionSource = HTMLCanvasElement | AtlasRegionSprite;
+
 export interface CompositeSpineLayer {
   spineId: string;
   skeleton: SpineSkeleton;
   animName: string;
-  regionCanvasMap: Map<string, HTMLCanvasElement>;
+  regionCanvasMap: Map<string, SpriteRegionSource>;
   startTime: number;
   duration: number;
   layer: 'behind' | 'front';

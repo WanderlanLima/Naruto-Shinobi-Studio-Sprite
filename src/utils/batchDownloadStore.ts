@@ -28,6 +28,7 @@ export interface BatchJobRecord {
   contentMode: BatchContentMode;
   includeLinkedEffects?: boolean;
   includeMediaAndAuras?: boolean;
+  includeSkillIcons?: boolean;
   effectScope?: 'powers' | 'all' | 'base';
   includeAnimGifs?: boolean;
   startIdx: number;
@@ -178,6 +179,7 @@ export async function createBatchJob(params: {
   contentMode: BatchContentMode;
   includeLinkedEffects?: boolean;
   includeMediaAndAuras?: boolean;
+  includeSkillIcons?: boolean;
   effectScope?: 'powers' | 'all' | 'base';
   includeAnimGifs?: boolean;
   startIdx: number;
@@ -193,6 +195,7 @@ export async function createBatchJob(params: {
     contentMode: params.contentMode,
     includeLinkedEffects: params.includeLinkedEffects,
     includeMediaAndAuras: params.includeMediaAndAuras,
+    includeSkillIcons: params.includeSkillIcons,
     effectScope: params.effectScope,
     includeAnimGifs: params.includeAnimGifs,
     startIdx: params.startIdx,

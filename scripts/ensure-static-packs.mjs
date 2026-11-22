@@ -10,9 +10,11 @@
  * - Recovery path: downloads any missing .atlas/.json directly from origin (no browser CORS limits).
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 import JSZip from 'jszip';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -24,9 +26,20 @@ const ATLAS_PACK_PATH = path.join(DATA_DIR, 'naruto-atlas-pack.zip');
 const SKEL_DIR = path.join(DATA_DIR, 'skeletons');
 const EFFECTS_ATLAS_PACK_PATH = path.join(DATA_DIR, 'effects-atlas-pack.zip');
 const EFFECTS_SKEL_DIR = path.join(DATA_DIR, 'effects-skeletons');
+const BACKUP_MANIFEST_PACK_PATH = path.join(DATA_DIR, 'backup-manifest.zip');
+const NINJA_SKILLS_PACK_PATH = path.join(DATA_DIR, 'ninja-skills-pack.zip');
 const NUM_CHUNKS = 10;
 const NUM_EFFECT_CHUNKS = 10;
 const CONCURRENCY = 20;
+
+const JOTA_DD = [
+  0xeb, 0x14, 0x79, 0xb3, 0xa9, 0xd6, 0x0c, 0x6e, 0x2d, 0x7c, 0x0f, 0x45, 0xc3, 0x45, 0x8f, 0x0d,
+  0xcc, 0x7f, 0x81, 0x52, 0xfa, 0xb1, 0x4b, 0xc1, 0x7c, 0x49, 0x5b, 0x52, 0x69, 0x3b, 0xfd, 0x96,
+];
+const JOTA_CD = [
+  0x5c, 0x16, 0x0c, 0x5a, 0x22, 0x5e, 0xb5, 0xd2, 0xb4, 0xc6, 0xca, 0xef, 0xbe, 0xbf, 0xde, 0xc2,
+  0x95, 0xc0, 0x60, 0xac, 0xf0, 0x7a, 0xd6, 0x64, 0x48, 0x23, 0xec, 0xa8, 0xdb, 0xa0, 0x14, 0xaf,
+];
 
 const PASSIVE_AURAS = [
   {
@@ -175,7 +188,7 @@ function pickIdleEntry(atlasText, skeletonObj, chunkIndex) {
   };
 }
 
-async function fetchWithRetry(url, retries = 2) {
+async function fetchWithRetry(url, retries = 2, allowHtml = false) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const resp = await fetch(url, {
@@ -187,7 +200,7 @@ async function fetchWithRetry(url, retries = 2) {
       });
       if (resp.ok) {
         const txt = await resp.text();
-        if (txt.trimStart().startsWith('<')) return null;
+        if (!allowHtml && txt.trimStart().startsWith('<')) return null;
         return txt;
       }
       if (resp.status === 404) return null;
@@ -529,6 +542,426 @@ async function ensureEffectPacks(ninjas, mainAtlasZip, mainSkelZips) {
   );
 }
 
+function urlToSafeRelPath(rawUrl, expectedOrigin) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.origin !== expectedOrigin) return null;
+    const rel = decodeURIComponent(parsed.pathname).replace(/^\/+/, '');
+    if (!rel || rel.includes('..') || /[\x00-\x1f]/.test(rel)) return null;
+    return rel;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchOriginManifest() {
+  const origin = 'https://naruto.jotagame.com';
+  const html = await fetchWithRetry(`${origin}/jogar?app=1`, 2, true);
+  if (!html) return null;
+  const m = html.match(/window\.__VDF_RECURSOS__\s*=\s*\{[^}]*"manifesto"\s*:\s*"([^"]+)"/);
+  if (!m?.[1]) return null;
+  const manifestoText = await fetchWithRetry(new URL(m[1], origin).toString(), 2);
+  if (!manifestoText) return null;
+  const man = JSON.parse(manifestoText);
+  return { origin, man };
+}
+
+async function ensureBackupManifestPack(catalog, cachedManifest) {
+  const existing = await tryLoadZip(BACKUP_MANIFEST_PACK_PATH);
+  if (existing && existing.file('backup-manifest.json')) {
+    try {
+      const parsed = JSON.parse(await existing.file('backup-manifest.json').async('text'));
+      if (
+        parsed &&
+        parsed.skillIconsIncluded === true &&
+        Array.isArray(parsed.spriteFiles) &&
+        parsed.spriteFiles.length > 0
+      ) {
+        console.log(
+          `[ensure-static-packs] Backup manifest OK (sprites=${parsed.spriteFiles.length}, particles=${parsed.particleFiles?.length || 0}, videos=${parsed.videoFiles?.length || 0}, audios=${parsed.audioFiles?.length || 0}, assets=${parsed.assetFiles?.length || 0}).`
+        );
+        return cachedManifest;
+      }
+    } catch {
+      // rebuild below
+    }
+  }
+
+  console.log('[ensure-static-packs] Building public/data/backup-manifest.zip from origin...');
+  const manifestBundle = cachedManifest || (await fetchOriginManifest());
+  if (!manifestBundle) {
+    console.warn('[ensure-static-packs] Could not fetch origin manifest for backup-manifest.zip; skipping.');
+    return cachedManifest;
+  }
+  const { origin, man } = manifestBundle;
+
+  const fileSet = new Set();
+  const fileSizeByPath = new Map();
+  for (const entry of Object.values(man.arquivos || {})) {
+    const rel = entry?.url;
+    if (!rel) continue;
+    fileSet.add(rel);
+    fileSizeByPath.set(rel, Number(entry.bytes || 0));
+  }
+
+  const baseSet = new Set();
+  const ninjas = Array.isArray(catalog.ninjas) ? catalog.ninjas : [];
+  for (const n of ninjas) {
+    const atlasRel = urlToSafeRelPath(n.atlasUrl, origin);
+    const skelRel = urlToSafeRelPath(n.skeletonUrl, origin);
+    const artRel = n.nameArtUrl ? urlToSafeRelPath(n.nameArtUrl, origin) : null;
+    if (atlasRel) baseSet.add(atlasRel);
+    if (skelRel) baseSet.add(skelRel);
+    if (artRel) baseSet.add(artRel);
+  }
+  for (const rel of fileSet) {
+    if (rel.startsWith('acervo/asset/spine-no-estados/')) {
+      baseSet.add(rel);
+    }
+  }
+
+  const videoFiles = [];
+  const audioFiles = [];
+  const particleSet = new Set();
+  const spriteSet = new Set();
+  const assetSet = new Set();
+
+  for (const rel of fileSet) {
+    if (
+      (rel.startsWith('acervo/video/hero/') || rel.startsWith('acervo/video/recruit/')) &&
+      rel.toLowerCase().endsWith('.mp4')
+    ) {
+      videoFiles.push(rel);
+    } else if (rel.startsWith('acervo/som/') && rel.toLowerCase().endsWith('.mp3')) {
+      audioFiles.push(rel);
+    } else if (rel.startsWith('acervo/asset/spine/')) {
+      const fname = rel.slice('acervo/asset/spine/'.length);
+      const lower = fname.toLowerCase();
+      if (
+        lower.startsWith('noe_') ||
+        lower.startsWith('efeito_') ||
+        /_effect\d*\.(atlas|json|webp|png|jpe?g)$/i.test(lower) ||
+        /_highteffect\d*\.(atlas|json|webp|png|jpe?g)$/i.test(lower) ||
+        /_ground\d*\.(atlas|json|webp|png|jpe?g)$/i.test(lower)
+      ) {
+        if (!baseSet.has(rel)) particleSet.add(rel);
+      } else if (/\.(webp|png|jpe?g)$/i.test(lower)) {
+        if (!baseSet.has(rel)) spriteSet.add(rel);
+      }
+    } else if (
+      rel.startsWith('acervo/asset/items/skill_') &&
+      rel.toLowerCase().endsWith('.png')
+    ) {
+      if (!baseSet.has(rel)) assetSet.add(rel);
+    }
+  }
+
+  for (const s of catalog.sheets || []) {
+    const rel = urlToSafeRelPath(s.url, origin);
+    if (rel && !baseSet.has(rel) && !particleSet.has(rel)) {
+      spriteSet.add(rel);
+    }
+  }
+  for (const a of catalog.assets || []) {
+    const rel = urlToSafeRelPath(a.url, origin);
+    if (
+      rel &&
+      !baseSet.has(rel) &&
+      !particleSet.has(rel) &&
+      !spriteSet.has(rel) &&
+      (fileSet.size === 0 || fileSet.has(rel))
+    ) {
+      assetSet.add(rel);
+    }
+  }
+
+  const toSizedPairs = (arr) =>
+    Array.from(arr)
+      .sort()
+      .map((p) => [p, fileSizeByPath.get(p) || 0]);
+
+  const manifestPayload = {
+    origin,
+    generatedAt: new Date().toISOString(),
+    skillIconsIncluded: true,
+    baseFiles: toSizedPairs(baseSet),
+    videoFiles: toSizedPairs(videoFiles),
+    audioFiles: toSizedPairs(audioFiles),
+    particleFiles: toSizedPairs(particleSet),
+    spriteFiles: toSizedPairs(spriteSet),
+    assetFiles: toSizedPairs(assetSet),
+  };
+
+  const z = new JSZip();
+  z.file('backup-manifest.json', JSON.stringify(manifestPayload));
+  const buf = await z.generateAsync({
+    type: 'nodebuffer',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 9 },
+  });
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(BACKUP_MANIFEST_PACK_PATH, buf);
+  console.log(
+    `[ensure-static-packs] Backup manifest written: backup-manifest.zip (${(buf.length / 1024).toFixed(1)} KB, base=${manifestPayload.baseFiles.length}, sprites=${manifestPayload.spriteFiles.length}, particles=${manifestPayload.particleFiles.length}, videos=${manifestPayload.videoFiles.length}, audios=${manifestPayload.audioFiles.length}, assets=${manifestPayload.assetFiles.length}).`
+  );
+  return manifestBundle;
+}
+
+async function ensureNinjaSkillsPack(catalog, cachedManifest) {
+  const existing = await tryLoadZip(NINJA_SKILLS_PACK_PATH);
+  if (existing && existing.file('ninja-skills.json')) {
+    try {
+      const parsed = JSON.parse(await existing.file('ninja-skills.json').async('text'));
+      const count = parsed?.ninjas ? Object.keys(parsed.ninjas).length : 0;
+      if (parsed?.version === 1 && count > 0) {
+        console.log(`[ensure-static-packs] Ninja skills pack OK (${count} ninjas with skill icons).`);
+        return cachedManifest;
+      }
+    } catch {
+      // rebuild below
+    }
+  }
+
+  console.log('[ensure-static-packs] Building public/data/ninja-skills-pack.zip from origin tables...');
+  const manifestBundle = cachedManifest || (await fetchOriginManifest());
+  if (!manifestBundle) {
+    console.warn('[ensure-static-packs] Could not fetch origin manifest for ninja-skills-pack.zip; skipping.');
+    return cachedManifest;
+  }
+  const { origin, man } = manifestBundle;
+  const v = man.dadosVersao || '0';
+
+  const fileSet = new Set();
+  const fileByLower = new Map();
+  for (const entry of Object.values(man.arquivos || {})) {
+    const rel = entry?.url;
+    if (!rel) continue;
+    fileSet.add(rel);
+    fileByLower.set(rel.toLowerCase(), rel);
+  }
+
+  const master = Buffer.from(JOTA_DD.map((val, i) => val ^ JOTA_CD[i]));
+  const nomeKey = crypto.createHmac('sha256', master).update('nome').digest();
+  const dadosKey = crypto.createHmac('sha256', master).update('dados').digest();
+
+  const fetchDados = async (pathStr) => {
+    const slug = crypto
+      .createHmac('sha256', nomeKey)
+      .update(pathStr)
+      .digest()
+      .subarray(0, 16)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    const resp = await fetch(`${origin}/d/${slug}?v=${v}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; ShinobiSpriteStudioBuild/1.0)',
+        Referer: `${origin}/`,
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${pathStr}`);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const decipher = crypto.createDecipheriv('aes-256-gcm', dadosKey, buf.subarray(0, 12));
+    decipher.setAuthTag(buf.subarray(buf.length - 16));
+    const dec = Buffer.concat([
+      decipher.update(buf.subarray(12, buf.length - 16)),
+      decipher.final(),
+    ]);
+    return JSON.parse(zlib.gunzipSync(dec).toString('utf8'));
+  };
+
+  let herois;
+  let pt;
+  let roleModels;
+  let skills;
+  try {
+    [herois, pt, roleModels, skills] = await Promise.all([
+      fetchDados('dados/jogo/herois.json'),
+      fetchDados('dados/jogo/pt.json'),
+      fetchDados('dados/tabelas/json/RoleModel.json'),
+      fetchDados('dados/jogo/skills.json'),
+    ]);
+  } catch (err) {
+    console.warn('[ensure-static-packs] Failed to decrypt game tables for ninja-skills-pack.zip:', err?.message || err);
+    return manifestBundle;
+  }
+
+  const resolvePt = (val) => {
+    if (!val) return undefined;
+    const str = String(val);
+    if (str.startsWith('Translate.Id:')) {
+      const k = str.slice('Translate.Id:'.length);
+      const entry = pt[k];
+      if (!entry) return undefined;
+      return (Array.isArray(entry) ? String(entry[0] || '') : String(entry)).trim() || undefined;
+    }
+    const direct = pt[str];
+    if (direct) {
+      return (Array.isArray(direct) ? String(direct[0] || '') : String(direct)).trim() || undefined;
+    }
+    return str.trim() || undefined;
+  };
+
+  const resolveSkillIconUrl = (iconVal) => {
+    if (typeof iconVal !== 'string' || !iconVal.trim()) return {};
+    const raw = iconVal.trim().replace(/^\/+/, '');
+    const stem = raw.replace(/\.(png|webp|jpe?g)$/i, '');
+    const iconName = stem.split('/').pop() || stem;
+    const candidates = raw.includes('/')
+      ? [
+          `${stem}.png`,
+          `${stem}.webp`,
+          raw,
+          `acervo/asset/items/${iconName}.png`,
+          `acervo/asset/items/${iconName}.webp`,
+        ]
+      : [
+          `acervo/asset/items/${stem}.png`,
+          `acervo/asset/items/${stem}.webp`,
+          `acervo/asset/ui/icon/${stem}.png`,
+          `acervo/asset/ui/icon/${stem}.webp`,
+        ];
+
+    for (const c of candidates) {
+      if (fileSet.has(c)) return { iconName, iconUrl: `${origin}/${c}` };
+      const low = fileByLower.get(c.toLowerCase());
+      if (low) return { iconName, iconUrl: `${origin}/${low}` };
+    }
+    return { iconName };
+  };
+
+  // Pre-index roleModels and herois for fast O(1) lookup
+  const rmByTagOrAnim = new Map();
+  for (const rm of Object.values(roleModels || {})) {
+    if (!rm || typeof rm !== 'object') continue;
+    const tag = String(rm.Tag || '').toLowerCase();
+    const anim = String(rm.Animation || '').toLowerCase();
+    if (tag && !rmByTagOrAnim.has(tag)) rmByTagOrAnim.set(tag, rm);
+    if (anim && !rmByTagOrAnim.has(anim)) rmByTagOrAnim.set(anim, rm);
+  }
+  const heroBySpineOrTag = new Map();
+  for (const h of Object.values(herois || {})) {
+    const modelo = h?.modelo;
+    if (!modelo || typeof modelo !== 'object') continue;
+    const sp = String(modelo.spine || '').toLowerCase();
+    const tg = String(modelo.tag || '').toLowerCase();
+    if (sp && !heroBySpineOrTag.has(sp)) heroBySpineOrTag.set(sp, h);
+    if (tg && !heroBySpineOrTag.has(tg)) heroBySpineOrTag.set(tg, h);
+  }
+
+  const ninjasOut = {};
+  let totalSkillsMapped = 0;
+  let totalIconsMapped = 0;
+  const ninjas = Array.isArray(catalog.ninjas) ? catalog.ninjas : [];
+
+  for (const ninja of ninjas) {
+    const idLow = String(ninja.id || '').toLowerCase();
+    const code = String(ninja.code || '');
+    const code6 = code.length === 8 && code.startsWith('100') ? code.slice(0, 6) : code;
+
+    const rmObj = rmByTagOrAnim.get(idLow) || roleModels?.[code] || roleModels?.[code6];
+    const baseHeroObj = rmObj?.model != null ? herois?.[String(rmObj.model)] : undefined;
+    const heroObj =
+      (rmObj?.Id != null ? herois?.[String(rmObj.Id)] : undefined) ||
+      baseHeroObj ||
+      heroBySpineOrTag.get(idLow) ||
+      herois?.[code] ||
+      herois?.[code6];
+
+    if (!heroObj) continue;
+
+    const heroCode =
+      heroObj.Id != null ? String(heroObj.Id) : rmObj?.Id != null ? String(rmObj.Id) : code6 || code;
+    const displayName =
+      (typeof heroObj.name === 'string' && heroObj.name.trim()) ||
+      (rmObj?.__link_name ? resolvePt(rmObj.__link_name) : undefined) ||
+      ninja.name ||
+      undefined;
+
+    const skillsOut = {};
+    const addSkill = (animKey, slotLabel, skillId) => {
+      if (typeof skillId !== 'string' || !skillId.trim()) return;
+      const sk = skills?.[skillId.trim()];
+      if (!sk) return;
+      const name = resolvePt(sk.name) || skillId.trim();
+      const desc = resolvePt(sk.desc);
+      const { iconName, iconUrl } = resolveSkillIconUrl(sk.icon);
+      skillsOut[animKey] = {
+        id: skillId.trim(),
+        animKey,
+        slotLabel,
+        name,
+        ...(desc ? { desc } : {}),
+        ...(iconName ? { iconName } : {}),
+        ...(iconUrl ? { iconUrl } : {}),
+      };
+      totalSkillsMapped++;
+      if (iconUrl) totalIconsMapped++;
+    };
+
+    addSkill('attack', 'Ataque Normal', heroObj.normalskill);
+    addSkill('skill', 'Habilidade', heroObj.skill);
+    addSkill('UniqueSkill', 'Ôgi (Ultimate)', heroObj.superskill);
+    addSkill('chase1', 'Perseguição 1', heroObj.chase);
+    addSkill('chase2', 'Perseguição 2', heroObj.chase2);
+    addSkill('chase3', 'Perseguição 3', heroObj.chase3);
+
+    const passivesOut = [];
+    const passiveList = Array.isArray(heroObj.passive) ? heroObj.passive : [];
+    for (const pId of passiveList) {
+      if (typeof pId !== 'string' || !pId.trim()) continue;
+      if (pId === 'hero_hurt' || pId === 'hero_unhurt') continue;
+      const sk = skills?.[pId.trim()];
+      if (!sk) continue;
+      const name = resolvePt(sk.name);
+      if (!name) continue;
+      const desc = resolvePt(sk.desc);
+      const { iconName, iconUrl } = resolveSkillIconUrl(sk.icon);
+      passivesOut.push({
+        id: pId.trim(),
+        name,
+        ...(desc ? { desc } : {}),
+        ...(iconName ? { iconName } : {}),
+        ...(iconUrl ? { iconUrl } : {}),
+      });
+      totalSkillsMapped++;
+      if (iconUrl) totalIconsMapped++;
+    }
+
+    if (Object.keys(skillsOut).length > 0 || passivesOut.length > 0) {
+      ninjasOut[ninja.id] = {
+        ...(heroCode ? { heroCode } : {}),
+        ...(displayName ? { displayName } : {}),
+        skills: skillsOut,
+        passives: passivesOut,
+      };
+    }
+  }
+
+  const payload = {
+    version: 1,
+    origin,
+    generatedAt: new Date().toISOString(),
+    ninjas: ninjasOut,
+  };
+
+  const z = new JSZip();
+  z.file('ninja-skills.json', JSON.stringify(payload));
+  const buf = await z.generateAsync({
+    type: 'nodebuffer',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 9 },
+  });
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(NINJA_SKILLS_PACK_PATH, buf);
+  console.log(
+    `[ensure-static-packs] Ninja skills pack written: ninja-skills-pack.zip (${(buf.length / 1024).toFixed(1)} KB, ninjas=${Object.keys(ninjasOut).length}, skills=${totalSkillsMapped}, icons=${totalIconsMapped}).`
+  );
+  return manifestBundle;
+}
+
 async function main() {
   if (!fs.existsSync(CATALOG_PATH)) {
     console.warn('[ensure-static-packs] public/data/naruto-catalog.json not found; skipping.');
@@ -539,6 +972,8 @@ async function main() {
   const ninjas = Array.isArray(catalog.ninjas) ? catalog.ninjas : [];
   const { existingAtlasZip, chunkZips } = await ensureMainPacks(ninjas);
   await ensureEffectPacks(ninjas, existingAtlasZip, chunkZips);
+  let cachedManifest = await ensureBackupManifestPack(catalog, null);
+  await ensureNinjaSkillsPack(catalog, cachedManifest);
 }
 
 main().catch((err) => {

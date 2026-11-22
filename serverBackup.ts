@@ -483,7 +483,7 @@ function computeBackupFileSets(
   }
   const spriteFiles = Array.from(spriteSet).sort();
 
-  // 6. Optional extra UI/Emojis/Items assets from catalog.assets
+  // 6. Optional extra UI/Emojis/Items & Skill Icons assets
   const assetSet = new Set<string>();
   for (const a of catalog.assets) {
     const rel = urlToSafeRelPath(a.url, origin);
@@ -493,6 +493,17 @@ function computeBackupFileSets(
       !particleSet.has(rel) &&
       !spriteSet.has(rel) &&
       (fileSet.size === 0 || fileSet.has(rel))
+    ) {
+      assetSet.add(rel);
+    }
+  }
+  for (const rel of fileSet) {
+    if (
+      rel.startsWith('acervo/asset/items/skill_') &&
+      rel.toLowerCase().endsWith('.png') &&
+      !baseSet.has(rel) &&
+      !particleSet.has(rel) &&
+      !spriteSet.has(rel)
     ) {
       assetSet.add(rel);
     }
@@ -754,27 +765,35 @@ async function streamRemotePathsToZip(
   relPaths: string[],
   fetchWithTimeout: BackupRouteDeps['fetchWithTimeout'],
   signal: AbortSignal,
-  concurrency = 6
+  concurrency = 16
 ): Promise<void> {
   const uniquePaths = Array.from(new Set(relPaths)).filter((p) => p && !zip.hasPath(p));
-  for (let i = 0; i < uniquePaths.length; i += concurrency) {
-    if (signal.aborted) break;
-    const batch = uniquePaths.slice(i, i + concurrency);
-    const fetched = await Promise.all(
-      batch.map(async (rel) => {
-        if (signal.aborted) return { rel, buf: null as Buffer | null };
-        const url = `${origin}/${rel.replace(/^\/+/, '')}`;
-        const buf = await fetchBufferWithRetry(url, fetchWithTimeout, signal);
-        return { rel, buf };
-      })
-    );
-    for (const item of fetched) {
-      if (signal.aborted) break;
-      if (item.buf && item.buf.length > 0) {
-        await zip.addBuffer(item.rel, item.buf);
-      }
+  if (uniquePaths.length === 0) return;
+
+  // Sliding-window parallel fetcher: keeps up to `concurrency` downloads active
+  // without stalling on slow files, while writing into the ZIP stream sequentially.
+  let nextIdx = 0;
+  let writeChain = Promise.resolve();
+  const workerCount = Math.min(Math.max(1, concurrency), uniquePaths.length);
+
+  const runWorker = async () => {
+    while (!signal.aborted) {
+      const idx = nextIdx++;
+      if (idx >= uniquePaths.length) break;
+      const rel = uniquePaths[idx];
+      const url = `${origin}/${rel.replace(/^\/+/, '')}`;
+      const buf = await fetchBufferWithRetry(url, fetchWithTimeout, signal);
+      if (signal.aborted || !buf || buf.length === 0) continue;
+      writeChain = writeChain.then(() => {
+        if (signal.aborted) return;
+        return zip.addBuffer(rel, buf);
+      });
+      await writeChain;
     }
-  }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  await writeChain;
 }
 
 interface CustomBackupTokenEntry {
@@ -1094,7 +1113,7 @@ export function registerBackupRoutes(app: express.Express, deps: BackupRouteDeps
       Array.from(extraPathsToStream).sort(),
       deps.fetchWithTimeout,
       abortCtrl.signal,
-      6
+      16
     );
 
     if (!abortCtrl.signal.aborted) {
@@ -1266,7 +1285,7 @@ export function registerBackupRoutes(app: express.Express, deps: BackupRouteDeps
         filesToStream,
         deps.fetchWithTimeout,
         abortCtrl.signal,
-        6
+        16
       );
 
       if (!abortCtrl.signal.aborted) {

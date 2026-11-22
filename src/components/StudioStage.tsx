@@ -35,8 +35,10 @@ import type {
   SpineCommandEffectRef,
   SpineSkeleton,
   SpineVideoEventRef,
+  SpriteRegionSource,
 } from '../types/sprite';
 import {
+  buildRegionSpriteMap,
   computeCompositeAnimationWorldBounds,
   computeNativeExportCellSize,
   downloadBlob,
@@ -44,7 +46,6 @@ import {
   exportAnimationGif,
   exportAnimationStripPng,
   exportFramesAsZip,
-  extractRegionToCanvas,
   extractSpineAudioRefs,
   extractSpineEffectRefs,
   extractSpineVideoRefs,
@@ -62,7 +63,9 @@ import { audioCuePlayer } from '../utils/audioCuePlayer';
 import {
   buildCharacterInstructionsJson,
   collectCharacterEffectPlan,
+  collectCharacterSkillIconFiles,
   exportCompleteCharacterZip,
+  getOrderedSkillIconTargets,
   sanitizePathSegment,
   type EffectIncludeScope,
 } from '../utils/completeCharacterExporter';
@@ -73,12 +76,14 @@ import {
   resolveMediaSoundUrl,
   resolveMediaVideoUrl,
 } from '../utils/remoteClient';
+import { assembleStreamingZipBlob, computeCrc32, type StreamingZipEntry } from '../utils/streamingZip';
 
 interface LoadedEffectBundle {
   skeleton: SpineSkeleton;
-  regionCanvasMap: Map<string, HTMLCanvasElement>;
+  regionCanvasMap: Map<string, SpriteRegionSource>;
 }
 
+const MAX_EFFECT_BUNDLE_CACHE = 24;
 const effectBundleCache = new Map<string, Promise<LoadedEffectBundle | null>>();
 
 async function loadEffectImageWithRetry(src: string): Promise<HTMLImageElement> {
@@ -119,14 +124,7 @@ function loadEffectBundle(
           loadedImgs[pageName] = await loadEffectImageWithRetry(proxyUrl);
         })
       );
-      const canvasMap = new Map<string, HTMLCanvasElement>();
-      for (const page of parsedPages) {
-        const img = loadedImgs[page.name];
-        if (!img) continue;
-        for (const reg of page.regions) {
-          canvasMap.set(reg.name, extractRegionToCanvas(reg, img));
-        }
-      }
+      const canvasMap = buildRegionSpriteMap(parsedPages, loadedImgs);
       if (canvasMap.size === 0) {
         effectBundleCache.delete(cacheKey);
         return null;
@@ -141,6 +139,10 @@ function loadEffectBundle(
     }
   })();
 
+  if (effectBundleCache.size >= MAX_EFFECT_BUNDLE_CACHE) {
+    const oldest = effectBundleCache.keys().next().value;
+    if (oldest) effectBundleCache.delete(oldest);
+  }
   effectBundleCache.set(cacheKey, promise);
   return promise;
 }
@@ -234,7 +236,7 @@ export function StudioStage({
   const [pageImages, setPageImages] = useState<Record<string, HTMLImageElement>>({});
   const [skeleton, setSkeleton] = useState<SpineSkeleton | null>(null);
   const [frames, setFrames] = useState<SlicedFrame[]>([]);
-  const [regionCanvasMap, setRegionCanvasMap] = useState<Map<string, HTMLCanvasElement>>(
+  const [regionCanvasMap, setRegionCanvasMap] = useState<Map<string, SpriteRegionSource>>(
     () => new Map()
   );
 
@@ -260,6 +262,9 @@ export function StudioStage({
   const [completeIncludeAnimGifs, setCompleteIncludeAnimGifs] = useState(true);
   const [completeIncludePassiveAura, setCompleteIncludePassiveAura] = useState(true);
   const [completeIncludeVideosAndAudio, setCompleteIncludeVideosAndAudio] = useState(true);
+  const [completeIncludeSkillIcons, setCompleteIncludeSkillIcons] = useState(true);
+  const [downloadingSkillIconsZip, setDownloadingSkillIconsZip] = useState(false);
+  const [downloadingBaseFramesZip, setDownloadingBaseFramesZip] = useState(false);
   const [completeGifBg, setCompleteGifBg] = useState<'transparent' | 'dark' | 'light' | 'chroma'>(
     'transparent'
   );
@@ -385,14 +390,7 @@ export function StudioStage({
         if (cancelled) return;
 
         const sliced = sliceAtlasRegions(parsedPages, loadedImgs);
-        const canvasMap = new Map<string, HTMLCanvasElement>();
-        for (const page of parsedPages) {
-          const img = loadedImgs[page.name];
-          if (!img) continue;
-          for (const reg of page.regions) {
-            canvasMap.set(reg.name, extractRegionToCanvas(reg, img));
-          }
-        }
+        const canvasMap = buildRegionSpriteMap(parsedPages, loadedImgs);
 
         const availableAnims = Object.keys(data.skeleton?.animations || {});
         const idleAnim = availableAnims.find((a) => a.toLowerCase() === 'idle');
@@ -801,6 +799,8 @@ export function StudioStage({
         label: `${skill.slotLabel} · ${skill.name}`,
         shortLabel: skill.name,
         slotLabel: skill.slotLabel,
+        iconUrl: skill.iconUrl,
+        desc: skill.desc,
       };
     }
     const fallback =
@@ -810,8 +810,69 @@ export function StudioStage({
       label: fallback || animName,
       shortLabel: fallback || '',
       slotLabel: '',
+      iconUrl: undefined as string | undefined,
+      desc: undefined as string | undefined,
     };
   };
+
+  const orderedSkillList = useMemo(() => {
+    const skillsMap = mediaProfile?.skills || {};
+    const order = ['attack', 'skill', 'UniqueSkill', 'chase1', 'chase2', 'chase3'];
+    const result: Array<{
+      key: string;
+      animKey?: string;
+      slotLabel: string;
+      name: string;
+      desc?: string;
+      iconUrl?: string;
+      isPassive: boolean;
+    }> = [];
+    const seen = new Set<string>();
+    for (const k of order) {
+      const sk = skillsMap[k];
+      if (!sk) continue;
+      seen.add(k);
+      result.push({
+        key: `active_${k}`,
+        animKey: sk.animKey,
+        slotLabel: sk.slotLabel,
+        name: sk.name,
+        desc: sk.desc,
+        iconUrl: sk.iconUrl,
+        isPassive: false,
+      });
+    }
+    for (const [k, sk] of Object.entries(skillsMap)) {
+      if (seen.has(k) || !sk) continue;
+      result.push({
+        key: `active_${k}`,
+        animKey: sk.animKey,
+        slotLabel: sk.slotLabel,
+        name: sk.name,
+        desc: sk.desc,
+        iconUrl: sk.iconUrl,
+        isPassive: false,
+      });
+    }
+    for (const p of mediaProfile?.passives || []) {
+      result.push({
+        key: `passive_${p.id}`,
+        slotLabel: 'Passiva',
+        name: p.name,
+        desc: p.desc,
+        iconUrl: p.iconUrl,
+        isPassive: true,
+      });
+    }
+    return result;
+  }, [mediaProfile]);
+
+  const skillIconCount = useMemo(
+    () => getOrderedSkillIconTargets(mediaProfile).length,
+    [mediaProfile]
+  );
+
+  const selectedAnimMeta = getAnimDisplayMeta(selectedAnim);
 
   const filteredAnimNames = useMemo(() => {
     const q = animFilter.trim().toLowerCase();
@@ -1004,32 +1065,47 @@ export function StudioStage({
     soundVolume,
     mediaProfile,
     ninja,
+    playerDetached,
   ]);
 
-  // Redraw when manually scrubbing while paused
+  // Redraw when manually scrubbing while paused or if mobile GPU restores canvas context
   useEffect(() => {
-    if (isPlaying || stageMode !== 'player' || !skeleton || !effectiveAnim) return;
-    animTimeRef.current = currentTime;
-    prevAnimTimeRef.current = currentTime;
-    const canvas = playerCanvasRef.current;
-    const ctx = canvas?.getContext('2d');
-    if (canvas && ctx) {
-      renderSpineFrameToCanvas(
-        ctx,
-        canvas.width,
-        canvas.height,
-        skeleton,
-        effectiveAnim,
-        currentTime,
-        regionCanvasMap,
-        zoom,
-        pan.x,
-        pan.y,
-        autoFit ? animWorldBounds : null,
-        allCompositeLayers,
-        PLAYER_STAGE_RENDER_OPTIONS
-      );
+    if (stageMode !== 'player' || !skeleton || !effectiveAnim || regionCanvasMap.size === 0) return;
+
+    const redrawNow = () => {
+      const canvas = playerCanvasRef.current;
+      const ctx = canvas?.getContext('2d');
+      if (canvas && ctx) {
+        renderSpineFrameToCanvas(
+          ctx,
+          canvas.width,
+          canvas.height,
+          skeleton,
+          effectiveAnim,
+          animTimeRef.current,
+          regionCanvasMap,
+          zoom,
+          pan.x,
+          pan.y,
+          autoFit ? animWorldBounds : null,
+          allCompositeLayers,
+          PLAYER_STAGE_RENDER_OPTIONS
+        );
+      }
+    };
+
+    if (!isPlaying) {
+      animTimeRef.current = currentTime;
+      prevAnimTimeRef.current = currentTime;
+      redrawNow();
     }
+
+    const canvasEl = playerCanvasRef.current;
+    if (!canvasEl) return;
+    canvasEl.addEventListener('contextrestored', redrawNow);
+    return () => {
+      canvasEl.removeEventListener('contextrestored', redrawNow);
+    };
   }, [
     currentTime,
     isPlaying,
@@ -1042,6 +1118,7 @@ export function StudioStage({
     pan,
     autoFit,
     animWorldBounds,
+    playerDetached,
   ]);
 
   const bgClass =
@@ -1213,6 +1290,35 @@ export function StudioStage({
         }
       }
 
+      // Fetch active skill icon for this animation if present
+      const animSkillMeta = getAnimDisplayMeta(selectedAnim);
+      if (animSkillMeta.iconUrl) {
+        try {
+          const iconFetchUrl = resolveAssetFetchUrl(animSkillMeta.iconUrl);
+          if (iconFetchUrl) {
+            const resp = await fetch(iconFetchUrl);
+            if (resp.ok) {
+              const buf = new Uint8Array(await resp.arrayBuffer());
+              if (buf.byteLength > 0) {
+                const isPng =
+                  buf.length >= 4 &&
+                  buf[0] === 0x89 &&
+                  buf[1] === 0x50 &&
+                  buf[2] === 0x4e &&
+                  buf[3] === 0x47;
+                const ext = isPng ? 'png' : 'webp';
+                extraFiles.push({
+                  path: `icone_skill_${sanitizePathSegment(selectedAnim)}.${ext}`,
+                  data: buf,
+                });
+              }
+            }
+          }
+        } catch {
+          // ignore unavailable icon
+        }
+      }
+
       const suffix = allCompositeLayers.length > 0 ? '_com_poderes' : '';
       const rawRefsForAnim = extractSpineEffectRefs(skeleton, selectedAnim);
       const animInstructions = JSON.stringify(
@@ -1288,6 +1394,7 @@ export function StudioStage({
           includeAnimGifs: completeIncludeAnimGifs,
           includePassiveAura: completeIncludePassiveAura,
           includeVideosAndAudio: completeIncludeVideosAndAudio,
+          includeSkillIcons: completeIncludeSkillIcons,
           mediaProfile,
           gifBg: completeGifBg,
           fps: 24,
@@ -1345,6 +1452,82 @@ export function StudioStage({
       downloadBlob(blob, filename);
     } catch {
       // ignore download failure
+    }
+  };
+
+  const handleDownloadAllSkillIconsZip = async () => {
+    if (!ninja || !mediaProfile || downloadingSkillIconsZip) return;
+    setDownloadingSkillIconsZip(true);
+    try {
+      const iconFiles = await collectCharacterSkillIconFiles(mediaProfile);
+      if (iconFiles.length === 0) return;
+      const entries: StreamingZipEntry[] = [];
+      for (const f of iconFiles) {
+        const bytes =
+          f.data instanceof Uint8Array
+            ? f.data
+            : f.data instanceof ArrayBuffer
+            ? new Uint8Array(f.data)
+            : f.data instanceof Blob
+            ? new Uint8Array(await f.data.arrayBuffer())
+            : new TextEncoder().encode(f.data);
+        entries.push({
+          path: f.path,
+          blob: new Blob([bytes as Uint8Array<ArrayBuffer>]),
+          size: bytes.byteLength,
+          crc32: computeCrc32(bytes),
+        });
+      }
+      const zipBlob = await assembleStreamingZipBlob(async function* () {
+        yield entries;
+      }, entries.length);
+      downloadBlob(zipBlob, `${ninja.id}_icones_skills.zip`);
+    } finally {
+      setDownloadingSkillIconsZip(false);
+    }
+  };
+
+  const handleDownloadBaseFramesZip = async () => {
+    if (!ninja || downloadingBaseFramesZip) return;
+    setDownloadingBaseFramesZip(true);
+    try {
+      const extraFiles: Array<{ path: string; data: Uint8Array | string }> = [];
+      if (skeleton) {
+        extraFiles.push({
+          path: 'animacoes_instrucoes.json',
+          data: buildCharacterInstructionsJson(
+            ninja.id,
+            skeleton,
+            'all',
+            undefined,
+            undefined,
+            mediaProfile
+          ),
+        });
+      }
+      if (mediaProfile) {
+        const iconFiles = await collectCharacterSkillIconFiles(mediaProfile);
+        for (const ic of iconFiles) {
+          const bytes =
+            ic.data instanceof Uint8Array
+              ? ic.data
+              : ic.data instanceof ArrayBuffer
+              ? new Uint8Array(ic.data)
+              : ic.data instanceof Blob
+              ? new Uint8Array(await ic.data.arrayBuffer())
+              : new TextEncoder().encode(ic.data);
+          extraFiles.push({ path: ic.path, data: bytes });
+        }
+      }
+      await exportFramesAsZip(`${ninja.id}_todos_frames.zip`, frames, {
+        atlasText,
+        atlasName: `${ninja.id}.atlas`,
+        skeletonJson: skeleton,
+        skeletonName: `${ninja.id}.json`,
+        extraFiles: extraFiles.length > 0 ? extraFiles : undefined,
+      });
+    } finally {
+      setDownloadingBaseFramesZip(false);
     }
   };
 
@@ -1523,7 +1706,7 @@ export function StudioStage({
                 <div
                   className={
                     playerDetached
-                      ? 'fixed inset-0 z-50 overflow-y-auto bg-[#0B0F17]/95 backdrop-blur-md p-3 sm:p-6'
+                      ? 'fixed inset-0 z-50 overflow-y-auto bg-[#0B0F17]/96 p-3 sm:p-6'
                       : ''
                   }
                   onClick={
@@ -1549,16 +1732,30 @@ export function StudioStage({
                   >
                     {playerDetached && (
                       <div className="sticky top-0 z-10 flex items-center justify-between gap-3 rounded-t-lg border-b border-slate-800/80 bg-[#0F1520] px-4 py-2.5">
-                        <div className="flex min-w-0 items-center gap-2 text-xs">
-                          <span className="truncate font-mono font-semibold text-slate-100">
-                            {ninja.id}
-                          </span>
-                          <span className="text-slate-500" aria-hidden="true">
-                            ·
-                          </span>
-                          <span className="truncate font-mono font-medium text-orange-400">
-                            {selectedAnim}
-                          </span>
+                        <div className="flex min-w-0 items-center gap-2.5 text-xs">
+                          {selectedAnimMeta.iconUrl && (
+                            <img
+                              src={resolveAssetFetchUrl(selectedAnimMeta.iconUrl)}
+                              alt={selectedAnimMeta.shortLabel || selectedAnim}
+                              className="h-7 w-7 shrink-0 rounded border border-slate-700 bg-[#0B0F17] object-contain"
+                            />
+                          )}
+                          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                            <span className="truncate font-mono font-semibold text-slate-100">
+                              {ninja.id}
+                            </span>
+                            <span className="text-slate-500" aria-hidden="true">
+                              ·
+                            </span>
+                            <span className="truncate font-mono font-medium text-orange-400">
+                              {selectedAnim}
+                            </span>
+                            {selectedAnimMeta.shortLabel && (
+                              <span className="truncate text-slate-300">
+                                ({selectedAnimMeta.shortLabel})
+                              </span>
+                            )}
+                          </div>
                         </div>
                         <button
                           type="button"
@@ -1876,6 +2073,7 @@ export function StudioStage({
                       }`}
                     >
                       <canvas
+                        key={playerDetached ? 'player-detached' : 'player-docked'}
                         ref={playerCanvasRef}
                         width={640}
                         height={420}
@@ -2153,30 +2351,16 @@ export function StudioStage({
                     </button>
                     <button
                       type="button"
-                      onClick={() =>
-                        void exportFramesAsZip(`${ninja.id}_todos_frames.zip`, frames, {
-                          atlasText,
-                          atlasName: `${ninja.id}.atlas`,
-                          skeletonJson: skeleton,
-                          skeletonName: `${ninja.id}.json`,
-                          extraFiles: skeleton
-                            ? [
-                                {
-                                  path: 'animacoes_instrucoes.json',
-                                  data: buildCharacterInstructionsJson(
-                                    ninja.id,
-                                    skeleton,
-                                    'all'
-                                  ),
-                                },
-                              ]
-                            : undefined,
-                        })
-                      }
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 cursor-pointer"
+                      disabled={downloadingBaseFramesZip}
+                      onClick={() => void handleDownloadBaseFramesZip()}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50 cursor-pointer"
                     >
                       <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Baixar Só Frames Base ({frames.length})</span>
+                      <span>
+                        {downloadingBaseFramesZip
+                          ? 'Compactando...'
+                          : `Baixar Frames Base + Ícones (${frames.length})`}
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -2405,85 +2589,212 @@ export function StudioStage({
                           setEffectMode(hasPowers ? 'powers' : hasImpacts ? 'all' : 'base');
                           openDetachedPlayer();
                         }}
-                        className={`flex w-full flex-col gap-0.5 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors cursor-pointer ${
+                        className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors cursor-pointer ${
                           active
                             ? 'bg-orange-600 text-white font-medium'
                             : 'text-slate-300 hover:bg-slate-800/70'
                         }`}
                       >
-                        <div className="flex w-full items-center justify-between gap-2">
-                          <span className="truncate font-mono">{anim}</span>
-                          <span
-                            className={`shrink-0 font-mono text-[10px] tabular-nums ${
-                              active ? 'text-orange-100' : 'text-slate-500'
+                        {meta.iconUrl && (
+                          <img
+                            src={resolveAssetFetchUrl(meta.iconUrl)}
+                            alt={meta.shortLabel || anim}
+                            loading="lazy"
+                            className={`h-8 w-8 shrink-0 rounded border object-contain ${
+                              active
+                                ? 'border-orange-200/70 bg-black/25'
+                                : 'border-slate-700/80 bg-[#0B0F17]'
                             }`}
-                          >
-                            {dur.toFixed(2)}s
-                          </span>
+                          />
+                        )}
+                        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                          <div className="flex w-full items-center justify-between gap-2">
+                            <span className="truncate font-mono">{anim}</span>
+                            <span
+                              className={`shrink-0 font-mono text-[10px] tabular-nums ${
+                                active ? 'text-orange-100' : 'text-slate-500'
+                              }`}
+                            >
+                              {dur.toFixed(2)}s
+                            </span>
+                          </div>
+                          {(meta.shortLabel ||
+                            hasAuraHere ||
+                            hasPowers ||
+                            hasImpacts ||
+                            videoRefs.length > 0 ||
+                            audioRefs.length > 0) && (
+                            <div className="flex flex-wrap items-center gap-1">
+                              {meta.shortLabel && (
+                                <span
+                                  className={`truncate text-[10px] ${
+                                    active ? 'text-orange-100' : 'text-slate-400'
+                                  }`}
+                                >
+                                  {meta.label}
+                                </span>
+                              )}
+                              {hasAuraHere && (
+                                <span
+                                  className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
+                                    active
+                                      ? 'bg-purple-900/60 text-purple-100'
+                                      : 'bg-purple-950/70 text-purple-300'
+                                  }`}
+                                >
+                                  Aura
+                                </span>
+                              )}
+                              {(hasPowers || hasImpacts) && (
+                                <span
+                                  className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
+                                    active
+                                      ? 'bg-black/25 text-white'
+                                      : 'bg-orange-950/70 text-orange-300'
+                                  }`}
+                                >
+                                  {hasPowers ? 'Poder' : 'Efeito'}
+                                </span>
+                              )}
+                              {videoRefs.length > 0 && (
+                                <span
+                                  className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
+                                    active
+                                      ? 'bg-cyan-900/60 text-cyan-100'
+                                      : 'bg-cyan-950/70 text-cyan-300'
+                                  }`}
+                                >
+                                  MP4
+                                </span>
+                              )}
+                              {audioRefs.length > 0 && (
+                                <span
+                                  className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
+                                    active
+                                      ? 'bg-emerald-900/60 text-emerald-100'
+                                      : 'bg-emerald-950/70 text-emerald-300'
+                                  }`}
+                                >
+                                  Som
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </div>
-                        {(meta.shortLabel ||
-                          hasAuraHere ||
-                          hasPowers ||
-                          hasImpacts ||
-                          videoRefs.length > 0 ||
-                          audioRefs.length > 0) && (
-                          <div className="flex flex-wrap items-center gap-1">
-                            {meta.shortLabel && (
-                              <span
-                                className={`truncate text-[10px] ${
-                                  active ? 'text-orange-100' : 'text-slate-400'
-                                }`}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Skills & Passives Icons Card */}
+            {orderedSkillList.length > 0 && (
+              <div className="rounded-lg border border-slate-800 bg-[#131A26] p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-display text-sm font-semibold text-slate-100">
+                    Habilidades & Ícones ({orderedSkillList.length})
+                  </h3>
+                  {skillIconCount > 0 && (
+                    <button
+                      type="button"
+                      disabled={downloadingSkillIconsZip}
+                      onClick={() => void handleDownloadAllSkillIconsZip()}
+                      title="Baixar todos os ícones das habilidades e passivas em ZIP (PNG qualidade máxima)"
+                      className="inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-950/30 px-2 py-1 text-[11px] font-medium text-amber-200 hover:bg-amber-900/40 disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                    >
+                      <Download className="h-3 w-3" aria-hidden="true" />
+                      <span>{downloadingSkillIconsZip ? 'Gerando...' : `ZIP (${skillIconCount})`}</span>
+                    </button>
+                  )}
+                </div>
+
+                <div className="max-h-[340px] space-y-1.5 overflow-y-auto pr-1">
+                  {orderedSkillList.map((item) => {
+                    const matchedAnim =
+                      !item.isPassive && item.animKey
+                        ? animNames.find((a) => a === item.animKey) ||
+                          animNames.find((a) => a.toLowerCase() === item.animKey!.toLowerCase())
+                        : undefined;
+                    const iconSrc = item.iconUrl ? resolveAssetFetchUrl(item.iconUrl) : '';
+                    const downloadName = `${ninja.id}_${sanitizePathSegment(item.slotLabel)}_${sanitizePathSegment(item.name)}.png`;
+
+                    return (
+                      <div
+                        key={item.key}
+                        title={item.desc || item.name}
+                        className="flex items-center gap-2.5 rounded-md border border-slate-800 bg-[#0B0F17] p-2 text-xs"
+                      >
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded border border-slate-700/80 bg-[#131A26]">
+                          {iconSrc ? (
+                            <img
+                              src={iconSrc}
+                              alt={item.name}
+                              loading="lazy"
+                              className="h-full w-full object-contain"
+                            />
+                          ) : (
+                            <Sparkles className="h-4 w-4 text-slate-600" aria-hidden="true" />
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold ${
+                                item.isPassive
+                                  ? 'bg-purple-950/70 text-purple-300'
+                                  : 'bg-amber-950/70 text-amber-300'
+                              }`}
+                            >
+                              {item.slotLabel}
+                            </span>
+                            {matchedAnim && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const effRefs = animEffectMap.get(matchedAnim) || [];
+                                  const hasP = effRefs.some((r) => r.isSelfOrScreen);
+                                  const hasI = !hasP && effRefs.length > 0;
+                                  setSelectedAnim(matchedAnim);
+                                  setCurrentTime(0);
+                                  animTimeRef.current = 0;
+                                  prevAnimTimeRef.current = -1;
+                                  videoTriggeredCycleRef.current = false;
+                                  setActiveVideoOverlay(null);
+                                  setAutoFit(true);
+                                  setZoom(1);
+                                  setPan({ x: 0, y: 0 });
+                                  setStageMode('player');
+                                  setIsPlaying(true);
+                                  setEffectMode(hasP ? 'powers' : hasI ? 'all' : 'base');
+                                  openDetachedPlayer();
+                                }}
+                                className="truncate font-mono text-[10px] text-orange-400 hover:underline cursor-pointer"
                               >
-                                {meta.label}
-                              </span>
-                            )}
-                            {hasAuraHere && (
-                              <span
-                                className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
-                                  active
-                                    ? 'bg-purple-900/60 text-purple-100'
-                                    : 'bg-purple-950/70 text-purple-300'
-                                }`}
-                              >
-                                Aura
-                              </span>
-                            )}
-                            {(hasPowers || hasImpacts) && (
-                              <span
-                                className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
-                                  active
-                                    ? 'bg-black/25 text-white'
-                                    : 'bg-orange-950/70 text-orange-300'
-                                }`}
-                              >
-                                {hasPowers ? 'Poder' : 'Efeito'}
-                              </span>
-                            )}
-                            {videoRefs.length > 0 && (
-                              <span
-                                className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
-                                  active
-                                    ? 'bg-cyan-900/60 text-cyan-100'
-                                    : 'bg-cyan-950/70 text-cyan-300'
-                                }`}
-                              >
-                                MP4
-                              </span>
-                            )}
-                            {audioRefs.length > 0 && (
-                              <span
-                                className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
-                                  active
-                                    ? 'bg-emerald-900/60 text-emerald-100'
-                                    : 'bg-emerald-950/70 text-emerald-300'
-                                }`}
-                              >
-                                Som
-                              </span>
+                                ver {matchedAnim}
+                              </button>
                             )}
                           </div>
+                          <div className="mt-0.5 truncate font-medium text-slate-100">
+                            {item.name}
+                          </div>
+                          {item.desc && (
+                            <div className="line-clamp-2 text-[10px] leading-snug text-slate-400">
+                              {item.desc}
+                            </div>
+                          )}
+                        </div>
+                        {item.iconUrl && (
+                          <button
+                            type="button"
+                            onClick={() => void handleDownloadRemoteMedia(item.iconUrl!, downloadName)}
+                            title="Baixar ícone em PNG (qualidade máxima)"
+                            className="shrink-0 rounded border border-slate-700 bg-[#131A26] p-1.5 text-slate-300 hover:border-amber-500/60 hover:text-amber-200 cursor-pointer"
+                          >
+                            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                          </button>
                         )}
-                      </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -2827,6 +3138,24 @@ export function StudioStage({
                     </div>
                   </label>
                 )}
+
+                <label className="flex items-start gap-2.5 rounded-md border border-amber-500/35 bg-amber-950/15 p-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    disabled={Boolean(completeExportProgress)}
+                    checked={completeIncludeSkillIcons}
+                    onChange={(e) => setCompleteIncludeSkillIcons(e.target.checked)}
+                    className="mt-0.5 accent-amber-500"
+                  />
+                  <div>
+                    <div className="font-medium text-amber-100">
+                      Ícones das Skills e Passivas (Qualidade Máxima PNG)
+                    </div>
+                    <div className="text-[11px] text-slate-400">
+                      Inclui pasta <code className="font-mono">icones_skills/*.png</code> ({skillIconCount} ícone(s) de habilidades ativas e passivas).
+                    </div>
+                  </div>
+                </label>
 
                 <label className="flex items-start gap-2.5 rounded-md border border-cyan-500/35 bg-cyan-950/15 p-2.5 cursor-pointer">
                   <input

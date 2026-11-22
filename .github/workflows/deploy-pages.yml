@@ -40,6 +40,8 @@ jobs:
           test -s dist/data/naruto-catalog.json
           test -s dist/data/naruto-atlas-pack.zip
           test -s dist/data/effects-atlas-pack.zip
+          test -s dist/data/backup-manifest.zip
+          test -s dist/data/ninja-skills-pack.zip
           ls -lh dist/data dist/data/skeletons dist/data/effects-skeletons
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

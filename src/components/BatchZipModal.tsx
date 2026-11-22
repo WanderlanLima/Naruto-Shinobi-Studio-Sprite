@@ -11,8 +11,8 @@ import {
 } from 'lucide-react';
 import type { NinjaEntry } from '../types/sprite';
 import {
+  buildRegionSpriteMap,
   downloadBlob,
-  extractRegionToCanvas,
   extractRegionToPngBlob,
   loadImageElement,
   parseAtlas,
@@ -36,6 +36,7 @@ import {
   collectCharacterCompleteFiles,
   collectCharacterEffectPlan,
   collectCharacterMediaFiles,
+  collectCharacterSkillIconFiles,
   fetchParsedEffectAsset,
   sanitizePathSegment,
   type EffectIncludeScope,
@@ -179,6 +180,7 @@ export function BatchZipModal({
   const [contentMode, setContentMode] = useState<BatchContentMode>('idle-only');
   const [includeLinkedEffects, setIncludeLinkedEffects] = useState(true);
   const [includeMediaAndAuras, setIncludeMediaAndAuras] = useState(true);
+  const [includeSkillIcons, setIncludeSkillIcons] = useState(true);
   const [effectScope, setEffectScope] = useState<EffectIncludeScope>('powers');
   const [includeAnimGifs, setIncludeAnimGifs] = useState(true);
   const [startIdx, setStartIdx] = useState(1);
@@ -220,6 +222,9 @@ export function BatchZipModal({
         }
         if (typeof job.includeMediaAndAuras === 'boolean') {
           setIncludeMediaAndAuras(job.includeMediaAndAuras);
+        }
+        if (typeof job.includeSkillIcons === 'boolean') {
+          setIncludeSkillIcons(job.includeSkillIcons);
         }
         if (job.effectScope) {
           setEffectScope(job.effectScope);
@@ -369,6 +374,9 @@ export function BatchZipModal({
       : activeMode === 'idle-only'
       ? false
       : includeMediaAndAuras;
+    const activeIncludeSkillIcons = existingJob
+      ? existingJob.includeSkillIcons ?? true
+      : includeSkillIcons;
     const activeEffectScope: EffectIncludeScope = existingJob
       ? existingJob.effectScope ?? 'powers'
       : effectScope;
@@ -403,6 +411,7 @@ export function BatchZipModal({
           contentMode: activeMode,
           includeLinkedEffects: activeIncludeEffects,
           includeMediaAndAuras: activeIncludeMediaAndAuras,
+          includeSkillIcons: activeIncludeSkillIcons,
           effectScope: activeEffectScope,
           includeAnimGifs: activeIncludeGifs,
           startIdx: activeStart,
@@ -497,7 +506,7 @@ export function BatchZipModal({
         const folderPrefix = getSpineFolderPrefix(ninja);
 
         const mediaProfile =
-          activeIncludeMediaAndAuras && activeMode !== 'idle-only' && bundle.skeleton
+          activeIncludeMediaAndAuras || activeIncludeSkillIcons
             ? await fetchNinjaMediaProfile(ninja, bundle.skeleton)
             : null;
 
@@ -564,6 +573,7 @@ export function BatchZipModal({
               mediaProfile,
               includePassiveAura: true,
               includeVideosAndAudio: true,
+              includeSkillIcons: false,
               sliceAuraFrames: sliceFrames,
               folderPrefix,
               signal: controller.signal,
@@ -572,7 +582,7 @@ export function BatchZipModal({
             rawItems.push(...mediaRes.files);
           }
 
-          if ((activeIncludeEffects || activeIncludeMediaAndAuras) && bundle?.skeleton) {
+          if ((activeIncludeEffects || activeIncludeMediaAndAuras || activeIncludeSkillIcons) && bundle?.skeleton) {
             rawItems.push({
               path: `${folderPrefix}/animacoes_instrucoes.json`,
               data: buildCharacterInstructionsJson(
@@ -596,14 +606,7 @@ export function BatchZipModal({
           );
           if (controller.signal.aborted) return;
 
-          const regionCanvasMap = new Map<string, HTMLCanvasElement>();
-          for (const page of pages) {
-            const img = pageImages[page.name];
-            if (!img) continue;
-            for (const reg of page.regions) {
-              regionCanvasMap.set(reg.name, extractRegionToCanvas(reg, img));
-            }
-          }
+          const regionCanvasMap = buildRegionSpriteMap(pages, pageImages);
 
           const completeFiles = await collectCharacterCompleteFiles(
             {
@@ -622,6 +625,7 @@ export function BatchZipModal({
               includeAnimGifs: activeIncludeGifs,
               includePassiveAura: activeIncludeMediaAndAuras,
               includeVideosAndAudio: activeIncludeMediaAndAuras,
+              includeSkillIcons: activeIncludeSkillIcons,
               mediaProfile,
               gifBg: 'transparent',
               fps: 24,
@@ -721,6 +725,17 @@ export function BatchZipModal({
             }
             await appendLinkedEffectsIfNeeded(true);
           }
+        }
+
+        // Export skill & passive icons for idle-only, raw-bundle, and all-sliced modes
+        // (complete-animated already includes them via collectCharacterCompleteFiles)
+        if (activeMode !== 'complete-animated' && activeIncludeSkillIcons && mediaProfile) {
+          const skillIconFiles = await collectCharacterSkillIconFiles(
+            mediaProfile,
+            folderPrefix,
+            controller.signal
+          );
+          rawItems.push(...skillIconFiles);
         }
 
         if (controller.signal.aborted) return;
@@ -1054,34 +1069,49 @@ export function BatchZipModal({
           </div>
         </div>
 
-        {contentMode !== 'idle-only' && (
-          <div className="space-y-2.5 rounded-lg border border-slate-800 bg-[#0B0F17] p-3 text-xs">
-            <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
-              <input
-                type="checkbox"
-                disabled={running || packaging}
-                checked={includeLinkedEffects}
-                onChange={(e) => setIncludeLinkedEffects(e.target.checked)}
-                className="accent-orange-500"
-              />
-              <span>
-                Incluir pacotes de partículas vinculados (<code className="font-mono text-orange-300">particulas/noe_*</code>) e{' '}
-                <code className="font-mono text-orange-300">animacoes_instrucoes.json</code>
-              </span>
-            </label>
+        {/* Always-available skill icons toggle for ALL batch export modes */}
+        <div className="space-y-2.5 rounded-lg border border-slate-800 bg-[#0B0F17] p-3 text-xs">
+          <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
+            <input
+              type="checkbox"
+              disabled={running || packaging}
+              checked={includeSkillIcons}
+              onChange={(e) => setIncludeSkillIcons(e.target.checked)}
+              className="accent-amber-500"
+            />
+            <span>
+              Incluir ícones das skills e passivas em qualidade máxima (<code className="font-mono text-amber-300">icones_skills/*.png</code>)
+            </span>
+          </label>
 
-            <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
-              <input
-                type="checkbox"
-                disabled={running || packaging}
-                checked={includeMediaAndAuras}
-                onChange={(e) => setIncludeMediaAndAuras(e.target.checked)}
-                className="accent-cyan-500"
-              />
-              <span>
-                Incluir aura passiva (idle), vídeos <code className="font-mono text-cyan-300">videos/*.mp4</code> e vozes/áudios <code className="font-mono text-cyan-300">audios/*.mp3</code>
-              </span>
-            </label>
+          {contentMode !== 'idle-only' && (
+            <>
+              <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  disabled={running || packaging}
+                  checked={includeLinkedEffects}
+                  onChange={(e) => setIncludeLinkedEffects(e.target.checked)}
+                  className="accent-orange-500"
+                />
+                <span>
+                  Incluir pacotes de partículas vinculados (<code className="font-mono text-orange-300">particulas/noe_*</code>) e{' '}
+                  <code className="font-mono text-orange-300">animacoes_instrucoes.json</code>
+                </span>
+              </label>
+
+              <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  disabled={running || packaging}
+                  checked={includeMediaAndAuras}
+                  onChange={(e) => setIncludeMediaAndAuras(e.target.checked)}
+                  className="accent-cyan-500"
+                />
+                <span>
+                  Incluir aura passiva (idle), vídeos <code className="font-mono text-cyan-300">videos/*.mp4</code> e vozes/áudios <code className="font-mono text-cyan-300">audios/*.mp3</code>
+                </span>
+              </label>
 
             {(includeLinkedEffects || contentMode === 'complete-animated') && (
               <div className="flex flex-wrap items-center justify-between gap-2 pl-5">
@@ -1117,8 +1147,9 @@ export function BatchZipModal({
                 </p>
               </>
             )}
-          </div>
-        )}
+            </>
+          )}
+        </div>
 
         {/* Range, Chunk Split & Speed */}
         <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
