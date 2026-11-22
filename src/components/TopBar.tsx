@@ -1,0 +1,126 @@
+import { Download, WifiOff } from 'lucide-react';
+
+export type WorkspaceTab = 'extractor' | 'ninjas' | 'studio' | 'assets' | 'slicer' | 'backup';
+
+interface TopBarProps {
+  activeTab: WorkspaceTab;
+  onTabChange: (tab: WorkspaceTab) => void;
+  canExportZip: boolean;
+  isExportingZip: boolean;
+  onExportZip: () => void;
+  offlineZipActive?: boolean;
+}
+
+const NAV_ITEMS: Array<{ id: WorkspaceTab; label: string }> = [
+  { id: 'extractor', label: 'Extrator URL' },
+  { id: 'ninjas', label: 'Ninjas' },
+  { id: 'studio', label: 'Estúdio' },
+  { id: 'assets', label: 'Outros Ativos' },
+  { id: 'slicer', label: 'Fatiador Local' },
+  { id: 'backup', label: 'Backup Offline' },
+];
+
+export function TopBar({
+  activeTab,
+  onTabChange,
+  canExportZip,
+  isExportingZip,
+  onExportZip,
+  offlineZipActive = false,
+}: TopBarProps) {
+  return (
+    <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-[#0B0F17]/95 backdrop-blur-sm">
+      <div className="mx-auto flex h-14 sm:h-16 max-w-[1440px] items-center justify-between gap-3 sm:gap-8 px-3 sm:px-6">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <button
+            type="button"
+            onClick={() => onTabChange('extractor')}
+            className="font-display text-base sm:text-lg font-bold tracking-tight text-slate-50 truncate cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 rounded"
+          >
+            Shinobi Sprite Studio
+          </button>
+          {offlineZipActive && (
+            <button
+              type="button"
+              onClick={() => onTabChange('backup')}
+              title="Rodando 100% a partir do backup ZIP local"
+              className="inline-flex items-center gap-1 rounded bg-emerald-950/90 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-950 cursor-pointer shrink-0 whitespace-nowrap"
+            >
+              <WifiOff className="h-3 w-3" aria-hidden="true" />
+              <span>ZIP Offline</span>
+            </button>
+          )}
+        </div>
+
+        <nav
+          aria-label="Navegação principal"
+          className="hidden md:flex items-center gap-6 overflow-x-auto"
+        >
+          {NAV_ITEMS.map((item) => {
+            const isActive = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onTabChange(item.id)}
+                className={`relative py-5 text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 ${
+                  isActive
+                    ? 'text-slate-50'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {item.label}
+                {isActive && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute inset-x-0 bottom-0 h-0.5 bg-orange-500"
+                  />
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="flex items-center shrink-0">
+          <button
+            type="button"
+            disabled={!canExportZip || isExportingZip}
+            onClick={onExportZip}
+            className="inline-flex items-center gap-1.5 sm:gap-2 rounded-lg bg-orange-600 px-3 sm:px-4 py-1.5 sm:py-2 text-xs font-semibold text-white transition-colors hover:bg-orange-500 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-400"
+          >
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>{isExportingZip ? 'Gerando ZIP...' : 'Exportar ZIP'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Compact mobile navigation row */}
+      <nav
+        aria-label="Navegação móvel"
+        className="flex md:hidden items-center gap-1 overflow-x-auto border-t border-slate-800/70 px-2 py-1"
+      >
+        {NAV_ITEMS.map((item) => {
+          const isActive = activeTab === item.id;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onTabChange(item.id)}
+              className={`relative rounded px-2.5 py-2 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer ${
+                isActive ? 'text-orange-400' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {item.label}
+              {isActive && (
+                <span
+                  aria-hidden="true"
+                  className="absolute inset-x-2 bottom-0 h-0.5 bg-orange-500"
+                />
+              )}
+            </button>
+          );
+        })}
+      </nav>
+    </header>
+  );
+}
