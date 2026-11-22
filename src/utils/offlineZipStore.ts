@@ -246,26 +246,40 @@ async function parseSingleZipIndex(file: File): Promise<{
     pos = nextPos;
   }
 
-  // Verify fast-path zero-extra assumption on first entry if archive comment matches
+  // Verify fast-path zero-extra assumption so synchronous File.slice() works immediately for all STORE ZIPs
+  // (covers browser/server ZIPs with SHINOBI_BACKUP_V1 comment as well as Python zipfile / PowerShell ZipArchive ZIP64s)
   let isStoreFastPath = false;
-  if (hasFastPathComment && entries.length > 0) {
-    const first = entries[0];
-    if (first.compressionMethod === 0 && first.localHeaderOffset + 30 <= file.size) {
+  const storeEntries = entries.filter((e) => e.compressionMethod === 0);
+  if (storeEntries.length > 0) {
+    const sampleIndices = Array.from(
+      new Set([0, Math.floor(storeEntries.length / 2), storeEntries.length - 1])
+    );
+    let allSamplesZeroExtra = true;
+    for (const idx of sampleIndices) {
+      const sample = storeEntries[idx];
+      if (!sample || sample.localHeaderOffset + 30 > file.size) {
+        allSamplesZeroExtra = false;
+        break;
+      }
       const lhBuf = await file
-        .slice(first.localHeaderOffset, first.localHeaderOffset + 30)
+        .slice(sample.localHeaderOffset, sample.localHeaderOffset + 30)
         .arrayBuffer();
       const lhView = new DataView(lhBuf);
+      const expectedLocalExtra = sample.uncompressedSize >= MAX_U32 ? 20 : 0;
       if (
-        lhView.getUint32(0, true) === 0x04034b50 &&
-        lhView.getUint16(26, true) === first.nameByteLen &&
-        lhView.getUint16(28, true) === (first.uncompressedSize >= MAX_U32 ? 20 : 0)
+        lhView.getUint32(0, true) !== 0x04034b50 ||
+        lhView.getUint16(26, true) !== sample.nameByteLen ||
+        lhView.getUint16(28, true) !== expectedLocalExtra
       ) {
-        isStoreFastPath = true;
-        for (const e of entries) {
-          if (e.compressionMethod === 0) {
-            e.verifiedOffset = true;
-          }
-        }
+        allSamplesZeroExtra = false;
+        break;
+      }
+    }
+
+    if (allSamplesZeroExtra && (hasFastPathComment || storeEntries.length === entries.length)) {
+      isStoreFastPath = true;
+      for (const e of storeEntries) {
+        e.verifiedOffset = true;
       }
     }
   }

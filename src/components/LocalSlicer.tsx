@@ -141,28 +141,28 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
   };
 
   return (
-    <section className="space-y-5">
-      <div className="flex flex-col gap-2 border-b border-slate-800/80 pb-4">
-        <h2 className="font-display text-xl font-semibold text-slate-50">
-          Fatiador Local de Spritesheets
-        </h2>
+    <section className="space-y-6">
+      <div className="flex flex-col gap-1 border-b border-white/[0.07] pb-5">
+        <h1 className="font-display text-2xl font-bold tracking-tight text-slate-50">Fatiador</h1>
         <p className="text-xs text-slate-400">
-          Envie qualquer imagem PNG/WebP ou importe um arquivo .atlas para detectar sprites automaticamente pela transparência (Alpha) ou por grade uniforme.
+          Recorte folhas de sprites automaticamente por transparência, grade ou arquivo .atlas.
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[320px_1fr]">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[310px_1fr]">
         {/* Controls Panel */}
         <div className="space-y-4">
-          <div className="rounded-lg border border-slate-800 bg-[#131A26] p-4 space-y-4">
+          <div className="rounded-xl border border-white/[0.07] bg-[#11141C] p-4 space-y-4">
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-2">
-                Imagem do Spritesheet (PNG, WebP, JPG)
+                Imagem da folha
               </label>
-              <label className="flex flex-col items-center justify-center rounded-lg border border-dashed border-slate-700 bg-[#0B0F17] px-4 py-5 text-center hover:border-orange-500/60 cursor-pointer transition-colors">
-                <Upload className="h-5 w-5 text-slate-400" aria-hidden="true" />
-                <span className="mt-2 text-xs font-medium text-slate-200">
-                  {loadedImg ? `${filename} (${loadedImg.width}×${loadedImg.height})` : 'Selecionar imagem'}
+              <label className="flex flex-col items-center justify-center rounded-lg border border-dashed border-white/15 bg-[#090B10] px-4 py-5 text-center hover:border-orange-500/50 cursor-pointer transition-colors">
+                <Upload className="h-4 w-4 text-slate-400" aria-hidden="true" />
+                <span className="mt-2 text-xs font-medium text-slate-200 truncate max-w-full">
+                  {loadedImg
+                    ? `${filename} (${loadedImg.width}×${loadedImg.height})`
+                    : 'Selecionar PNG, WebP ou JPG'}
                 </span>
                 <input
                   type="file"
@@ -177,11 +177,11 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
             </div>
 
             <div className="space-y-2">
-              <span className="block text-xs font-medium text-slate-300">Método de Fatiamento</span>
-              <div className="grid grid-cols-3 gap-1 rounded-lg border border-slate-800 bg-[#0B0F17] p-1">
+              <span className="block text-xs font-medium text-slate-300">Modo</span>
+              <div className="grid grid-cols-3 gap-1 rounded-lg border border-white/[0.07] bg-[#090B10] p-1">
                 {(
                   [
-                    { id: 'auto', label: 'Auto Alpha' },
+                    { id: 'auto', label: 'Auto' },
                     { id: 'grid', label: 'Grade' },
                     { id: 'atlas', label: '.atlas' },
                   ] as const
@@ -205,9 +205,9 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
             {method === 'auto' && (
               <div className="space-y-3 text-xs">
                 <div>
-                  <div className="flex justify-between text-slate-300 mb-1">
-                    <span>Limiar Alpha</span>
-                    <span className="font-mono tabular-nums">{alphaThreshold}</span>
+                  <div className="flex justify-between text-slate-400 mb-1">
+                    <span>Limiar de transparência</span>
+                    <span className="font-mono text-slate-200 tabular-nums">{alphaThreshold}</span>
                   </div>
                   <input
                     type="range"
@@ -219,9 +219,9 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
                   />
                 </div>
                 <div>
-                  <div className="flex justify-between text-slate-300 mb-1">
-                    <span>Tamanho Mínimo (px)</span>
-                    <span className="font-mono tabular-nums">{minSize} px</span>
+                  <div className="flex justify-between text-slate-400 mb-1">
+                    <span>Tamanho mínimo</span>
+                    <span className="font-mono text-slate-200 tabular-nums">{minSize} px</span>
                   </div>
                   <input
                     type="range"
@@ -233,9 +233,9 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
                   />
                 </div>
                 <div>
-                  <div className="flex justify-between text-slate-300 mb-1">
-                    <span>Margem de Fusão</span>
-                    <span className="font-mono tabular-nums">{mergeGap} px</span>
+                  <div className="flex justify-between text-slate-400 mb-1">
+                    <span>Margem de fusão</span>
+                    <span className="font-mono text-slate-200 tabular-nums">{mergeGap} px</span>
                   </div>
                   <input
                     type="range"
@@ -252,47 +252,47 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
             {method === 'grid' && (
               <div className="grid grid-cols-2 gap-3 text-xs">
                 <label className="space-y-1">
-                  <span className="text-slate-300">Colunas</span>
+                  <span className="text-slate-400">Colunas</span>
                   <input
                     type="number"
                     min={1}
                     max={64}
                     value={cols}
                     onChange={(e) => setCols(Number(e.target.value))}
-                    className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 font-mono text-slate-100"
+                    className="w-full rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 font-mono text-slate-100 focus:border-orange-500/60 focus:outline-none"
                   />
                 </label>
                 <label className="space-y-1">
-                  <span className="text-slate-300">Linhas</span>
+                  <span className="text-slate-400">Linhas</span>
                   <input
                     type="number"
                     min={1}
                     max={64}
                     value={rows}
                     onChange={(e) => setRows(Number(e.target.value))}
-                    className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 font-mono text-slate-100"
+                    className="w-full rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 font-mono text-slate-100 focus:border-orange-500/60 focus:outline-none"
                   />
                 </label>
                 <label className="space-y-1">
-                  <span className="text-slate-300">Margem (px)</span>
+                  <span className="text-slate-400">Margem (px)</span>
                   <input
                     type="number"
                     min={0}
                     max={100}
                     value={margin}
                     onChange={(e) => setMargin(Number(e.target.value))}
-                    className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 font-mono text-slate-100"
+                    className="w-full rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 font-mono text-slate-100 focus:border-orange-500/60 focus:outline-none"
                   />
                 </label>
                 <label className="space-y-1">
-                  <span className="text-slate-300">Espaçamento</span>
+                  <span className="text-slate-400">Espaçamento</span>
                   <input
                     type="number"
                     min={0}
                     max={100}
                     value={spacing}
                     onChange={(e) => setSpacing(Number(e.target.value))}
-                    className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 font-mono text-slate-100"
+                    className="w-full rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 font-mono text-slate-100 focus:border-orange-500/60 focus:outline-none"
                   />
                 </label>
               </div>
@@ -301,7 +301,7 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
             {method === 'atlas' && (
               <div className="space-y-2 text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-300">Conteúdo .atlas</span>
+                  <span className="text-slate-400">Arquivo .atlas</span>
                   <label className="text-orange-400 hover:underline cursor-pointer">
                     Carregar arquivo
                     <input
@@ -319,8 +319,8 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
                   rows={6}
                   value={atlasText}
                   onChange={(e) => setAtlasText(e.target.value)}
-                  placeholder="Cole aqui o texto do arquivo .atlas..."
-                  className="w-full rounded-md border border-slate-800 bg-[#0B0F17] p-2 font-mono text-[11px] text-slate-200 placeholder:text-slate-600 focus:border-orange-500 focus:outline-none"
+                  placeholder="Cole o conteúdo .atlas..."
+                  className="w-full rounded-lg border border-white/10 bg-[#090B10] p-2.5 font-mono text-[11px] text-slate-200 placeholder:text-slate-600 focus:border-orange-500/60 focus:outline-none"
                 />
               </div>
             )}
@@ -329,10 +329,10 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
               type="button"
               disabled={!loadedImg || slicing}
               onClick={runSlice}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:bg-slate-800 disabled:text-slate-500 cursor-pointer"
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:bg-white/[0.06] disabled:text-slate-500 transition-colors cursor-pointer"
             >
               <Scissors className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>{slicing ? 'Fatiando...' : 'Fatiar Sprites'}</span>
+              <span>{slicing ? 'Fatiando...' : 'Fatiar sprites'}</span>
             </button>
 
             {error && <p className="text-xs text-red-400">{error}</p>}
@@ -340,16 +340,14 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
 
           {/* Flipbook Animation Preview */}
           {frames.length > 0 && (
-            <div className="rounded-lg border border-slate-800 bg-[#131A26] p-4 space-y-3">
+            <div className="rounded-xl border border-white/[0.07] bg-[#11141C] p-4 space-y-3">
               <div className="flex items-center justify-between">
-                <h3 className="font-display text-sm font-semibold text-slate-100">
-                  Prévia da Sequência
-                </h3>
-                <span className="font-mono text-xs text-slate-400 tabular-nums">
+                <span className="text-xs font-semibold text-slate-200">Prévia</span>
+                <span className="font-mono text-[11px] text-slate-500 tabular-nums">
                   {previewIdx + 1} / {frames.length}
                 </span>
               </div>
-              <div className="sprite-checkerboard flex h-40 items-center justify-center rounded-md border border-slate-800 p-3">
+              <div className="sprite-checkerboard flex h-40 items-center justify-center rounded-lg border border-white/[0.06] p-3">
                 <img
                   src={frames[previewIdx % frames.length]?.dataUrl}
                   alt="Prévia animada"
@@ -360,7 +358,7 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
                 <button
                   type="button"
                   onClick={() => setPlayingPreview((p) => !p)}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-3 py-1.5 text-xs text-slate-200 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs text-slate-200 hover:border-white/25 cursor-pointer"
                 >
                   {playingPreview ? (
                     <>
@@ -382,7 +380,7 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
                     max={60}
                     value={previewFps}
                     onChange={(e) => setPreviewFps(Math.max(1, Number(e.target.value)))}
-                    className="w-14 rounded border border-slate-800 bg-[#0B0F17] px-2 py-1 font-mono text-slate-100"
+                    className="w-14 rounded-lg border border-white/10 bg-[#090B10] px-2 py-1 font-mono text-slate-100"
                   />
                 </label>
               </div>
@@ -391,25 +389,25 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
         </div>
 
         {/* Sliced Frames Grid */}
-        <div className="rounded-lg border border-slate-800 bg-[#131A26] p-4">
+        <div className="rounded-xl border border-white/[0.07] bg-[#11141C] p-4">
           {frames.length === 0 ? (
-            <div className="flex h-80 flex-col items-center justify-center text-center text-sm text-slate-400">
-              <Scissors className="h-7 w-7 text-slate-600 mb-2" aria-hidden="true" />
-              <p>Envie uma folha de sprites ou clique em Fatiar em qualquer imagem do jogo.</p>
+            <div className="flex h-80 flex-col items-center justify-center text-center text-xs text-slate-400">
+              <Scissors className="h-6 w-6 text-slate-600 mb-2.5" aria-hidden="true" />
+              <p>Envie uma imagem ao lado ou clique em Fatiar em qualquer folha de Ativos.</p>
             </div>
           ) : (
             <div className="space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
-                <span className="font-mono text-xs text-slate-300 tabular-nums">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-3">
+                <span className="font-mono text-xs text-slate-400 tabular-nums">
                   {frames.length} sprites extraídos
                 </span>
                 <button
                   type="button"
                   onClick={() => void exportFramesAsZip(`${filename}_sprites.zip`, frames)}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/25 hover:text-white cursor-pointer"
                 >
                   <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Baixar Todos (ZIP)</span>
+                  <span>Baixar todos (ZIP)</span>
                 </button>
               </div>
 
@@ -417,7 +415,7 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
                 {frames.map((frame) => (
                   <div
                     key={frame.id}
-                    className="flex flex-col overflow-hidden rounded-lg border border-slate-800 bg-[#0B0F17]"
+                    className="flex flex-col overflow-hidden rounded-lg border border-white/[0.06] bg-[#090B10]"
                   >
                     <div className="sprite-checkerboard flex h-28 items-center justify-center p-2">
                       <img
@@ -426,7 +424,7 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
                         className="max-h-full max-w-full object-contain"
                       />
                     </div>
-                    <div className="flex items-center justify-between gap-2 border-t border-slate-800/80 px-2.5 py-2">
+                    <div className="flex items-center justify-between gap-2 border-t border-white/[0.05] px-2.5 py-2">
                       <div className="min-w-0">
                         <div className="truncate font-mono text-xs text-slate-100">
                           {frame.name}
@@ -439,7 +437,7 @@ export function LocalSlicer({ externalSource, onFramesChange }: LocalSlicerProps
                         type="button"
                         onClick={() => downloadDataUrl(frame.dataUrl, `${frame.name}.png`)}
                         aria-label={`Baixar ${frame.name}`}
-                        className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white cursor-pointer"
+                        className="rounded p-1 text-slate-400 hover:bg-white/[0.06] hover:text-white cursor-pointer"
                       >
                         <Download className="h-3.5 w-3.5" aria-hidden="true" />
                       </button>

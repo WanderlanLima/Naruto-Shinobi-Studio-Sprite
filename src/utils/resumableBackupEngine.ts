@@ -1,3 +1,4 @@
+import JSZip from 'jszip';
 import type { ExtractResponse, NinjaEntry, NinjaMediaProfile } from '../types/sprite';
 import { downloadBlob, extractSpineEffectRefs, parseAtlas } from './atlasParser';
 import { CHASE_SYSTEM_LEGEND } from './combatMechanicsParser';
@@ -488,6 +489,28 @@ export async function loadStaticBackupPlanBundle(
       .map((path) => ({ path, size: 600 * 1024 }));
   }
 
+  // Safety net: ensure skill icons & UI icons live in baseFiles even if an older manifest is cached
+  if (assetFiles.length > 0) {
+    const basePathSet = new Set(baseFiles.map((f) => f.path));
+    const remainingAssets: BackupFileSpec[] = [];
+    for (const f of assetFiles) {
+      const low = f.path.toLowerCase();
+      const isSkillOrUiIcon =
+        (f.path.startsWith('acervo/asset/items/skill_') ||
+          f.path.startsWith('acervo/asset/ui/icon/')) &&
+        (low.endsWith('.png') || low.endsWith('.webp'));
+      if (isSkillOrUiIcon) {
+        if (!basePathSet.has(f.path)) {
+          baseFiles.push(f);
+          basePathSet.add(f.path);
+        }
+      } else {
+        remainingAssets.push(f);
+      }
+    }
+    assetFiles = remainingAssets;
+  }
+
   const allKnownSizeMap = new Map<string, number>();
   for (const list of [baseFiles, videoFiles, audioFiles, particleFiles, spriteFiles, assetFiles]) {
     for (const f of list) allKnownSizeMap.set(f.path, f.size);
@@ -511,11 +534,11 @@ export async function loadStaticBackupPlanBundle(
     module: 'base',
     part: 1,
     totalParts: 1,
-    label: '01. Base: Catálogo, Tabelas, Esqueletos, Auras e Nomes',
+    label: '01. Base: Catálogo, Esqueletos, Ícones de Skills, Auras e Nomes',
     description:
-      'Obrigatório: catálogo completo, arquivos .atlas/.json (extração instantânea do pacote estático), auras passivas (Susano’o) e artes de nome.',
+      'Obrigatório: catálogo completo, combate/perseguições, arquivos .atlas/.json, ícones das habilidades, auras passivas (Susano’o) e artes de nome.',
     filename: '01_shinobi_base_catalogo_esqueletos.zip',
-    fileCount: baseFiles.length + 2,
+    fileCount: baseFiles.length + 5,
     estimatedBytes: baseBytes,
     recommended: true,
   });
@@ -628,13 +651,15 @@ export async function loadStaticBackupPlanBundle(
     ...particleFiles,
     ...videoFiles,
     ...audioFiles,
+    ...assetFiles,
   ];
   const completeEstimatedBytes =
     baseBytes +
     videoBytes +
     audioBytes +
     sumBytes(particleFiles) +
-    sumBytes(spriteFiles);
+    sumBytes(spriteFiles) +
+    sumBytes(assetFiles);
 
   const effectiveNinjas = ninjas.length > 0 ? ninjas : (await fetchStaticCatalogJson())?.ninjas || [];
   const mp4NinjaCount = effectiveNinjas.filter((n) => n.hasVideo).length || 139;
@@ -652,7 +677,7 @@ export async function loadStaticBackupPlanBundle(
       totalCatalogNinjas: effectiveNinjas.length,
       mp4NinjaCount,
       modules,
-      completeFileCount: completeFiles.length + 2,
+      completeFileCount: completeFiles.length + 5,
       completeEstimatedBytes,
       planSource: 'static',
     },
@@ -1023,52 +1048,59 @@ async function fetchFileBytesWithRetry(
   return { bytes: null, status: 'network_error' };
 }
 
-export async function assembleAndSaveBackupJobZip(
-  job: ResumableBackupJob,
-  ninjasForCatalog: NinjaEntry[],
-  onProgress?: (percent: number) => void,
-  options?: { preferFilePicker?: boolean }
-): Promise<{ savedViaPicker: boolean }> {
-  const metaEntries: StreamingZipEntry[] = [];
-  metaEntries.push(
-    makeJsonZipEntry('_shinobi_backup/meta.json', {
-      format: 'shinobi-backup-v1',
-      createdAt: new Date().toISOString(),
-      origin: job.origin,
-      moduleId: job.moduleId,
-      label: job.label,
-      storeZeroExtra: true,
-      expectedFiles: job.files.length,
-      completedFiles: job.completedPaths.length,
-    })
-  );
+async function buildBackupMetaJsonMap(params: {
+  origin: string;
+  moduleId: string;
+  label: string;
+  expectedFiles: number;
+  completedFiles: number;
+  includeCatalogMeta: boolean;
+  customNinjaIds?: string[];
+  ninjasForCatalog: NinjaEntry[];
+}): Promise<Array<{ path: string; payload: unknown }>> {
+  const entries: Array<{ path: string; payload: unknown }> = [
+    {
+      path: '_shinobi_backup/meta.json',
+      payload: {
+        format: 'shinobi-backup-v1',
+        createdAt: new Date().toISOString(),
+        origin: params.origin,
+        moduleId: params.moduleId,
+        label: params.label,
+        storeZeroExtra: true,
+        expectedFiles: params.expectedFiles,
+        completedFiles: params.completedFiles,
+      },
+    },
+  ];
 
-  if (job.includeCatalogMeta) {
+  if (params.includeCatalogMeta) {
     const baseCatalog = await fetchStaticCatalogJson();
     const allNinjas =
-      ninjasForCatalog.length > 0 ? ninjasForCatalog : baseCatalog?.ninjas || [];
-    const filteredNinjas = job.customNinjaIds?.length
-      ? allNinjas.filter((n) => job.customNinjaIds!.includes(n.id))
+      params.ninjasForCatalog.length > 0 ? params.ninjasForCatalog : baseCatalog?.ninjas || [];
+    const filteredNinjas = params.customNinjaIds?.length
+      ? allNinjas.filter((n) => params.customNinjaIds!.includes(n.id))
       : allNinjas;
 
     const catalogPayload: ExtractResponse = {
-      sourceUrl: baseCatalog?.sourceUrl || `${job.origin}/`,
-      resolvedGameUrl: baseCatalog?.resolvedGameUrl || `${job.origin}/jogar?app=1`,
+      sourceUrl: baseCatalog?.sourceUrl || `${params.origin}/`,
+      resolvedGameUrl: baseCatalog?.resolvedGameUrl || `${params.origin}/jogar?app=1`,
       gameTitle: baseCatalog?.gameTitle || 'Naruto Online',
       ninjas: filteredNinjas,
-      sheets: job.customNinjaIds?.length ? [] : baseCatalog?.sheets || [],
-      assets: job.customNinjaIds?.length ? [] : baseCatalog?.assets || [],
+      sheets: params.customNinjaIds?.length ? [] : baseCatalog?.sheets || [],
+      assets: params.customNinjaIds?.length ? [] : baseCatalog?.assets || [],
       stats: {
         scannedScripts: baseCatalog?.stats?.scannedScripts || 0,
-        discoveredAssets: job.customNinjaIds?.length ? 0 : baseCatalog?.stats?.discoveredAssets || 0,
+        discoveredAssets: params.customNinjaIds?.length
+          ? 0
+          : baseCatalog?.stats?.discoveredAssets || 0,
         totalNinjas: filteredNinjas.length,
-        totalSheets: job.customNinjaIds?.length ? 0 : baseCatalog?.stats?.totalSheets || 0,
+        totalSheets: params.customNinjaIds?.length ? 0 : baseCatalog?.stats?.totalSheets || 0,
         elapsedMs: 0,
       },
     };
-    metaEntries.push(makeJsonZipEntry('_shinobi_backup/catalog.json', catalogPayload));
+    entries.push({ path: '_shinobi_backup/catalog.json', payload: catalogPayload });
 
-    // Embed full media profiles (including skills, passives, combatProfile, chase mechanics, stats, voices, videos) & sons map
     const skillsPack = await loadStaticNinjaSkillsPack();
     if (skillsPack) {
       const mediaProfilesOut: Record<string, NinjaMediaProfile> = {};
@@ -1095,7 +1127,7 @@ export async function assembleAndSaveBackupJobZip(
           voices: entry.voices || [],
           soundUrlMap: {},
           videoUrlMap: entry.videoUrlMap || {},
-          originBase: job.origin,
+          originBase: params.origin,
         };
         mediaProfilesOut[ninja.id] = profile;
         combatNinjasOut[ninja.id] = {
@@ -1109,25 +1141,83 @@ export async function assembleAndSaveBackupJobZip(
       }
 
       if (Object.keys(mediaProfilesOut).length > 0) {
-        metaEntries.push(
-          makeJsonZipEntry('_shinobi_backup/media-profiles.json', mediaProfilesOut)
-        );
-        metaEntries.push(
-          makeJsonZipEntry('_shinobi_backup/combate_e_habilidades.json', {
+        entries.push({ path: '_shinobi_backup/media-profiles.json', payload: mediaProfilesOut });
+        entries.push({
+          path: '_shinobi_backup/combate_e_habilidades.json',
+          payload: {
             schemaVersion: 'shinobi-combat-v1',
             generatedAt: new Date().toISOString(),
-            origin: job.origin,
+            origin: params.origin,
             chaseSystemLegend: CHASE_SYSTEM_LEGEND,
             totalNinjas: Object.keys(combatNinjasOut).length,
             ninjas: combatNinjasOut,
-          })
-        );
+          },
+        });
       }
       if (Object.keys(skillsPack.sons).length > 0) {
-        metaEntries.push(makeJsonZipEntry('_shinobi_backup/sons.json', skillsPack.sons));
+        entries.push({ path: '_shinobi_backup/sons.json', payload: skillsPack.sons });
       }
     }
   }
+
+  return entries;
+}
+
+/**
+ * Packs `_shinobi_backup/*` (catalog, combat/chase profiles, skills, sounds, metadata) into a compact
+ * DEFLATE-compressed base64 ZIP string so direct download scripts (.sh / .ps1) produce a 100% self-contained
+ * offline backup ready for strict offline mode.
+ */
+export async function buildBackupMetaArchiveBase64(params: {
+  origin: string;
+  moduleId: string;
+  label: string;
+  expectedFiles: number;
+  ninjasForCatalog: NinjaEntry[];
+  customNinjaIds?: string[];
+  includeCatalogMeta: boolean;
+}): Promise<string> {
+  const entries = await buildBackupMetaJsonMap({
+    origin: params.origin,
+    moduleId: params.moduleId,
+    label: params.label,
+    expectedFiles: params.expectedFiles,
+    completedFiles: params.expectedFiles,
+    includeCatalogMeta: params.includeCatalogMeta,
+    customNinjaIds: params.customNinjaIds,
+    ninjasForCatalog: params.ninjasForCatalog,
+  });
+
+  const zip = new JSZip();
+  for (const item of entries) {
+    zip.file(item.path, JSON.stringify(item.payload));
+  }
+  return zip.generateAsync({
+    type: 'base64',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 9 },
+  });
+}
+
+export async function assembleAndSaveBackupJobZip(
+  job: ResumableBackupJob,
+  ninjasForCatalog: NinjaEntry[],
+  onProgress?: (percent: number) => void,
+  options?: { preferFilePicker?: boolean }
+): Promise<{ savedViaPicker: boolean }> {
+  const jsonItems = await buildBackupMetaJsonMap({
+    origin: job.origin,
+    moduleId: job.moduleId,
+    label: job.label,
+    expectedFiles: job.files.length,
+    completedFiles: job.completedPaths.length,
+    includeCatalogMeta: job.includeCatalogMeta,
+    customNinjaIds: job.customNinjaIds,
+    ninjasForCatalog,
+  });
+  const metaEntries: StreamingZipEntry[] = jsonItems.map((item) =>
+    makeJsonZipEntry(item.path, item.payload)
+  );
 
   const totalEntries = job.completedPaths.length + metaEntries.length;
   const pickerWin = typeof window !== 'undefined' ? (window as SaveFilePickerWindow) : null;

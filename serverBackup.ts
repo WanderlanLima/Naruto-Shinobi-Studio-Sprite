@@ -418,9 +418,14 @@ function computeBackupFileSets(
     }
   }
 
-  // Passive idle auras (Susano'o armors, etc.) in spine-no-estados
+  // Passive idle auras (Susano'o armors, etc.) and skill/passive icons -> always in Base
   for (const rel of fileSet) {
-    if (rel.startsWith('acervo/asset/spine-no-estados/')) {
+    const low = rel.toLowerCase();
+    if (
+      rel.startsWith('acervo/asset/spine-no-estados/') ||
+      ((rel.startsWith('acervo/asset/items/skill_') || rel.startsWith('acervo/asset/ui/icon/')) &&
+        (low.endsWith('.png') || low.endsWith('.webp')))
+    ) {
       baseSet.add(rel);
     }
   }
@@ -530,11 +535,11 @@ function computeBackupFileSets(
       module: 'base',
       part: 1,
       totalParts: 1,
-      label: '01. Base: Catálogo, Tabelas, Esqueletos, Auras e Nomes',
+      label: '01. Base: Catálogo, Esqueletos, Auras e Ícones',
       description:
-        'Obrigatório: catálogo completo (1.013 pacotes), habilidades/vozes/vídeos mapeados, arquivos .atlas/.json, auras passivas (Susano’o) e artes de nome.',
+        'Obrigatório: catálogo completo, habilidades e mecânicas de combate, ícones das skills, esqueletos .atlas/.json, auras passivas e artes de nome.',
       filename: '01_shinobi_base_catalogo_esqueletos.zip',
-      fileCount: baseFiles.length + 4,
+      fileCount: baseFiles.length + 5,
       estimatedBytes: baseBytes,
       recommended: true,
     },
@@ -627,17 +632,19 @@ function computeBackupFileSets(
 
   const completeFileCount =
     baseFiles.length +
-    4 +
+    5 +
     videoFiles.length +
     audioFiles.length +
     particleFiles.length +
-    spriteFiles.length;
+    spriteFiles.length +
+    assetFiles.length;
   const completeEstimatedBytes =
     baseBytes +
     videoBytes +
     audioBytes +
     particleParts.reduce((a, p) => a + p.bytes, 0) +
-    spriteParts.reduce((a, p) => a + p.bytes, 0);
+    spriteParts.reduce((a, p) => a + p.bytes, 0) +
+    assetParts.reduce((a, p) => a + p.bytes, 0);
 
   return {
     baseFiles,
@@ -1024,6 +1031,22 @@ export function registerBackupRoutes(app: express.Express, deps: BackupRouteDeps
         }
       }
 
+      // Always include skill & passive icons for standalone backups
+      const skillsObj = (profile.skills as Record<string, { iconUrl?: string }>) || {};
+      for (const sk of Object.values(skillsObj)) {
+        if (sk?.iconUrl) {
+          const rel = urlToSafeRelPath(sk.iconUrl, origin);
+          if (rel) extraPathsToStream.add(rel);
+        }
+      }
+      const passivesArr = (profile.passives as Array<{ iconUrl?: string }>) || [];
+      for (const pas of passivesArr) {
+        if (pas?.iconUrl) {
+          const rel = urlToSafeRelPath(pas.iconUrl, origin);
+          if (rel) extraPathsToStream.add(rel);
+        }
+      }
+
       if (cfg.includeAudio) {
         const voices = (profile.voices as Array<{ url?: string }>) || [];
         for (const v of voices) {
@@ -1264,7 +1287,7 @@ export function registerBackupRoutes(app: express.Express, deps: BackupRouteDeps
         filesToStream = sets.assetParts[idx].files;
       } else if (moduleName === 'complete') {
         filename = 'shinobi_backup_completo_tudo.zip';
-        label = 'Backup Completo (Catálogo + Esqueletos + Partículas + Sprites + Vídeos + Áudios)';
+        label = 'Backup Completo (Tudo em 1 ZIP: Sprites, Ícones, Partículas, Vídeos, Áudios e Ativos)';
         includeCatalogJson = true;
         filesToStream = [
           ...sets.baseFiles,
@@ -1272,6 +1295,7 @@ export function registerBackupRoutes(app: express.Express, deps: BackupRouteDeps
           ...sets.audioFiles,
           ...sets.particleParts.flatMap((p) => p.files),
           ...sets.spriteParts.flatMap((p) => p.files),
+          ...sets.assetParts.flatMap((p) => p.files),
         ];
       }
 

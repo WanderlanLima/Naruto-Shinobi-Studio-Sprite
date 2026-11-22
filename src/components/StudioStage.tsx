@@ -245,6 +245,7 @@ export function StudioStage({
 
   // Player state
   const [selectedAnim, setSelectedAnim] = useState('idle');
+  const [inspectorTab, setInspectorTab] = useState<'animations' | 'combat' | 'media' | 'info'>('animations');
   const [animFilter, setAnimFilter] = useState('');
   const [frameFilter, setFrameFilter] = useState('');
   const [isPlaying, setIsPlaying] = useState(true);
@@ -1661,122 +1662,115 @@ export function StudioStage({
         <button
           type="button"
           onClick={onBackToCatalog}
-          className="mt-6 inline-flex items-center rounded-lg bg-orange-600 px-4 py-2 text-sm font-medium text-white hover:bg-orange-500 transition-colors cursor-pointer"
+          className="mt-5 inline-flex items-center rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-500 transition-colors cursor-pointer"
         >
-          Abrir Catálogo de Ninjas
+          Voltar ao catálogo
         </button>
       </div>
     );
   }
 
+  const mediaCount =
+    (mediaProfile?.passiveAura ? 1 : 0) +
+    (mediaProfile?.videos.length || 0) +
+    (mediaProfile?.voices.length || 0);
+
   return (
     <section className="space-y-4">
       {/* Studio Sub-header */}
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800/80 pb-4">
-        <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/[0.07] pb-4">
+        <div className="flex items-center gap-3 min-w-0">
           <button
             type="button"
             onClick={onBackToCatalog}
-            className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-[#131A26] px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600 hover:text-white cursor-pointer"
+            className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-[#11141C] px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-white/25 hover:text-white transition-colors cursor-pointer shrink-0"
           >
             <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
             <span>Catálogo</span>
           </button>
-          <div>
+          <div className="min-w-0">
             <div className="flex flex-wrap items-baseline gap-2">
-              <h2 className="font-display text-lg font-semibold text-slate-50">
+              <h1 className="truncate font-display text-lg sm:text-xl font-bold tracking-tight text-slate-50">
                 {mediaProfile?.displayName || ninja.name || ninja.id}
-              </h2>
+              </h1>
               {(mediaProfile?.displayName || ninja.name) && (
-                <span className="font-mono text-xs text-slate-400">{ninja.id}</span>
+                <span className="font-mono text-xs text-slate-500">{ninja.id}</span>
               )}
             </div>
-            <p className="text-xs text-slate-400 font-mono tabular-nums">
+            <p className="text-xs text-slate-400 font-mono tabular-nums truncate">
               {ninja.width} × {ninja.height} px · {frames.length} frames · {animNames.length} animações
-              {mediaProfile?.passiveAura ? ` · Aura: ${mediaProfile.passiveAura.label}` : ''}
+              {mediaProfile?.combatProfile?.natureLabel ? ` · ${mediaProfile.combatProfile.natureLabel}` : ''}
             </p>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Mode Switcher */}
-          <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-[#131A26] p-1">
-            <button
-              type="button"
-              onClick={() => setStageMode('player')}
-              disabled={animNames.length === 0}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer disabled:opacity-40 ${
-                stageMode === 'player'
-                  ? 'bg-orange-600 text-white'
-                  : 'text-slate-400 hover:text-slate-100'
-              }`}
-            >
-              <Film className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Animações</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setStageMode('frames')}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                stageMode === 'frames'
-                  ? 'bg-orange-600 text-white'
-                  : 'text-slate-400 hover:text-slate-100'
-              }`}
-            >
-              <Grid className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Frames Fatiados ({frames.length})</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setStageMode('sheet')}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                stageMode === 'sheet'
-                  ? 'bg-orange-600 text-white'
-                  : 'text-slate-400 hover:text-slate-100'
-              }`}
-            >
-              <Layers className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Folha Original</span>
-            </button>
-          </div>
-
+        {/* Mode Switcher */}
+        <div className="flex items-center gap-1 rounded-lg border border-white/[0.08] bg-[#11141C] p-1">
           <button
             type="button"
-            disabled={loading || Boolean(error)}
-            onClick={() => setShowCompleteExportModal(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-40 cursor-pointer whitespace-nowrap"
+            onClick={() => setStageMode('player')}
+            disabled={animNames.length === 0}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer disabled:opacity-40 ${
+              stageMode === 'player'
+                ? 'bg-orange-600 text-white'
+                : 'text-slate-400 hover:text-slate-100'
+            }`}
           >
-            <Download className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Baixar Completo (ZIP)</span>
+            <Film className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Player</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setStageMode('frames')}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer tabular-nums ${
+              stageMode === 'frames'
+                ? 'bg-orange-600 text-white'
+                : 'text-slate-400 hover:text-slate-100'
+            }`}
+          >
+            <Grid className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Frames ({frames.length})</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setStageMode('sheet')}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+              stageMode === 'sheet'
+                ? 'bg-orange-600 text-white'
+                : 'text-slate-400 hover:text-slate-100'
+            }`}
+          >
+            <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Folha</span>
           </button>
         </div>
       </div>
 
       {loading && (
-        <div className="flex h-80 items-center justify-center rounded-lg border border-slate-800 bg-[#131A26]">
+        <div className="flex h-80 items-center justify-center rounded-xl border border-white/[0.07] bg-[#11141C]">
           <div className="text-center">
-            <div className="mx-auto h-7 w-7 animate-spin rounded-full border-2 border-slate-700 border-t-orange-500" />
-            <p className="mt-3 text-sm text-slate-300">
-              Baixando atlas, skeleton e folha WebP de {ninja.id}...
+            <div className="mx-auto h-6 w-6 animate-spin rounded-full border-2 border-white/10 border-t-orange-500" />
+            <p className="mt-3 text-xs text-slate-400">
+              Carregando {ninja.name || ninja.id}...
             </p>
           </div>
         </div>
       )}
 
       {error && !loading && (
-        <div className="rounded-lg border border-red-900/60 bg-red-950/30 p-5 text-sm text-red-200">
+        <div className="rounded-xl border border-red-500/30 bg-red-950/25 p-5 text-sm text-red-200">
           {error}
         </div>
       )}
 
       {!loading && !error && frames.length > 0 && !skeleton && (
-        <div className="rounded-lg border border-amber-800/60 bg-amber-950/25 px-4 py-3 text-xs text-amber-200">
-          Modo estático: os frames fatiados e a folha original foram carregados normalmente para visualização e exportação em PNG/ZIP. Para reproduzir animações Spine (.json) no GitHub Pages, configure um Proxy CORS próprio (ex: Cloudflare Worker) nas opções da aba Extrator URL.
+        <div className="rounded-xl border border-amber-500/25 bg-amber-950/20 px-4 py-3 text-xs text-amber-200">
+          Frames e folha original carregados. Configure um proxy nas opções de Fonte do Catálogo para reproduzir animações Spine neste domínio.
         </div>
       )}
 
       {!loading && !error && (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_300px]">
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_340px]">
           {/* Main Stage */}
           <div className="min-w-0 space-y-4">
             {stageMode === 'player' && (
@@ -1803,7 +1797,7 @@ export function StudioStage({
                 <div
                   className={
                     playerDetached
-                      ? 'fixed inset-0 z-50 overflow-y-auto bg-[#0B0F17]/96 p-3 sm:p-6'
+                      ? 'fixed inset-0 z-50 overflow-y-auto bg-[#090B10]/96 p-3 sm:p-6 backdrop-blur-xs'
                       : ''
                   }
                   onClick={
@@ -1821,35 +1815,33 @@ export function StudioStage({
                 >
                   <div
                     ref={!playerDetached ? playerBoxRef : undefined}
-                    className={`rounded-lg border border-slate-800 bg-[#131A26] ${
+                    className={`rounded-xl border border-white/[0.08] bg-[#11141C] ${
                       playerDetached
-                        ? 'mx-auto my-2 w-full max-w-6xl border-slate-700/80 shadow-2xl'
+                        ? 'mx-auto my-2 w-full max-w-6xl shadow-2xl'
                         : 'overflow-hidden'
                     }`}
                   >
                     {playerDetached && (
-                      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 rounded-t-lg border-b border-slate-800/80 bg-[#0F1520] px-4 py-2.5">
+                      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 rounded-t-xl border-b border-white/[0.07] bg-[#0D1017] px-4 py-2.5">
                         <div className="flex min-w-0 items-center gap-2.5 text-xs">
                           {selectedAnimMeta.iconUrl && (
                             <img
                               src={resolveAssetFetchUrl(selectedAnimMeta.iconUrl)}
                               alt={selectedAnimMeta.shortLabel || selectedAnim}
-                              className="h-7 w-7 shrink-0 rounded border border-slate-700 bg-[#0B0F17] object-contain"
+                              className="h-7 w-7 shrink-0 rounded border border-white/10 bg-[#090B10] object-contain"
                             />
                           )}
                           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                            <span className="truncate font-mono font-semibold text-slate-100">
-                              {ninja.id}
+                            <span className="truncate font-display font-semibold text-slate-100">
+                              {mediaProfile?.displayName || ninja.name || ninja.id}
                             </span>
-                            <span className="text-slate-500" aria-hidden="true">
-                              ·
-                            </span>
-                            <span className="truncate font-mono font-medium text-orange-400">
+                            <span className="text-slate-600" aria-hidden="true">·</span>
+                            <span className="truncate font-mono text-orange-400">
                               {selectedAnim}
                             </span>
                             {selectedAnimMeta.shortLabel && (
-                              <span className="truncate text-slate-300">
-                                ({selectedAnimMeta.shortLabel})
+                              <span className="truncate text-slate-400">
+                                {selectedAnimMeta.shortLabel}
                               </span>
                             )}
                           </div>
@@ -1857,18 +1849,18 @@ export function StudioStage({
                         <button
                           type="button"
                           onClick={closeDetachedPlayer}
-                          className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-slate-700 bg-[#131A26] px-4 py-2 text-xs font-semibold text-slate-100 hover:border-orange-500 hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                          className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-white/10 bg-[#11141C] px-3.5 py-1.5 text-xs font-medium text-slate-200 hover:border-white/25 hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                         >
-                          <X className="h-4 w-4" aria-hidden="true" />
+                          <X className="h-3.5 w-3.5" aria-hidden="true" />
                           <span>Fechar</span>
                         </button>
                       </div>
                     )}
 
                     {/* Canvas Toolbar */}
-                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 px-4 py-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-white/[0.07] px-3.5 py-2.5">
                       <div className="flex flex-wrap items-center gap-2">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-0.5 rounded-lg border border-white/[0.07] bg-[#090B10] p-0.5">
                           {(
                             [
                               { id: 'checker', label: 'Xadrez' },
@@ -1881,9 +1873,9 @@ export function StudioStage({
                               key={bg.id}
                               type="button"
                               onClick={() => setBgStyle(bg.id)}
-                              className={`rounded px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                                 bgStyle === bg.id
-                                  ? 'bg-slate-700 text-white'
+                                  ? 'bg-white/12 text-white'
                                   : 'text-slate-400 hover:text-slate-200'
                               }`}
                             >
@@ -1893,61 +1885,61 @@ export function StudioStage({
                         </div>
 
                         {rawEffectRefs.length > 0 && (
-                          <div className="flex flex-wrap items-center gap-1 rounded border border-slate-800 bg-[#0B0F17] p-0.5">
+                          <div className="flex flex-wrap items-center gap-0.5 rounded-lg border border-white/[0.07] bg-[#090B10] p-0.5">
                             {hasSelfPowers && (
                               <button
                                 type="button"
                                 onClick={() => setEffectMode('powers')}
-                                className={`rounded px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                                   effectMode === 'powers'
                                     ? 'bg-orange-600 text-white'
                                     : 'text-slate-400 hover:text-slate-100'
                                 }`}
                               >
-                                Com poderes
+                                Poderes
                               </button>
                             )}
                             {hasImpactEffects && (
                               <button
                                 type="button"
                                 onClick={() => setEffectMode('all')}
-                                className={`rounded px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                                   effectMode === 'all'
                                     ? 'bg-orange-600 text-white'
                                     : 'text-slate-400 hover:text-slate-100'
                                 }`}
                               >
-                                {hasSelfPowers ? 'Completa (+ impactos)' : 'Com efeitos'}
+                                {hasSelfPowers ? 'Completo' : 'Efeitos'}
                               </button>
                             )}
                             <button
                               type="button"
                               onClick={() => setEffectMode('base')}
-                              className={`rounded px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                                 effectMode === 'base'
-                                  ? 'bg-slate-700 text-white'
+                                  ? 'bg-white/12 text-white'
                                   : 'text-slate-400 hover:text-slate-100'
                               }`}
                             >
-                              Somente ninja
+                              Base
                             </button>
                           </div>
                         )}
 
                         {mediaProfile?.passiveAura && (
-                          <div className="flex items-center gap-1 rounded border border-purple-500/40 bg-purple-950/30 p-0.5">
+                          <div className="flex items-center gap-1 rounded-lg border border-white/[0.07] bg-[#090B10] p-0.5">
                             <button
                               type="button"
                               onClick={() => setShowPassiveAura((v) => !v)}
-                              title={`Alternar aura passiva (${mediaProfile.passiveAura.label})`}
-                              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              title={mediaProfile.passiveAura.label}
+                              className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                                 showPassiveAura
-                                  ? 'bg-purple-600 text-white'
-                                  : 'text-purple-200 hover:bg-purple-900/50'
+                                  ? 'bg-white/12 text-slate-100'
+                                  : 'text-slate-400 hover:text-slate-200'
                               }`}
                             >
-                              <Sparkles className="h-3 w-3" aria-hidden="true" />
-                              <span>Aura Passiva</span>
+                              <Sparkles className="h-3 w-3 text-purple-400" aria-hidden="true" />
+                              <span>Aura</span>
                             </button>
                             {showPassiveAura &&
                               mediaProfile.passiveAura.layers.some(
@@ -1960,31 +1952,31 @@ export function StudioStage({
                                       e.target.value as 'loop' | 'intro' | 'outro'
                                     )
                                   }
-                                  aria-label="Fase da aura passiva"
-                                  className="rounded bg-[#0B0F17] px-1.5 py-1 text-[11px] text-purple-100 focus:outline-none cursor-pointer"
+                                  aria-label="Fase da aura"
+                                  className="rounded bg-transparent px-1.5 py-1 text-[11px] text-slate-300 focus:outline-none cursor-pointer"
                                 >
-                                  <option value="loop">Contínua</option>
-                                  <option value="intro">Entrada</option>
-                                  <option value="outro">Saída</option>
+                                  <option value="loop" className="bg-[#090B10]">Contínua</option>
+                                  <option value="intro" className="bg-[#090B10]">Entrada</option>
+                                  <option value="outro" className="bg-[#090B10]">Saída</option>
                                 </select>
                               )}
                           </div>
                         )}
 
                         {activeVideoRefs.length > 0 && (
-                          <div className="flex items-center gap-1 rounded border border-cyan-500/40 bg-cyan-950/25 p-0.5">
+                          <div className="flex items-center gap-0.5 rounded-lg border border-white/[0.07] bg-[#090B10] p-0.5">
                             <button
                               type="button"
                               onClick={() => setEnableVideoCutscene((v) => !v)}
-                              title="Reproduzir vídeo MP4 da ultimate automaticamente durante a animação"
-                              className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              title="Reproduzir vídeo automaticamente durante a animação"
+                              className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                                 enableVideoCutscene
-                                  ? 'bg-cyan-600 text-white'
-                                  : 'text-cyan-200 hover:bg-cyan-900/50'
+                                  ? 'bg-white/12 text-cyan-200'
+                                  : 'text-slate-400 hover:text-slate-200'
                               }`}
                             >
                               <Clapperboard className="h-3 w-3" aria-hidden="true" />
-                              <span>Vídeo MP4</span>
+                              <span>Vídeo</span>
                             </button>
                             <button
                               type="button"
@@ -2000,19 +1992,19 @@ export function StudioStage({
                                 setActiveVideoOverlay({
                                   playUrl,
                                   rawUrl,
-                                  label: `Ultimate MP4 · ${first.resolvedName}`,
+                                  label: `Ultimate · ${first.resolvedName}`,
                                   key: first.resolvedName,
                                   resumePlaying: isPlaying,
                                 });
                               }}
-                              className="rounded px-2 py-1 text-[11px] font-medium text-cyan-100 hover:bg-cyan-900/50 whitespace-nowrap cursor-pointer"
+                              className="rounded-md px-2 py-1 text-[11px] font-medium text-slate-300 hover:bg-white/[0.06] hover:text-white whitespace-nowrap cursor-pointer"
                             >
                               Assistir
                             </button>
                           </div>
                         )}
 
-                        <div className="flex items-center gap-1.5 rounded border border-slate-800 bg-[#0B0F17] px-2 py-1">
+                        <div className="flex items-center gap-1.5 rounded-lg border border-white/[0.07] bg-[#090B10] px-2 py-1">
                           <button
                             type="button"
                             onClick={() => {
@@ -2020,17 +2012,16 @@ export function StudioStage({
                               setSoundMuted((m) => !m);
                             }}
                             aria-label={soundMuted ? 'Ativar som' : 'Silenciar som'}
-                            title={soundMuted ? 'Ativar som' : 'Silenciar som'}
-                            className={`inline-flex items-center gap-1 text-xs font-medium cursor-pointer ${
+                            className={`inline-flex items-center gap-1 text-[11px] font-medium cursor-pointer ${
                               soundMuted
                                 ? 'text-slate-500 hover:text-slate-300'
-                                : 'text-emerald-300 hover:text-emerald-200'
+                                : 'text-slate-200 hover:text-white'
                             }`}
                           >
                             {soundMuted ? (
                               <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
                             ) : (
-                              <Volume2 className="h-3.5 w-3.5" aria-hidden="true" />
+                              <Volume2 className="h-3.5 w-3.5 text-orange-400" aria-hidden="true" />
                             )}
                             <span>{soundMuted ? 'Mudo' : 'Som'}</span>
                           </button>
@@ -2043,87 +2034,72 @@ export function StudioStage({
                               value={soundVolume}
                               onChange={(e) => setSoundVolume(Number(e.target.value))}
                               aria-label="Volume do áudio"
-                              className="w-14 accent-emerald-500 cursor-pointer"
+                              className="w-12 accent-orange-500 cursor-pointer"
                             />
                           )}
                         </div>
 
                         {(loadingEffects || loadingPassiveAura) && (
-                          <span className="text-xs text-orange-300 font-mono whitespace-nowrap">
-                            {loadingPassiveAura ? 'Carregando aura...' : 'Carregando poderes...'}
+                          <span className="text-[11px] text-slate-400 font-mono whitespace-nowrap">
+                            {loadingPassiveAura ? 'Carregando aura...' : 'Carregando efeitos...'}
                           </span>
                         )}
                         {!loadingEffects && effectLoadError && (
-                          <span className="text-xs text-amber-300 font-mono whitespace-nowrap">
+                          <span className="text-[11px] text-amber-300 whitespace-nowrap">
                             {effectLoadError}
                           </span>
                         )}
                       </div>
 
-                      <div className="flex flex-wrap items-center gap-2">
-                        <div className="flex items-center gap-1 rounded border border-slate-800 bg-[#0B0F17] p-0.5">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setPan((p) => clampPlayerPan(p.x - 24, p.y, zoom))
-                            }
-                            aria-label="Mover para esquerda"
-                            title="Mover esquerda"
-                            className="rounded p-1 text-slate-300 hover:bg-slate-800 cursor-pointer"
-                          >
-                            <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setPan((p) => clampPlayerPan(p.x, p.y - 24, zoom))
-                            }
-                            aria-label="Mover para cima"
-                            title="Mover cima"
-                            className="rounded p-1 text-slate-300 hover:bg-slate-800 cursor-pointer"
-                          >
-                            <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setPan((p) => clampPlayerPan(p.x, p.y + 24, zoom))
-                            }
-                            aria-label="Mover para baixo"
-                            title="Mover baixo"
-                            className="rounded p-1 text-slate-300 hover:bg-slate-800 cursor-pointer"
-                          >
-                            <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setPan((p) => clampPlayerPan(p.x + 24, p.y, zoom))
-                            }
-                            aria-label="Mover para direita"
-                            title="Mover direita"
-                            className="rounded p-1 text-slate-300 hover:bg-slate-800 cursor-pointer"
-                          >
-                            <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-                          </button>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setAutoFit(true);
-                            setPan({ x: 0, y: 0 });
-                          }}
-                          title="Centralizar animação mantendo o zoom atual"
-                          className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
-                            pan.x !== 0 || pan.y !== 0
-                              ? 'border-orange-500/60 bg-orange-950/30 text-orange-200 hover:border-orange-400'
-                              : 'border-slate-800 bg-[#0B0F17] text-slate-300 hover:border-slate-600'
-                          }`}
-                        >
-                          <Crosshair className="h-3 w-3" aria-hidden="true" />
-                          <span>Centralizar</span>
-                        </button>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {(zoom > 1.02 || pan.x !== 0 || pan.y !== 0) && (
+                          <div className="flex items-center gap-0.5 rounded-lg border border-white/[0.07] bg-[#090B10] p-0.5">
+                            <button
+                              type="button"
+                              onClick={() => setPan((p) => clampPlayerPan(p.x - 24, p.y, zoom))}
+                              aria-label="Mover para esquerda"
+                              className="rounded p-1 text-slate-400 hover:bg-white/[0.06] hover:text-white cursor-pointer"
+                            >
+                              <ArrowLeft className="h-3 w-3" aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPan((p) => clampPlayerPan(p.x, p.y - 24, zoom))}
+                              aria-label="Mover para cima"
+                              className="rounded p-1 text-slate-400 hover:bg-white/[0.06] hover:text-white cursor-pointer"
+                            >
+                              <ArrowUp className="h-3 w-3" aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPan((p) => clampPlayerPan(p.x, p.y + 24, zoom))}
+                              aria-label="Mover para baixo"
+                              className="rounded p-1 text-slate-400 hover:bg-white/[0.06] hover:text-white cursor-pointer"
+                            >
+                              <ArrowDown className="h-3 w-3" aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPan((p) => clampPlayerPan(p.x + 24, p.y, zoom))}
+                              aria-label="Mover para direita"
+                              className="rounded p-1 text-slate-400 hover:bg-white/[0.06] hover:text-white cursor-pointer"
+                            >
+                              <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAutoFit(true);
+                                setPan({ x: 0, y: 0 });
+                              }}
+                              title="Centralizar"
+                              aria-label="Centralizar"
+                              className="rounded p-1 text-slate-300 hover:bg-white/[0.06] hover:text-white cursor-pointer"
+                            >
+                              <Crosshair className="h-3 w-3" aria-hidden="true" />
+                            </button>
+                          </div>
+                        )}
 
                         <button
                           type="button"
@@ -2132,34 +2108,30 @@ export function StudioStage({
                             setZoom(1);
                             setPan({ x: 0, y: 0 });
                           }}
-                          title="Resetar zoom para 100% e enquadrar animação inteira"
-                          className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
-                            autoFit && zoom === 1 && pan.x === 0 && pan.y === 0
-                              ? 'border-orange-500/60 bg-orange-950/30 text-orange-200'
-                              : 'border-slate-800 bg-[#0B0F17] text-slate-300 hover:border-slate-600'
-                          }`}
+                          title="Ajustar enquadramento"
+                          className="inline-flex items-center gap-1 rounded-lg border border-white/[0.08] bg-[#090B10] px-2.5 py-1 text-[11px] font-medium text-slate-300 hover:border-white/25 hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
                         >
                           <Maximize2 className="h-3 w-3" aria-hidden="true" />
-                          <span>Enquadrar 100%</span>
+                          <span>Ajustar</span>
                         </button>
 
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-0.5 rounded-lg border border-white/[0.08] bg-[#090B10] p-0.5">
                           <button
                             type="button"
                             onClick={() => applyZoom((z) => z - 0.15)}
                             aria-label="Diminuir zoom"
-                            className="rounded border border-slate-800 bg-[#0B0F17] p-1.5 text-slate-300 hover:border-slate-600 cursor-pointer"
+                            className="rounded p-1 text-slate-400 hover:bg-white/[0.06] hover:text-white cursor-pointer"
                           >
                             <ZoomOut className="h-3.5 w-3.5" aria-hidden="true" />
                           </button>
-                          <span className="w-11 text-center font-mono text-xs text-slate-300 tabular-nums">
+                          <span className="w-10 text-center font-mono text-[11px] text-slate-300 tabular-nums">
                             {Math.round(zoom * 100)}%
                           </span>
                           <button
                             type="button"
                             onClick={() => applyZoom((z) => z + 0.15)}
                             aria-label="Aumentar zoom"
-                            className="rounded border border-slate-800 bg-[#0B0F17] p-1.5 text-slate-300 hover:border-slate-600 cursor-pointer"
+                            className="rounded p-1 text-slate-400 hover:bg-white/[0.06] hover:text-white cursor-pointer"
                           >
                             <ZoomIn className="h-3.5 w-3.5" aria-hidden="true" />
                           </button>
@@ -2167,10 +2139,10 @@ export function StudioStage({
                       </div>
                     </div>
 
-                    {/* Stage Canvas (supports touch/mouse drag to pan) */}
+                    {/* Stage Canvas */}
                     <div
                       className={`${bgClass} relative flex items-center justify-center p-4 ${
-                        playerDetached ? 'min-h-[260px]' : ''
+                        playerDetached ? 'min-h-[280px]' : ''
                       }`}
                     >
                       <canvas
@@ -2306,8 +2278,8 @@ export function StudioStage({
                     </div>
 
                 {/* Playback & Export Controls */}
-                <div className="space-y-3 border-t border-slate-800/80 p-4">
-                  <div className="flex flex-wrap items-center gap-3">
+                <div className="space-y-3 border-t border-white/[0.07] p-4">
+                  <div className="flex flex-wrap items-center gap-2.5">
                     <button
                       type="button"
                       onClick={() => {
@@ -2315,9 +2287,9 @@ export function StudioStage({
                         setCurrentTime((t) => Math.max(0, t - 1 / 30));
                       }}
                       aria-label="Frame anterior"
-                      className="rounded-lg border border-slate-800 bg-[#0B0F17] p-2 text-slate-300 hover:border-slate-600 cursor-pointer"
+                      className="rounded-lg border border-white/10 bg-[#090B10] p-2 text-slate-300 hover:border-white/25 cursor-pointer"
                     >
-                      <SkipBack className="h-4 w-4" aria-hidden="true" />
+                      <SkipBack className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
 
                     <button
@@ -2326,7 +2298,7 @@ export function StudioStage({
                         audioCuePlayer.unlock();
                         setIsPlaying((p) => !p);
                       }}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 transition-colors cursor-pointer"
                     >
                       {isPlaying ? (
                         <>
@@ -2348,9 +2320,9 @@ export function StudioStage({
                         setCurrentTime((t) => (duration > 0 ? (t + 1 / 30) % duration : 0));
                       }}
                       aria-label="Próximo frame"
-                      className="rounded-lg border border-slate-800 bg-[#0B0F17] p-2 text-slate-300 hover:border-slate-600 cursor-pointer"
+                      className="rounded-lg border border-white/10 bg-[#090B10] p-2 text-slate-300 hover:border-white/25 cursor-pointer"
                     >
-                      <SkipForward className="h-4 w-4" aria-hidden="true" />
+                      <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
 
                     <input
@@ -2367,7 +2339,7 @@ export function StudioStage({
                       className="min-w-[140px] flex-1 accent-orange-500 cursor-pointer"
                     />
 
-                    <span className="font-mono text-xs text-slate-300 tabular-nums">
+                    <span className="font-mono text-xs text-slate-400 tabular-nums">
                       {currentTime.toFixed(2)}s / {duration.toFixed(2)}s
                     </span>
 
@@ -2375,7 +2347,7 @@ export function StudioStage({
                       value={speed}
                       onChange={(e) => setSpeed(Number(e.target.value))}
                       aria-label="Velocidade da animação"
-                      className="rounded-lg border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 font-mono text-xs text-slate-200 cursor-pointer"
+                      className="rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 font-mono text-xs text-slate-200 cursor-pointer"
                     >
                       <option value={0.25}>0.25x</option>
                       <option value={0.5}>0.5x</option>
@@ -2385,24 +2357,25 @@ export function StudioStage({
                     </select>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <div className="flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-3">
+                    <span className="text-[11px] text-slate-500 mr-1">Exportar cena:</span>
                     <button
                       type="button"
                       onClick={handleDownloadCurrentCanvasFrame}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#0B0F17] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-500 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/25 cursor-pointer"
                     >
                       <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Baixar Frame Atual PNG</span>
+                      <span>Frame PNG</span>
                     </button>
                     <button
                       type="button"
                       onClick={handleExportAnimStrip}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#0B0F17] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-500 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/25 cursor-pointer"
                     >
                       <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Exportar Spritesheet ({selectedAnim})</span>
+                      <span>Spritesheet</span>
                     </button>
-                    <div className="inline-flex items-center overflow-hidden rounded-lg border border-emerald-500/40 bg-emerald-950/30">
+                    <div className="inline-flex items-center overflow-hidden rounded-lg border border-white/10 bg-[#090B10]">
                       <select
                         value={gifBg}
                         disabled={exportingAnim || gifProgress !== null}
@@ -2412,32 +2385,30 @@ export function StudioStage({
                           )
                         }
                         aria-label="Fundo do GIF"
-                        className="border-r border-emerald-500/30 bg-transparent px-2 py-1.5 text-xs text-emerald-100 focus:outline-none cursor-pointer disabled:opacity-50"
+                        className="border-r border-white/10 bg-transparent px-2 py-1.5 text-xs text-slate-300 focus:outline-none cursor-pointer disabled:opacity-50"
                       >
-                        <option value="transparent" className="bg-[#0B0F17] text-slate-100">
-                          Sem fundo
+                        <option value="transparent" className="bg-[#090B10] text-slate-100">
+                          Transparente
                         </option>
-                        <option value="dark" className="bg-[#0B0F17] text-slate-100">
-                          Fundo escuro
+                        <option value="dark" className="bg-[#090B10] text-slate-100">
+                          Escuro
                         </option>
-                        <option value="light" className="bg-[#0B0F17] text-slate-100">
-                          Fundo claro
+                        <option value="light" className="bg-[#090B10] text-slate-100">
+                          Claro
                         </option>
-                        <option value="chroma" className="bg-[#0B0F17] text-slate-100">
-                          Chroma verde
+                        <option value="chroma" className="bg-[#090B10] text-slate-100">
+                          Chroma
                         </option>
                       </select>
                       <button
                         type="button"
                         disabled={exportingAnim || gifProgress !== null}
                         onClick={() => void handleExportAnimGif()}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-900/40 disabled:opacity-50 cursor-pointer"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-white/[0.06] disabled:opacity-50 cursor-pointer"
                       >
                         <Film className="h-3.5 w-3.5" aria-hidden="true" />
                         <span>
-                          {gifProgress !== null
-                            ? `Gerando GIF (${gifProgress}%)...`
-                            : `Exportar GIF (${selectedAnim})`}
+                          {gifProgress !== null ? `GIF ${gifProgress}%` : 'GIF'}
                         </span>
                       </button>
                     </div>
@@ -2445,13 +2416,11 @@ export function StudioStage({
                       type="button"
                       disabled={exportingAnim || gifProgress !== null}
                       onClick={handleExportAnimZip}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-orange-500/40 bg-orange-950/30 px-3 py-1.5 text-xs font-medium text-orange-200 hover:bg-orange-900/40 disabled:opacity-50 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-orange-500/60 hover:text-white disabled:opacity-50 cursor-pointer"
                     >
                       <Download className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>
-                        {exportingAnim
-                          ? 'Renderizando...'
-                          : `Baixar Frames "${selectedAnim}" (ZIP)`}
+                        {exportingAnim ? 'Renderizando...' : 'Frames (ZIP)'}
                       </span>
                     </button>
                   </div>
@@ -2462,45 +2431,35 @@ export function StudioStage({
             )}
 
             {stageMode === 'frames' && (
-              <div className="rounded-lg border border-slate-800 bg-[#131A26] p-4 space-y-4">
+              <div className="rounded-xl border border-white/[0.07] bg-[#11141C] p-4 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <input
                     type="search"
                     value={frameFilter}
                     onChange={(e) => setFrameFilter(e.target.value)}
-                    placeholder="Filtrar frame (ex: a33, a0)..."
-                    className="w-60 rounded-lg border border-slate-800 bg-[#0B0F17] px-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
+                    placeholder="Filtrar frame..."
+                    className="w-60 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
                   />
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setShowCompleteExportModal(true)}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 cursor-pointer"
-                    >
-                      <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Personagem Completo + Animações (ZIP)</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={downloadingBaseFramesZip}
-                      onClick={() => void handleDownloadBaseFramesZip()}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50 cursor-pointer"
-                    >
-                      <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>
-                        {downloadingBaseFramesZip
-                          ? 'Compactando...'
-                          : `Baixar Frames Base + Ícones (${frames.length})`}
-                      </span>
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    disabled={downloadingBaseFramesZip}
+                    onClick={() => void handleDownloadBaseFramesZip()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3.5 py-2 text-xs font-medium text-slate-200 hover:border-orange-500/60 hover:text-white disabled:opacity-50 cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>
+                      {downloadingBaseFramesZip
+                        ? 'Compactando...'
+                        : `Baixar frames (${frames.length}) ZIP`}
+                    </span>
+                  </button>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5">
                   {filteredFrames.map((frame) => (
                     <div
                       key={frame.id}
-                      className="flex flex-col overflow-hidden rounded-lg border border-slate-800 bg-[#0B0F17]"
+                      className="flex flex-col overflow-hidden rounded-lg border border-white/[0.07] bg-[#090B10]"
                     >
                       <div className="sprite-checkerboard flex h-28 items-center justify-center p-2">
                         <img
@@ -2509,7 +2468,7 @@ export function StudioStage({
                           className="max-h-full max-w-full object-contain"
                         />
                       </div>
-                      <div className="flex items-center justify-between gap-2 border-t border-slate-800/80 px-2.5 py-2">
+                      <div className="flex items-center justify-between gap-2 border-t border-white/[0.06] px-2.5 py-2">
                         <div className="min-w-0">
                           <div className="truncate font-mono text-xs font-medium text-slate-100">
                             {frame.name}
@@ -2524,7 +2483,7 @@ export function StudioStage({
                             downloadDataUrl(frame.dataUrl, `${ninja.id}_${frame.name}.png`)
                           }
                           aria-label={`Baixar ${frame.name}`}
-                          className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white cursor-pointer"
+                          className="rounded p-1.5 text-slate-400 hover:bg-white/[0.06] hover:text-white cursor-pointer"
                         >
                           <Download className="h-3.5 w-3.5" aria-hidden="true" />
                         </button>
@@ -2543,9 +2502,9 @@ export function StudioStage({
                   return (
                     <div
                       key={page.name}
-                      className="overflow-hidden rounded-lg border border-slate-800 bg-[#131A26]"
+                      className="overflow-hidden rounded-xl border border-white/[0.07] bg-[#11141C]"
                     >
-                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 px-4 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] px-4 py-3">
                         <div className="font-mono text-xs text-slate-300 tabular-nums">
                           {page.name} · {img?.width || page.width} × {img?.height || page.height} px ·{' '}
                           {page.regions.length} regiões
@@ -2638,566 +2597,539 @@ export function StudioStage({
             )}
           </div>
 
-          {/* Right Inspector Sidebar */}
-          <aside className="space-y-4">
-            <div className="rounded-lg border border-slate-800 bg-[#131A26] p-4 space-y-3">
-              <h3 className="font-display text-sm font-semibold text-slate-100">
-                Especificações do Ativo
-              </h3>
-              <dl className="space-y-2 text-xs">
-                <div className="flex justify-between gap-2 border-b border-slate-800/60 pb-1.5">
-                  <dt className="text-slate-400">Identificador</dt>
-                  <dd className="font-mono text-slate-100">{ninja.id}</dd>
-                </div>
-                <div className="flex justify-between gap-2 border-b border-slate-800/60 pb-1.5">
-                  <dt className="text-slate-400">Dimensão Base</dt>
-                  <dd className="font-mono text-slate-100 tabular-nums">
-                    {ninja.width} × {ninja.height} px
-                  </dd>
-                </div>
-                <div className="flex justify-between gap-2 border-b border-slate-800/60 pb-1.5">
-                  <dt className="text-slate-400">Frames Fatiados</dt>
-                  <dd className="font-mono text-slate-100 tabular-nums">{frames.length}</dd>
-                </div>
-                <div className="flex justify-between gap-2 border-b border-slate-800/60 pb-1.5">
-                  <dt className="text-slate-400">Versão Spine</dt>
-                  <dd className="font-mono text-slate-100 tabular-nums">
-                    {skeleton?.skeleton?.spine || '—'}
-                  </dd>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <dt className="text-slate-400">Folhas (Pages)</dt>
-                  <dd className="font-mono text-slate-100 tabular-nums">{pages.length}</dd>
-                </div>
-              </dl>
+          {/* Right Tabbed Inspector Sidebar */}
+          <aside className="rounded-xl border border-white/[0.07] bg-[#11141C] flex flex-col overflow-hidden h-fit">
+            {/* Inspector Tabs */}
+            <div className="grid grid-cols-4 border-b border-white/[0.07] bg-[#0D1017] text-xs font-medium">
+              {(
+                [
+                  { id: 'animations', label: 'Animações', count: animNames.length },
+                  { id: 'combat', label: 'Skills', count: orderedSkillList.length },
+                  { id: 'media', label: 'Mídia', count: mediaCount },
+                  { id: 'info', label: 'Info', count: null },
+                ] as const
+              ).map((t) => {
+                const active = inspectorTab === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setInspectorTab(t.id)}
+                    className={`relative py-3 text-center transition-colors cursor-pointer whitespace-nowrap tabular-nums ${
+                      active ? 'text-slate-50 font-semibold' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <span>{t.label}</span>
+                    {t.count !== null && t.count > 0 && (
+                      <span className="ml-1 font-mono text-[10px] text-slate-500">{t.count}</span>
+                    )}
+                    {active && (
+                      <span aria-hidden="true" className="absolute inset-x-0 bottom-0 h-0.5 bg-orange-500" />
+                    )}
+                  </button>
+                );
+              })}
             </div>
 
-            {animNames.length > 0 && (
-              <div className="rounded-lg border border-slate-800 bg-[#131A26] p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-display text-sm font-semibold text-slate-100">
-                    Animações ({animNames.length})
-                  </h3>
-                </div>
-                <input
-                  type="search"
-                  value={animFilter}
-                  onChange={(e) => setAnimFilter(e.target.value)}
-                  placeholder="Buscar animação..."
-                  aria-label="Filtrar animações"
-                  className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 text-base sm:text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
-                />
-                <div className="max-h-[360px] space-y-1 overflow-y-auto pr-1">
-                  {filteredAnimNames.map((anim) => {
-                    const active = anim === selectedAnim && stageMode === 'player';
-                    const eff = skeleton ? resolveEffectiveAnimationName(skeleton, anim) : anim;
-                    const dur = skeleton ? getAnimationDuration(skeleton, eff) : 0;
-                    const effRefs = animEffectMap.get(anim) || [];
-                    const audioRefs = animAudioMap.get(anim) || [];
-                    const videoRefs = animVideoMap.get(anim) || [];
-                    const hasPowers = effRefs.some((r) => r.isSelfOrScreen);
-                    const hasImpacts = !hasPowers && effRefs.length > 0;
-                    const hasAuraHere =
-                      Boolean(mediaProfile?.passiveAura) && eff.toLowerCase() === 'idle';
-                    const meta = getAnimDisplayMeta(anim);
+            {/* TAB 1: ANIMATIONS */}
+            {inspectorTab === 'animations' && (
+              <div className="p-3.5 space-y-3">
+                {animNames.length === 0 ? (
+                  <p className="py-6 text-center text-xs text-slate-500">
+                    Nenhuma animação disponível neste pacote.
+                  </p>
+                ) : (
+                  <>
+                    <input
+                      type="search"
+                      value={animFilter}
+                      onChange={(e) => setAnimFilter(e.target.value)}
+                      placeholder="Filtrar animação..."
+                      aria-label="Filtrar animações"
+                      className="w-full rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
+                    />
+                    <div className="max-h-[480px] divide-y divide-white/[0.05] overflow-y-auto pr-1">
+                      {filteredAnimNames.map((anim) => {
+                        const active = anim === selectedAnim && stageMode === 'player';
+                        const eff = skeleton ? resolveEffectiveAnimationName(skeleton, anim) : anim;
+                        const dur = skeleton ? getAnimationDuration(skeleton, eff) : 0;
+                        const effRefs = animEffectMap.get(anim) || [];
+                        const audioRefs = animAudioMap.get(anim) || [];
+                        const videoRefs = animVideoMap.get(anim) || [];
+                        const hasPowers = effRefs.some((r) => r.isSelfOrScreen);
+                        const hasImpacts = !hasPowers && effRefs.length > 0;
+                        const hasAuraHere =
+                          Boolean(mediaProfile?.passiveAura) && eff.toLowerCase() === 'idle';
+                        const meta = getAnimDisplayMeta(anim);
+                        const cues: string[] = [];
+                        if (hasAuraHere) cues.push('Aura');
+                        if (hasPowers) cues.push('Poder');
+                        else if (hasImpacts) cues.push('Efeito');
+                        if (videoRefs.length > 0) cues.push('Vídeo');
+                        if (audioRefs.length > 0) cues.push('Som');
 
-                    return (
-                      <button
-                        key={anim}
-                        type="button"
-                        onClick={() => {
-                          audioCuePlayer.unlock();
-                          setSelectedAnim(anim);
-                          setCurrentTime(0);
-                          animTimeRef.current = 0;
-                          prevAnimTimeRef.current = -1;
-                          videoTriggeredCycleRef.current = false;
-                          setActiveVideoOverlay(null);
-                          setAutoFit(true);
-                          setZoom(1);
-                          setPan({ x: 0, y: 0 });
-                          setStageMode('player');
-                          setIsPlaying(true);
-                          setEffectMode(hasPowers ? 'powers' : hasImpacts ? 'all' : 'base');
-                          openDetachedPlayer();
-                        }}
-                        className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors cursor-pointer ${
-                          active
-                            ? 'bg-orange-600 text-white font-medium'
-                            : 'text-slate-300 hover:bg-slate-800/70'
-                        }`}
-                      >
-                        {meta.iconUrl && (
-                          <img
-                            src={resolveAssetFetchUrl(meta.iconUrl)}
-                            alt={meta.shortLabel || anim}
-                            loading="lazy"
-                            className={`h-8 w-8 shrink-0 rounded border object-contain ${
-                              active
-                                ? 'border-orange-200/70 bg-black/25'
-                                : 'border-slate-700/80 bg-[#0B0F17]'
-                            }`}
-                          />
-                        )}
-                        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                          <div className="flex w-full items-center justify-between gap-2">
-                            <span className="truncate font-mono">{anim}</span>
-                            <span
-                              className={`shrink-0 font-mono text-[10px] tabular-nums ${
-                                active ? 'text-orange-100' : 'text-slate-500'
-                              }`}
-                            >
-                              {dur.toFixed(2)}s
-                            </span>
-                          </div>
-                          {(meta.shortLabel ||
-                            hasAuraHere ||
-                            hasPowers ||
-                            hasImpacts ||
-                            videoRefs.length > 0 ||
-                            audioRefs.length > 0) && (
-                            <div className="flex flex-wrap items-center gap-1">
-                              {meta.shortLabel && (
-                                <span
-                                  className={`truncate text-[10px] ${
-                                    active ? 'text-orange-100' : 'text-slate-400'
-                                  }`}
-                                >
-                                  {meta.label}
-                                </span>
-                              )}
-                              {hasAuraHere && (
-                                <span
-                                  className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
-                                    active
-                                      ? 'bg-purple-900/60 text-purple-100'
-                                      : 'bg-purple-950/70 text-purple-300'
-                                  }`}
-                                >
-                                  Aura
-                                </span>
-                              )}
-                              {(hasPowers || hasImpacts) && (
-                                <span
-                                  className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
-                                    active
-                                      ? 'bg-black/25 text-white'
-                                      : 'bg-orange-950/70 text-orange-300'
-                                  }`}
-                                >
-                                  {hasPowers ? 'Poder' : 'Efeito'}
-                                </span>
-                              )}
-                              {videoRefs.length > 0 && (
-                                <span
-                                  className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
-                                    active
-                                      ? 'bg-cyan-900/60 text-cyan-100'
-                                      : 'bg-cyan-950/70 text-cyan-300'
-                                  }`}
-                                >
-                                  MP4
-                                </span>
-                              )}
-                              {audioRefs.length > 0 && (
-                                <span
-                                  className={`rounded px-1 py-0.2 text-[9px] font-semibold ${
-                                    active
-                                      ? 'bg-emerald-900/60 text-emerald-100'
-                                      : 'bg-emerald-950/70 text-emerald-300'
-                                  }`}
-                                >
-                                  Som
-                                </span>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Skills, Passives & Combat Mechanics Card */}
-            {(orderedSkillList.length > 0 || Boolean(mediaProfile?.combatProfile)) && (
-              <div className="rounded-lg border border-slate-800 bg-[#131A26] p-4 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="font-display text-sm font-semibold text-slate-100">
-                    Combate, Skills & Ícones ({orderedSkillList.length})
-                  </h3>
-                  <div className="flex items-center gap-1.5">
-                    {mediaProfile && (
-                      <button
-                        type="button"
-                        onClick={handleDownloadCombatJson}
-                        title="Baixar ficha estruturada de combate, perseguições, efeitos e atributos (combate_e_habilidades.json)"
-                        className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-950/30 px-2 py-1 text-[11px] font-medium text-emerald-200 hover:bg-emerald-900/40 cursor-pointer whitespace-nowrap"
-                      >
-                        <Download className="h-3 w-3" aria-hidden="true" />
-                        <span>JSON</span>
-                      </button>
-                    )}
-                    {skillIconCount > 0 && (
-                      <button
-                        type="button"
-                        disabled={downloadingSkillIconsZip}
-                        onClick={() => void handleDownloadAllSkillIconsZip()}
-                        title="Baixar todos os ícones das habilidades e passivas + JSON de combate em ZIP"
-                        className="inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-950/30 px-2 py-1 text-[11px] font-medium text-amber-200 hover:bg-amber-900/40 disabled:opacity-50 cursor-pointer whitespace-nowrap"
-                      >
-                        <Download className="h-3 w-3" aria-hidden="true" />
-                        <span>{downloadingSkillIconsZip ? 'Gerando...' : `ZIP (${skillIconCount})`}</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {mediaProfile?.combatProfile && (
-                  <div className="rounded-md border border-slate-800/90 bg-[#0B0F17] p-2.5 space-y-2 text-[11px]">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      {mediaProfile.combatProfile.natureLabel && (
-                        <span className="rounded border border-sky-500/35 bg-sky-950/40 px-1.5 py-0.5 text-[10px] font-semibold text-sky-200">
-                          {mediaProfile.combatProfile.natureLabel}
-                        </span>
-                      )}
-                      {mediaProfile.combatProfile.combatRoleLabel && (
-                        <span className="rounded border border-slate-700 bg-slate-800/80 px-1.5 py-0.5 text-[10px] font-medium text-slate-200">
-                          {mediaProfile.combatProfile.combatRoleLabel}
-                        </span>
-                      )}
-                      {typeof mediaProfile.combatProfile.baseStats?.hp === 'number' && (
-                        <span className="font-mono text-[10px] text-slate-400">
-                          PV <strong className="text-slate-200">{mediaProfile.combatProfile.baseStats.hp}</strong>
-                        </span>
-                      )}
-                      {typeof mediaProfile.combatProfile.baseStats?.attack === 'number' && (
-                        <span className="font-mono text-[10px] text-slate-400">
-                          ATQ <strong className="text-slate-200">{mediaProfile.combatProfile.baseStats.attack}</strong>
-                        </span>
-                      )}
-                      {typeof mediaProfile.combatProfile.baseStats?.defense === 'number' && (
-                        <span className="font-mono text-[10px] text-slate-400">
-                          DEF <strong className="text-slate-200">{mediaProfile.combatProfile.baseStats.defense}</strong>
-                        </span>
-                      )}
-                    </div>
-
-                    {(mediaProfile.combatProfile.chaseComboSummary.initiators.length > 0 ||
-                      mediaProfile.combatProfile.chaseComboSummary.chasers.length > 0) && (
-                      <div className="space-y-1 border-t border-slate-800/80 pt-1.5 text-[10px]">
-                        {mediaProfile.combatProfile.chaseComboSummary.initiators.length > 0 && (
-                          <div className="flex flex-wrap items-center gap-1 text-slate-300">
-                            <span className="font-semibold text-orange-300">Causa:</span>
-                            <span>
-                              {Array.from(
-                                new Set(
-                                  mediaProfile.combatProfile.chaseComboSummary.initiators.flatMap(
-                                    (i) => i.causesStateLabels || []
-                                  )
-                                )
-                              ).join(' · ')}
-                            </span>
-                          </div>
-                        )}
-                        {mediaProfile.combatProfile.chaseComboSummary.chasers.length > 0 && (
-                          <div className="space-y-0.5 text-slate-300">
-                            {mediaProfile.combatProfile.chaseComboSummary.chasers.map((c, idx) => (
-                              <div key={`${c.skillId}_${idx}`} className="flex flex-wrap items-center gap-1">
-                                <span className="font-semibold text-emerald-300">Persegue:</span>
-                                <span>{(c.requiresStateLabels || []).join('/')}</span>
-                                {c.causesStateLabels && c.causesStateLabels.length > 0 && (
-                                  <>
-                                    <span className="text-slate-500">→</span>
-                                    <span className="text-orange-200">
-                                      {c.causesStateLabels.join('/')}
-                                    </span>
-                                  </>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <div className="max-h-[380px] space-y-1.5 overflow-y-auto pr-1">
-                  {orderedSkillList.map((item) => {
-                    const matchedAnim =
-                      !item.isPassive && item.animKey
-                        ? animNames.find((a) => a === item.animKey) ||
-                          animNames.find((a) => a.toLowerCase() === item.animKey!.toLowerCase())
-                        : undefined;
-                    const iconSrc = item.iconUrl ? resolveAssetFetchUrl(item.iconUrl) : '';
-                    const downloadName = `${ninja.id}_${sanitizePathSegment(item.slotLabel)}_${sanitizePathSegment(item.name)}.png`;
-                    const cleanDesc = item.descPlain || (item.desc ? stripHtmlTags(item.desc) : '');
-
-                    return (
-                      <div
-                        key={item.key}
-                        title={cleanDesc || item.name}
-                        className="flex items-start gap-2.5 rounded-md border border-slate-800 bg-[#0B0F17] p-2 text-xs"
-                      >
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded border border-slate-700/80 bg-[#131A26]">
-                          {iconSrc ? (
-                            <img
-                              src={iconSrc}
-                              alt={item.name}
-                              loading="lazy"
-                              className="h-full w-full object-contain"
-                            />
-                          ) : (
-                            <Sparkles className="h-4 w-4 text-slate-600" aria-hidden="true" />
-                          )}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <span
-                              className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold ${
-                                item.isPassive
-                                  ? 'bg-purple-950/70 text-purple-300'
-                                  : 'bg-amber-950/70 text-amber-300'
-                              }`}
-                            >
-                              {item.slotLabel}
-                            </span>
-                            {matchedAnim && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  audioCuePlayer.unlock();
-                                  const effRefs = animEffectMap.get(matchedAnim) || [];
-                                  const hasP = effRefs.some((r) => r.isSelfOrScreen);
-                                  const hasI = !hasP && effRefs.length > 0;
-                                  setSelectedAnim(matchedAnim);
-                                  setCurrentTime(0);
-                                  animTimeRef.current = 0;
-                                  prevAnimTimeRef.current = -1;
-                                  videoTriggeredCycleRef.current = false;
-                                  setActiveVideoOverlay(null);
-                                  setAutoFit(true);
-                                  setZoom(1);
-                                  setPan({ x: 0, y: 0 });
-                                  setStageMode('player');
-                                  setIsPlaying(true);
-                                  setEffectMode(hasP ? 'powers' : hasI ? 'all' : 'base');
-                                  openDetachedPlayer();
-                                }}
-                                className="truncate font-mono text-[10px] text-orange-400 hover:underline cursor-pointer"
-                              >
-                                ver {matchedAnim}
-                              </button>
-                            )}
-                          </div>
-                          <div className="mt-0.5 truncate font-medium text-slate-100">
-                            {item.name}
-                          </div>
-                          {cleanDesc && (
-                            <div className="line-clamp-3 text-[10px] leading-snug text-slate-400">
-                              {cleanDesc}
-                            </div>
-                          )}
-                          {((item.chaseTriggerLabels && item.chaseTriggerLabels.length > 0) ||
-                            (item.causesChaseStateLabels && item.causesChaseStateLabels.length > 0) ||
-                            item.targetLabel ||
-                            (item.appliedEffects && item.appliedEffects.length > 0)) && (
-                            <div className="mt-1.5 flex flex-wrap gap-1">
-                              {item.chaseTriggerLabels && item.chaseTriggerLabels.length > 0 && (
-                                <span className="rounded bg-emerald-950/80 px-1.5 py-0.5 text-[9px] font-medium text-emerald-300">
-                                  Persegue: {item.chaseTriggerLabels.join('/')}
-                                </span>
-                              )}
-                              {item.causesChaseStateLabels && item.causesChaseStateLabels.length > 0 && (
-                                <span className="rounded bg-orange-950/80 px-1.5 py-0.5 text-[9px] font-medium text-orange-300">
-                                  Causa: {item.causesChaseStateLabels.join('/')}
-                                </span>
-                              )}
-                              {item.targetLabel && (
-                                <span className="rounded bg-slate-800/90 px-1.5 py-0.5 text-[9px] text-slate-300">
-                                  Alvo: {item.targetLabel}
-                                </span>
-                              )}
-                              {item.appliedEffects?.slice(0, 4).map((ef) => (
-                                <span
-                                  key={ef}
-                                  className="rounded bg-violet-950/70 px-1.5 py-0.5 text-[9px] text-violet-200"
-                                >
-                                  {ef}
-                                </span>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                        {item.iconUrl && (
+                        return (
                           <button
-                            type="button"
-                            onClick={() => void handleDownloadRemoteMedia(item.iconUrl!, downloadName)}
-                            title="Baixar ícone em PNG (qualidade máxima)"
-                            className="shrink-0 rounded border border-slate-700 bg-[#131A26] p-1.5 text-slate-300 hover:border-amber-500/60 hover:text-amber-200 cursor-pointer"
-                          >
-                            <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Passive Aura, Ultimate Videos & Voices Card */}
-            {(mediaProfile?.passiveAura ||
-              (mediaProfile?.videos && mediaProfile.videos.length > 0) ||
-              (mediaProfile?.voices && mediaProfile.voices.length > 0)) && (
-              <div className="rounded-lg border border-slate-800 bg-[#131A26] p-4 space-y-3">
-                <h3 className="font-display text-sm font-semibold text-slate-100">
-                  Mídia, Aura & Vozes
-                </h3>
-
-                {mediaProfile.passiveAura && (
-                  <div className="rounded-md border border-purple-500/30 bg-purple-950/20 p-2.5 space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-purple-200">
-                        <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>{mediaProfile.passiveAura.label}</span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setShowPassiveAura((v) => !v)}
-                        className={`rounded px-2 py-0.5 text-[10px] font-semibold cursor-pointer ${
-                          showPassiveAura
-                            ? 'bg-purple-600 text-white'
-                            : 'border border-purple-500/40 text-purple-200'
-                        }`}
-                      >
-                        {showPassiveAura ? 'Ativa' : 'Ativar'}
-                      </button>
-                    </div>
-                    <p className="font-mono text-[10px] text-slate-400">
-                      {mediaProfile.passiveAura.id} · incluída no ZIP completo
-                    </p>
-                  </div>
-                )}
-
-                {mediaProfile.videos.length > 0 && (
-                  <div className="space-y-1.5">
-                    <div className="text-[11px] font-medium text-slate-400">
-                      Vídeos da Ultimate ({mediaProfile.videos.length})
-                    </div>
-                    {mediaProfile.videos.map((vid) => (
-                      <div
-                        key={vid.key}
-                        className="flex items-center justify-between gap-2 rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-2 text-xs"
-                      >
-                        <div className="min-w-0">
-                          <div className="truncate font-medium text-cyan-200">{vid.label}</div>
-                          <div className="truncate font-mono text-[10px] text-slate-500">
-                            {vid.key}.mp4
-                          </div>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-1">
-                          <button
+                            key={anim}
                             type="button"
                             onClick={() => {
                               audioCuePlayer.unlock();
-                              const playUrl = resolveMediaPlayUrl(vid.url);
-                              if (!playUrl) return;
+                              setSelectedAnim(anim);
+                              setCurrentTime(0);
+                              animTimeRef.current = 0;
+                              prevAnimTimeRef.current = -1;
+                              videoTriggeredCycleRef.current = false;
+                              setActiveVideoOverlay(null);
+                              setAutoFit(true);
+                              setZoom(1);
+                              setPan({ x: 0, y: 0 });
                               setStageMode('player');
-                              setActiveVideoOverlay({
-                                playUrl,
-                                rawUrl: vid.url,
-                                label: `${vid.label} · ${vid.key}`,
-                                key: vid.key,
-                                resumePlaying: isPlaying,
-                              });
+                              setIsPlaying(true);
+                              setEffectMode(hasPowers ? 'powers' : hasImpacts ? 'all' : 'base');
                               openDetachedPlayer();
                             }}
-                            title="Assistir vídeo MP4"
-                            className="rounded border border-cyan-500/40 bg-cyan-950/40 p-1.5 text-cyan-200 hover:bg-cyan-900/50 cursor-pointer"
+                            className={`flex w-full items-center gap-2.5 px-2.5 py-2 text-left text-xs transition-colors cursor-pointer rounded-lg ${
+                              active
+                                ? 'bg-orange-600/90 text-white'
+                                : 'text-slate-300 hover:bg-white/[0.04]'
+                            }`}
                           >
-                            <Play className="h-3 w-3" aria-hidden="true" />
+                            {meta.iconUrl && (
+                              <img
+                                src={resolveAssetFetchUrl(meta.iconUrl)}
+                                alt={meta.shortLabel || anim}
+                                loading="lazy"
+                                className={`h-8 w-8 shrink-0 rounded border object-contain ${
+                                  active
+                                    ? 'border-white/30 bg-black/25'
+                                    : 'border-white/10 bg-[#090B10]'
+                                }`}
+                              />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="truncate font-mono font-medium">{anim}</span>
+                                <span
+                                  className={`shrink-0 font-mono text-[10px] tabular-nums ${
+                                    active ? 'text-orange-100' : 'text-slate-500'
+                                  }`}
+                                >
+                                  {dur.toFixed(2)}s
+                                </span>
+                              </div>
+                              {(meta.shortLabel || cues.length > 0) && (
+                                <div
+                                  className={`mt-0.5 truncate text-[11px] ${
+                                    active ? 'text-orange-100/90' : 'text-slate-400'
+                                  }`}
+                                >
+                                  {[meta.shortLabel, ...cues].filter(Boolean).join(' · ')}
+                                </div>
+                              )}
+                            </div>
                           </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: COMBAT & SKILLS */}
+            {inspectorTab === 'combat' && (
+              <div className="p-3.5 space-y-3.5">
+                {orderedSkillList.length === 0 && !mediaProfile?.combatProfile ? (
+                  <p className="py-6 text-center text-xs text-slate-500">
+                    Nenhuma habilidade catalogada para este item.
+                  </p>
+                ) : (
+                  <>
+                    {/* Compact Combat Profile & Quick Exports */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.07] pb-3">
+                      <div className="min-w-0 space-y-0.5">
+                        {mediaProfile?.combatProfile && (
+                          <>
+                            <div className="text-xs font-medium text-slate-200 truncate">
+                              {[
+                                mediaProfile.combatProfile.natureLabel,
+                                mediaProfile.combatProfile.combatRoleLabel,
+                              ]
+                                .filter(Boolean)
+                                .join(' · ')}
+                            </div>
+                            <div className="font-mono text-[11px] text-slate-400 tabular-nums">
+                              {[
+                                typeof mediaProfile.combatProfile.baseStats?.hp === 'number'
+                                  ? `PV ${mediaProfile.combatProfile.baseStats.hp}`
+                                  : null,
+                                typeof mediaProfile.combatProfile.baseStats?.attack === 'number'
+                                  ? `ATQ ${mediaProfile.combatProfile.baseStats.attack}`
+                                  : null,
+                                typeof mediaProfile.combatProfile.baseStats?.defense === 'number'
+                                  ? `DEF ${mediaProfile.combatProfile.baseStats.defense}`
+                                  : null,
+                              ]
+                                .filter(Boolean)
+                                .join(' · ')}
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {mediaProfile && (
                           <button
                             type="button"
-                            onClick={() =>
-                              void handleDownloadRemoteMedia(
-                                vid.url,
-                                `${ninja.id}_${sanitizePathSegment(vid.key)}.mp4`
-                              )
-                            }
-                            title="Baixar MP4"
-                            className="rounded border border-slate-700 bg-[#131A26] p-1.5 text-slate-300 hover:border-slate-500 hover:text-white cursor-pointer"
+                            onClick={handleDownloadCombatJson}
+                            title="Baixar combate_e_habilidades.json"
+                            className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-[#090B10] px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:border-orange-500/60 hover:text-white cursor-pointer whitespace-nowrap"
                           >
                             <Download className="h-3 w-3" aria-hidden="true" />
+                            <span>JSON</span>
                           </button>
-                        </div>
+                        )}
+                        {skillIconCount > 0 && (
+                          <button
+                            type="button"
+                            disabled={downloadingSkillIconsZip}
+                            onClick={() => void handleDownloadAllSkillIconsZip()}
+                            title="Baixar ícones das habilidades + JSON"
+                            className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-[#090B10] px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:border-orange-500/60 hover:text-white disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                          >
+                            <Download className="h-3 w-3" aria-hidden="true" />
+                            <span>{downloadingSkillIconsZip ? '...' : `Ícones (${skillIconCount})`}</span>
+                          </button>
+                        )}
                       </div>
-                    ))}
-                  </div>
-                )}
-
-                {mediaProfile.voices.length > 0 && (
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] font-medium text-slate-400">
-                      <span className="inline-flex items-center gap-1">
-                        <Music className="h-3 w-3" aria-hidden="true" />
-                        <span>Vozes do Personagem ({mediaProfile.voices.length})</span>
-                      </span>
                     </div>
-                    <div className="max-h-48 space-y-1 overflow-y-auto pr-1">
-                      {mediaProfile.voices.map((voice) => {
-                        const isPlayingThis = playingVoiceKey === voice.key;
+
+                    {mediaProfile?.combatProfile &&
+                      (mediaProfile.combatProfile.chaseComboSummary.initiators.length > 0 ||
+                        mediaProfile.combatProfile.chaseComboSummary.chasers.length > 0) && (
+                        <div className="space-y-1 border-b border-white/[0.07] pb-3 text-[11px] text-slate-300">
+                          {mediaProfile.combatProfile.chaseComboSummary.initiators.length > 0 && (
+                            <div>
+                              <span className="font-semibold text-orange-400">Causa: </span>
+                              <span>
+                                {Array.from(
+                                  new Set(
+                                    mediaProfile.combatProfile.chaseComboSummary.initiators.flatMap(
+                                      (i) => i.causesStateLabels || []
+                                    )
+                                  )
+                                ).join(' · ')}
+                              </span>
+                            </div>
+                          )}
+                          {mediaProfile.combatProfile.chaseComboSummary.chasers.map((c, idx) => (
+                            <div key={`${c.skillId}_${idx}`}>
+                              <span className="font-semibold text-emerald-400">Persegue: </span>
+                              <span>{(c.requiresStateLabels || []).join('/')}</span>
+                              {c.causesStateLabels && c.causesStateLabels.length > 0 && (
+                                <span className="text-slate-400">
+                                  {' → '}
+                                  {c.causesStateLabels.join('/')}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                    <div className="max-h-[420px] divide-y divide-white/[0.06] overflow-y-auto pr-1">
+                      {orderedSkillList.map((item) => {
+                        const matchedAnim =
+                          !item.isPassive && item.animKey
+                            ? animNames.find((a) => a === item.animKey) ||
+                              animNames.find((a) => a.toLowerCase() === item.animKey!.toLowerCase())
+                            : undefined;
+                        const iconSrc = item.iconUrl ? resolveAssetFetchUrl(item.iconUrl) : '';
+                        const downloadName = `${ninja.id}_${sanitizePathSegment(item.slotLabel)}_${sanitizePathSegment(item.name)}.png`;
+                        const cleanDesc = item.descPlain || (item.desc ? stripHtmlTags(item.desc) : '');
+                        const metaParts: string[] = [];
+                        if (item.chaseTriggerLabels?.length) {
+                          metaParts.push(`Persegue ${item.chaseTriggerLabels.join('/')}`);
+                        }
+                        if (item.causesChaseStateLabels?.length) {
+                          metaParts.push(`Causa ${item.causesChaseStateLabels.join('/')}`);
+                        }
+                        if (item.targetLabel) metaParts.push(item.targetLabel);
+                        if (item.appliedEffects?.length) {
+                          metaParts.push(item.appliedEffects.slice(0, 3).join(', '));
+                        }
+
                         return (
                           <div
-                            key={`${voice.category}_${voice.key}`}
-                            className="flex items-center justify-between gap-2 rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 text-xs"
+                            key={item.key}
+                            className="flex items-start gap-2.5 py-2.5 first:pt-0 last:pb-0 text-xs"
                           >
-                            <div className="min-w-0">
-                              <div className="truncate text-slate-200">{voice.label}</div>
-                              <div className="truncate font-mono text-[10px] text-slate-500">
-                                {voice.key}.mp3
-                              </div>
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/10 bg-[#090B10]">
+                              {iconSrc ? (
+                                <img
+                                  src={iconSrc}
+                                  alt={item.name}
+                                  loading="lazy"
+                                  className="h-full w-full object-contain"
+                                />
+                              ) : (
+                                <Sparkles className="h-4 w-4 text-slate-600" aria-hidden="true" />
+                              )}
                             </div>
-                            <div className="flex shrink-0 items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={() => handleToggleVoicePreview(voice.key, voice.url)}
-                                title={isPlayingThis ? 'Parar voz' : 'Ouvir voz'}
-                                className={`rounded p-1.5 cursor-pointer ${
-                                  isPlayingThis
-                                    ? 'bg-emerald-600 text-white'
-                                    : 'border border-emerald-500/40 bg-emerald-950/30 text-emerald-200 hover:bg-emerald-900/40'
-                                }`}
-                              >
-                                {isPlayingThis ? (
-                                  <Pause className="h-3 w-3" aria-hidden="true" />
-                                ) : (
-                                  <Volume2 className="h-3 w-3" aria-hidden="true" />
+                            <div className="min-w-0 flex-1 space-y-0.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[11px] font-medium text-slate-400">
+                                  {item.slotLabel}
+                                </span>
+                                {matchedAnim && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      audioCuePlayer.unlock();
+                                      const effRefs = animEffectMap.get(matchedAnim) || [];
+                                      const hasP = effRefs.some((r) => r.isSelfOrScreen);
+                                      const hasI = !hasP && effRefs.length > 0;
+                                      setSelectedAnim(matchedAnim);
+                                      setCurrentTime(0);
+                                      animTimeRef.current = 0;
+                                      prevAnimTimeRef.current = -1;
+                                      videoTriggeredCycleRef.current = false;
+                                      setActiveVideoOverlay(null);
+                                      setAutoFit(true);
+                                      setZoom(1);
+                                      setPan({ x: 0, y: 0 });
+                                      setStageMode('player');
+                                      setIsPlaying(true);
+                                      setEffectMode(hasP ? 'powers' : hasI ? 'all' : 'base');
+                                      openDetachedPlayer();
+                                    }}
+                                    className="font-mono text-[10px] text-orange-400 hover:underline cursor-pointer shrink-0"
+                                  >
+                                    Reproduzir
+                                  </button>
                                 )}
-                              </button>
+                              </div>
+                              <div className="truncate font-semibold text-slate-100">
+                                {item.name}
+                              </div>
+                              {cleanDesc && (
+                                <p className="line-clamp-3 text-[11px] leading-relaxed text-slate-400">
+                                  {cleanDesc}
+                                </p>
+                              )}
+                              {metaParts.length > 0 && (
+                                <p className="pt-0.5 text-[10px] text-slate-300">
+                                  {metaParts.join(' · ')}
+                                </p>
+                              )}
+                            </div>
+                            {item.iconUrl && (
                               <button
                                 type="button"
-                                onClick={() =>
-                                  void handleDownloadRemoteMedia(
-                                    voice.url,
-                                    `${ninja.id}_${sanitizePathSegment(`${voice.category}_${voice.key}`)}.mp3`
-                                  )
-                                }
-                                title="Baixar MP3"
-                                className="rounded border border-slate-700 bg-[#131A26] p-1.5 text-slate-300 hover:border-slate-500 hover:text-white cursor-pointer"
+                                onClick={() => void handleDownloadRemoteMedia(item.iconUrl!, downloadName)}
+                                title="Baixar ícone PNG"
+                                aria-label={`Baixar ícone de ${item.name}`}
+                                className="shrink-0 rounded-md p-1.5 text-slate-400 hover:bg-white/[0.06] hover:text-white cursor-pointer"
                               >
-                                <Download className="h-3 w-3" aria-hidden="true" />
+                                <Download className="h-3.5 w-3.5" aria-hidden="true" />
                               </button>
-                            </div>
+                            )}
                           </div>
                         );
                       })}
                     </div>
-                  </div>
+                  </>
                 )}
+              </div>
+            )}
+
+            {/* TAB 3: MEDIA (AURA, VIDEOS, VOICES) */}
+            {inspectorTab === 'media' && (
+              <div className="p-3.5 space-y-4">
+                {mediaCount === 0 ? (
+                  <p className="py-6 text-center text-xs text-slate-500">
+                    Nenhuma aura, vídeo ou voz vinculada a este item.
+                  </p>
+                ) : (
+                  <>
+                    {mediaProfile?.passiveAura && (
+                      <div className="flex items-center justify-between gap-2 border-b border-white/[0.07] pb-3">
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-slate-100 truncate">
+                            {mediaProfile.passiveAura.label}
+                          </div>
+                          <div className="font-mono text-[11px] text-slate-500">
+                            {mediaProfile.passiveAura.id}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShowPassiveAura((v) => !v)}
+                          className={`rounded-md px-3 py-1 text-xs font-medium cursor-pointer transition-colors ${
+                            showPassiveAura
+                              ? 'bg-orange-600 text-white'
+                              : 'border border-white/10 text-slate-300 hover:border-white/25'
+                          }`}
+                        >
+                          {showPassiveAura ? 'Ativa' : 'Ativar'}
+                        </button>
+                      </div>
+                    )}
+
+                    {mediaProfile && mediaProfile.videos.length > 0 && (
+                      <div className="space-y-2">
+                        <div className="text-xs font-semibold text-slate-300">
+                          Vídeos ({mediaProfile.videos.length})
+                        </div>
+                        <div className="divide-y divide-white/[0.05]">
+                          {mediaProfile.videos.map((vid) => (
+                            <div
+                              key={vid.key}
+                              className="flex items-center justify-between gap-2 py-2 text-xs"
+                            >
+                              <div className="min-w-0">
+                                <div className="truncate font-medium text-slate-100">{vid.label}</div>
+                                <div className="truncate font-mono text-[10px] text-slate-500">
+                                  {vid.key}.mp4
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    audioCuePlayer.unlock();
+                                    const playUrl = resolveMediaPlayUrl(vid.url);
+                                    if (!playUrl) return;
+                                    setStageMode('player');
+                                    setActiveVideoOverlay({
+                                      playUrl,
+                                      rawUrl: vid.url,
+                                      label: `${vid.label} · ${vid.key}`,
+                                      key: vid.key,
+                                      resumePlaying: isPlaying,
+                                    });
+                                    openDetachedPlayer();
+                                  }}
+                                  aria-label={`Assistir ${vid.label}`}
+                                  className="rounded-md border border-white/10 bg-[#090B10] p-1.5 text-slate-200 hover:border-orange-500/60 hover:text-white cursor-pointer"
+                                >
+                                  <Play className="h-3 w-3" aria-hidden="true" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void handleDownloadRemoteMedia(
+                                      vid.url,
+                                      `${ninja.id}_${sanitizePathSegment(vid.key)}.mp4`
+                                    )
+                                  }
+                                  aria-label={`Baixar ${vid.label}`}
+                                  className="rounded-md border border-white/10 bg-[#090B10] p-1.5 text-slate-300 hover:border-white/25 hover:text-white cursor-pointer"
+                                >
+                                  <Download className="h-3 w-3" aria-hidden="true" />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {mediaProfile && mediaProfile.voices.length > 0 && (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-300">
+                          <Music className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                          <span>Vozes ({mediaProfile.voices.length})</span>
+                        </div>
+                        <div className="max-h-64 divide-y divide-white/[0.05] overflow-y-auto pr-1">
+                          {mediaProfile.voices.map((voice) => {
+                            const isPlayingThis = playingVoiceKey === voice.key;
+                            return (
+                              <div
+                                key={`${voice.category}_${voice.key}`}
+                                className="flex items-center justify-between gap-2 py-2 text-xs"
+                              >
+                                <div className="min-w-0">
+                                  <div className="truncate text-slate-200">{voice.label}</div>
+                                  <div className="truncate font-mono text-[10px] text-slate-500">
+                                    {voice.key}.mp3
+                                  </div>
+                                </div>
+                                <div className="flex shrink-0 items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleVoicePreview(voice.key, voice.url)}
+                                    aria-label={isPlayingThis ? 'Parar voz' : 'Ouvir voz'}
+                                    className={`rounded-md p-1.5 cursor-pointer ${
+                                      isPlayingThis
+                                        ? 'bg-orange-600 text-white'
+                                        : 'border border-white/10 bg-[#090B10] text-slate-200 hover:border-white/25'
+                                    }`}
+                                  >
+                                    {isPlayingThis ? (
+                                      <Pause className="h-3 w-3" aria-hidden="true" />
+                                    ) : (
+                                      <Volume2 className="h-3 w-3" aria-hidden="true" />
+                                    )}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void handleDownloadRemoteMedia(
+                                        voice.url,
+                                        `${ninja.id}_${sanitizePathSegment(`${voice.category}_${voice.key}`)}.mp3`
+                                      )
+                                    }
+                                    aria-label={`Baixar ${voice.label}`}
+                                    className="rounded-md border border-white/10 bg-[#090B10] p-1.5 text-slate-300 hover:border-white/25 hover:text-white cursor-pointer"
+                                  >
+                                    <Download className="h-3 w-3" aria-hidden="true" />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* TAB 4: INFO / SPECS */}
+            {inspectorTab === 'info' && (
+              <div className="p-4">
+                <dl className="divide-y divide-white/[0.06] text-xs">
+                  <div className="flex justify-between gap-2 py-2.5 first:pt-0">
+                    <dt className="text-slate-400">Identificador</dt>
+                    <dd className="font-mono text-slate-100">{ninja.id}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2 py-2.5">
+                    <dt className="text-slate-400">Dimensão base</dt>
+                    <dd className="font-mono text-slate-100 tabular-nums">
+                      {ninja.width} × {ninja.height} px
+                    </dd>
+                  </div>
+                  <div className="flex justify-between gap-2 py-2.5">
+                    <dt className="text-slate-400">Frames</dt>
+                    <dd className="font-mono text-slate-100 tabular-nums">{frames.length}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2 py-2.5">
+                    <dt className="text-slate-400">Animações</dt>
+                    <dd className="font-mono text-slate-100 tabular-nums">{animNames.length}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2 py-2.5">
+                    <dt className="text-slate-400">Folhas</dt>
+                    <dd className="font-mono text-slate-100 tabular-nums">{pages.length}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2 py-2.5 last:pb-0">
+                    <dt className="text-slate-400">Versão Spine</dt>
+                    <dd className="font-mono text-slate-100 tabular-nums">
+                      {skeleton?.skeleton?.spine || '—'}
+                    </dd>
+                  </div>
+                </dl>
               </div>
             )}
           </aside>
@@ -3209,70 +3141,55 @@ export function StudioStage({
           role="dialog"
           aria-modal="true"
           aria-labelledby="complete-char-export-title"
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-4"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !completeExportProgress) {
+              setShowCompleteExportModal(false);
+            }
+          }}
         >
-          <div className="w-full max-w-lg rounded-lg border border-slate-700 bg-[#131A26] p-5 space-y-4 max-h-[92vh] overflow-y-auto shadow-2xl">
-            <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
+          <div className="w-full max-w-lg rounded-xl border border-white/10 bg-[#11141C] p-5 space-y-4 max-h-[92vh] overflow-y-auto shadow-2xl">
+            <div className="flex items-start justify-between gap-3 border-b border-white/[0.07] pb-3.5">
               <div>
                 <h3
                   id="complete-char-export-title"
                   className="font-display text-base font-semibold text-slate-50"
                 >
-                  Exportar Personagem Completo (ZIP)
+                  Exportar personagem ({mediaProfile?.displayName || ninja.name || ninja.id})
                 </h3>
-                <p className="mt-0.5 font-mono text-xs text-slate-400">
-                  {ninja.id} · {frames.length} frames · {animNames.length} animações ·{' '}
-                  {completeEffectPlan.uniqueSpineIds.length} pacote(s) de partículas
+                <p className="mt-0.5 font-mono text-xs text-slate-400 tabular-nums">
+                  {frames.length} frames · {animNames.length} animações ·{' '}
+                  {completeEffectPlan.uniqueSpineIds.length} efeitos
                 </p>
               </div>
               <button
                 type="button"
                 disabled={Boolean(completeExportProgress)}
                 onClick={() => setShowCompleteExportModal(false)}
-                aria-label="Fechar janela"
-                className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-40 cursor-pointer"
+                aria-label="Fechar"
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-white/[0.06] hover:text-white disabled:opacity-40 cursor-pointer"
               >
                 <X className="h-4 w-4" aria-hidden="true" />
               </button>
             </div>
 
-            {completeEffectPlan.uniqueSpineIds.length > 0 && (
-              <div className="rounded-lg border border-slate-800 bg-[#0B0F17] p-3 space-y-1.5">
-                <div className="text-[11px] font-medium text-slate-300">
-                  Pacotes de partículas vinculados encontrados no <code className="font-mono text-orange-300">.json</code>:
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {completeEffectPlan.uniqueSpineIds.map((effId) => (
-                    <span
-                      key={effId}
-                      className="rounded border border-orange-500/30 bg-orange-950/30 px-2 py-0.5 font-mono text-[11px] text-orange-200"
-                    >
-                      {effId}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-2 text-xs">
-              <label className="block space-y-1">
-                <span className="font-medium text-slate-300">Escopo de partículas e poderes</span>
+            <div className="space-y-3 text-xs">
+              <label className="block space-y-1.5">
+                <span className="font-medium text-slate-300">Camadas de efeitos</span>
                 <select
                   disabled={Boolean(completeExportProgress)}
                   value={completeEffectScope}
                   onChange={(e) => setCompleteEffectScope(e.target.value as EffectIncludeScope)}
-                  className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-3 py-2 text-xs text-slate-100"
+                  className="w-full rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs text-slate-100 focus:border-orange-500 focus:outline-none"
                 >
-                  <option value="powers">Com poderes (partículas no ninja e tela — recomendado)</option>
-                  <option value="all">Completa (+ efeitos de impacto no alvo)</option>
-                  <option value="base">Somente ninja (sem partículas)</option>
+                  <option value="powers">Com poderes (recomendado)</option>
+                  <option value="all">Completo (poderes + impactos)</option>
+                  <option value="base">Somente personagem</option>
                 </select>
               </label>
 
-              <div className="space-y-2 pt-1">
-                <span className="block font-medium text-slate-300">O que incluir na pasta do personagem</span>
-
-                <label className="flex items-start gap-2.5 rounded-md border border-slate-800 bg-[#0B0F17] p-2.5 cursor-pointer">
+              <div className="divide-y divide-white/[0.06] rounded-lg border border-white/[0.08] bg-[#090B10]">
+                <label className="flex items-start gap-2.5 p-3 cursor-pointer">
                   <input
                     type="checkbox"
                     disabled={Boolean(completeExportProgress)}
@@ -3281,16 +3198,14 @@ export function StudioStage({
                     className="mt-0.5 accent-orange-500"
                   />
                   <div>
-                    <div className="font-medium text-slate-100">
-                      Originais + Frames Fatiados
-                    </div>
+                    <div className="font-medium text-slate-100">Arquivos originais e frames</div>
                     <div className="text-[11px] text-slate-400">
-                      Inclui <code className="font-mono">.atlas</code>, <code className="font-mono">.json</code>, folha original e pasta <code className="font-mono">frames/*.png</code>.
+                      Esqueleto Spine, folhas originais e frames individuais em PNG.
                     </div>
                   </div>
                 </label>
 
-                <label className="flex items-start gap-2.5 rounded-md border border-slate-800 bg-[#0B0F17] p-2.5 cursor-pointer">
+                <label className="flex items-start gap-2.5 p-3 cursor-pointer">
                   <input
                     type="checkbox"
                     disabled={Boolean(completeExportProgress)}
@@ -3299,16 +3214,14 @@ export function StudioStage({
                     className="mt-0.5 accent-orange-500"
                   />
                   <div>
-                    <div className="font-medium text-slate-100">
-                      Pacotes de Partículas + Instruções e Combate JSON
-                    </div>
+                    <div className="font-medium text-slate-100">Partículas, combate e instruções</div>
                     <div className="text-[11px] text-slate-400">
-                      Inclui <code className="font-mono">particulas/&lt;efeito&gt;/</code>, <code className="font-mono">animacoes_instrucoes.json</code> e <code className="font-mono">combate_e_habilidades.json</code> (perseguições, efeitos, alvos e atributos).
+                      Pacotes de partículas, roteiro de animações e ficha completa de skills/perseguições em JSON.
                     </div>
                   </div>
                 </label>
 
-                <label className="flex items-start gap-2.5 rounded-md border border-slate-800 bg-[#0B0F17] p-2.5 cursor-pointer">
+                <label className="flex items-start gap-2.5 p-3 cursor-pointer">
                   <input
                     type="checkbox"
                     disabled={Boolean(completeExportProgress)}
@@ -3317,37 +3230,32 @@ export function StudioStage({
                     className="mt-0.5 accent-orange-500"
                   />
                   <div>
-                    <div className="font-medium text-slate-100">
-                      Todas as Animações: Sequência PNG + Spritesheet (Qualidade Máxima 1:1 · 24 FPS)
-                    </div>
+                    <div className="font-medium text-slate-100">Sequências PNG e spritesheets</div>
                     <div className="text-[11px] text-slate-400">
-                      Renderiza cada animação em resolução nativa 1:1 sem perda, já composta com as partículas em <code className="font-mono">animacoes/&lt;anim&gt;/</code>.
+                      Todas as animações renderizadas em 1:1 (24 FPS) com efeitos compostos.
                     </div>
                   </div>
                 </label>
 
-                <div className="rounded-md border border-slate-800 bg-[#0B0F17] p-2.5 space-y-2">
+                <div className="p-3 space-y-2">
                   <label className="flex items-start gap-2.5 cursor-pointer">
                     <input
                       type="checkbox"
                       disabled={Boolean(completeExportProgress)}
                       checked={completeIncludeAnimGifs}
                       onChange={(e) => setCompleteIncludeAnimGifs(e.target.checked)}
-                      className="mt-0.5 accent-emerald-500"
+                      className="mt-0.5 accent-orange-500"
                     />
                     <div>
-                      <div className="font-medium text-slate-100">
-                        Todas as Animações em GIF Animado
-                      </div>
+                      <div className="font-medium text-slate-100">GIFs animados</div>
                       <div className="text-[11px] text-slate-400">
-                        Gera <code className="font-mono">&lt;anim&gt;.gif</code> já com os poderes para cada animação.
+                        Um arquivo GIF pronto para cada animação.
                       </div>
                     </div>
                   </label>
-
                   {completeIncludeAnimGifs && (
                     <div className="flex items-center justify-between gap-2 pl-6">
-                      <span className="text-[11px] text-slate-400">Fundo dos GIFs:</span>
+                      <span className="text-[11px] text-slate-400">Fundo dos GIFs</span>
                       <select
                         disabled={Boolean(completeExportProgress)}
                         value={completeGifBg}
@@ -3356,11 +3264,11 @@ export function StudioStage({
                             e.target.value as 'transparent' | 'dark' | 'light' | 'chroma'
                           )
                         }
-                        className="rounded border border-slate-800 bg-[#131A26] px-2 py-1 text-[11px] text-slate-200"
+                        className="rounded-md border border-white/10 bg-[#11141C] px-2 py-1 text-[11px] text-slate-200"
                       >
-                        <option value="transparent">Sem fundo (transparente)</option>
-                        <option value="dark">Fundo escuro</option>
-                        <option value="light">Fundo claro</option>
+                        <option value="transparent">Transparente</option>
+                        <option value="dark">Escuro</option>
+                        <option value="light">Claro</option>
                         <option value="chroma">Chroma verde</option>
                       </select>
                     </div>
@@ -3368,57 +3276,55 @@ export function StudioStage({
                 </div>
 
                 {mediaProfile?.passiveAura && (
-                  <label className="flex items-start gap-2.5 rounded-md border border-purple-500/35 bg-purple-950/15 p-2.5 cursor-pointer">
+                  <label className="flex items-start gap-2.5 p-3 cursor-pointer">
                     <input
                       type="checkbox"
                       disabled={Boolean(completeExportProgress)}
                       checked={completeIncludePassiveAura}
                       onChange={(e) => setCompleteIncludePassiveAura(e.target.checked)}
-                      className="mt-0.5 accent-purple-500"
+                      className="mt-0.5 accent-orange-500"
                     />
                     <div>
-                      <div className="font-medium text-purple-100">
-                        Aura Passiva no Idle ({mediaProfile.passiveAura.label})
+                      <div className="font-medium text-slate-100">
+                        Aura passiva ({mediaProfile.passiveAura.label})
                       </div>
                       <div className="text-[11px] text-slate-400">
-                        Inclui o pacote <code className="font-mono text-purple-300">{mediaProfile.passiveAura.id}</code> em <code className="font-mono">particulas/</code> e compõe a aura automaticamente nos frames e GIF do <code className="font-mono">idle</code>.
+                        Inclui o pacote de aura e compõe automaticamente no idle.
                       </div>
                     </div>
                   </label>
                 )}
 
-                <label className="flex items-start gap-2.5 rounded-md border border-amber-500/35 bg-amber-950/15 p-2.5 cursor-pointer">
+                <label className="flex items-start gap-2.5 p-3 cursor-pointer">
                   <input
                     type="checkbox"
                     disabled={Boolean(completeExportProgress)}
                     checked={completeIncludeSkillIcons}
                     onChange={(e) => setCompleteIncludeSkillIcons(e.target.checked)}
-                    className="mt-0.5 accent-amber-500"
+                    className="mt-0.5 accent-orange-500"
                   />
                   <div>
-                    <div className="font-medium text-amber-100">
-                      Ícones das Skills e Passivas (Qualidade Máxima PNG)
+                    <div className="font-medium text-slate-100">
+                      Ícones das habilidades ({skillIconCount})
                     </div>
                     <div className="text-[11px] text-slate-400">
-                      Inclui pasta <code className="font-mono">icones_skills/*.png</code> ({skillIconCount} ícone(s) de habilidades ativas e passivas).
+                      Ícones de skills ativas e passivas em PNG.
                     </div>
                   </div>
                 </label>
 
-                <label className="flex items-start gap-2.5 rounded-md border border-cyan-500/35 bg-cyan-950/15 p-2.5 cursor-pointer">
+                <label className="flex items-start gap-2.5 p-3 cursor-pointer">
                   <input
                     type="checkbox"
                     disabled={Boolean(completeExportProgress)}
                     checked={completeIncludeVideosAndAudio}
                     onChange={(e) => setCompleteIncludeVideosAndAudio(e.target.checked)}
-                    className="mt-0.5 accent-cyan-500"
+                    className="mt-0.5 accent-orange-500"
                   />
                   <div>
-                    <div className="font-medium text-cyan-100">
-                      Vídeos da Ultimate (MP4) + Vozes e Efeitos Sonoros (MP3)
-                    </div>
+                    <div className="font-medium text-slate-100">Vídeos e áudios</div>
                     <div className="text-[11px] text-slate-400">
-                      Inclui pasta <code className="font-mono">videos/*.mp4</code> ({mediaProfile?.videos.length || 0} vídeo(s)) e pasta <code className="font-mono">audios/</code> ({mediaProfile?.voices.length || 0} voz(es) + sons das habilidades).
+                      {mediaProfile?.videos.length || 0} vídeo(s) MP4 e {mediaProfile?.voices.length || 0} voz(es)/efeitos MP3.
                     </div>
                   </div>
                 </label>
@@ -3426,16 +3332,16 @@ export function StudioStage({
             </div>
 
             {completeExportProgress && (
-              <div className="space-y-1.5 rounded-lg border border-slate-800 bg-[#0B0F17] p-3">
+              <div className="space-y-1.5 rounded-lg border border-white/[0.08] bg-[#090B10] p-3">
                 <div className="flex items-center justify-between text-xs font-mono tabular-nums">
                   <span className="truncate text-slate-200">{completeExportProgress.message}</span>
-                  <span className="ml-2 shrink-0 text-emerald-400">
+                  <span className="ml-2 shrink-0 text-orange-400">
                     {completeExportProgress.percent}%
                   </span>
                 </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.08]">
                   <div
-                    className="h-full bg-emerald-500 transition-all duration-150"
+                    className="h-full bg-orange-500 transition-all duration-150"
                     style={{ width: `${completeExportProgress.percent}%` }}
                   />
                 </div>
@@ -3445,7 +3351,7 @@ export function StudioStage({
             {completeExportError && (
               <div
                 role="alert"
-                className="rounded-md border border-red-900/60 bg-red-950/30 px-3 py-2 text-xs text-red-200"
+                className="rounded-lg border border-red-500/30 bg-red-950/25 px-3 py-2 text-xs text-red-200"
               >
                 {completeExportError}
               </div>
@@ -3456,7 +3362,7 @@ export function StudioStage({
                 <button
                   type="button"
                   onClick={() => completeExportAbortRef.current?.abort()}
-                  className="rounded-lg border border-red-700/70 bg-red-950/40 px-4 py-2 text-xs font-semibold text-red-200 hover:bg-red-900/50 cursor-pointer"
+                  className="rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-2 text-xs font-semibold text-red-200 hover:bg-red-950/60 cursor-pointer"
                 >
                   Cancelar
                 </button>
@@ -3465,7 +3371,7 @@ export function StudioStage({
                   <button
                     type="button"
                     onClick={() => setShowCompleteExportModal(false)}
-                    className="rounded-lg border border-slate-700 bg-[#0B0F17] px-4 py-2 text-xs font-medium text-slate-300 hover:border-slate-500 cursor-pointer"
+                    className="rounded-lg border border-white/10 bg-[#090B10] px-4 py-2 text-xs font-medium text-slate-300 hover:border-white/25 cursor-pointer"
                   >
                     Fechar
                   </button>
@@ -3479,10 +3385,10 @@ export function StudioStage({
                       !completeIncludeVideosAndAudio
                     }
                     onClick={() => void handleRunCompleteCharacterExport()}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-40 cursor-pointer"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors cursor-pointer"
                   >
                     <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Baixar {ninja.id}_completo.zip</span>
+                    <span>Baixar ZIP</span>
                   </button>
                 </>
               )}

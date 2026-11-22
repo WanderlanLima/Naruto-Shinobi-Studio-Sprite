@@ -897,16 +897,16 @@ export function BatchZipModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="batch-zip-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
     >
-      <div className="w-full max-w-lg rounded-lg border border-slate-700 bg-[#131A26] p-6 space-y-5 max-h-[92vh] overflow-y-auto">
+      <div className="w-full max-w-lg rounded-xl border border-white/10 bg-[#11141C] p-6 space-y-5 max-h-[92vh] overflow-y-auto shadow-2xl">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 id="batch-zip-title" className="font-display text-lg font-semibold text-slate-50">
               {title}
             </h3>
             <p className="mt-1 text-xs text-slate-400 tabular-nums">
-              {ninjas.length} pacotes disponíveis · Cache local retomável (IndexedDB) + ZIP Streaming
+              {ninjas.length} pacotes disponíveis · progresso salvo automaticamente
             </p>
           </div>
           <button
@@ -914,7 +914,7 @@ export function BatchZipModal({
             disabled={running || packaging}
             onClick={onClose}
             aria-label="Fechar janela"
-            className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-40 cursor-pointer"
+            className="rounded-lg p-1.5 text-slate-400 hover:bg-white/[0.06] hover:text-white disabled:opacity-40 cursor-pointer"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -922,26 +922,23 @@ export function BatchZipModal({
 
         {/* Saved Paused Job Banner */}
         {hasResumablePausedJob && (
-          <div className="rounded-lg border border-amber-500/40 bg-amber-950/25 p-3.5 space-y-3">
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3.5 space-y-3">
             <div className="flex items-start justify-between gap-2">
               <div className="space-y-0.5">
                 <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-200">
                   {pausedByNetwork && <WifiOff className="h-3.5 w-3.5 shrink-0" />}
-                  <span>Download em pausa salvo localmente</span>
+                  <span>Download pausado</span>
                 </div>
-                <p className="text-[11px] text-slate-300">
-                  {MODE_LABELS[savedJob.contentMode]} · Pacotes {savedJob.startIdx}–{savedJob.endIdx}
-                </p>
-                <p className="text-[11px] font-mono text-amber-300 tabular-nums">
-                  {savedJob.completedIndices.length}/{savedJob.totalNinjas} pacotes salvos ·{' '}
-                  {formatBytesCompact(savedJob.totalBytes)} em cache
+                <p className="text-[11px] text-slate-400 tabular-nums">
+                  {MODE_LABELS[savedJob.contentMode]} · {savedJob.completedIndices.length}/
+                  {savedJob.totalNinjas} salvos · {formatBytesCompact(savedJob.totalBytes)}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => void handleDiscardSaved()}
-                title="Descartar cache salvo"
-                className="inline-flex items-center gap-1 rounded border border-slate-700 bg-[#0B0F17] px-2 py-1 text-[11px] text-slate-300 hover:border-red-500/60 hover:text-red-200 cursor-pointer"
+                title="Descartar progresso salvo"
+                className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-[#090B10] px-2 py-1 text-[11px] text-slate-400 hover:border-red-500/40 hover:text-red-300 cursor-pointer"
               >
                 <Trash2 className="h-3 w-3" />
                 <span>Descartar</span>
@@ -952,11 +949,11 @@ export function BatchZipModal({
               <button
                 type="button"
                 onClick={() => void runJob(savedJob)}
-                className="inline-flex items-center gap-1.5 rounded-md bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 cursor-pointer"
               >
                 <Play className="h-3.5 w-3.5" />
                 <span>
-                  Continuar Download (faltam{' '}
+                  Retomar (faltam{' '}
                   {Math.max(
                     0,
                     savedJob.totalNinjas -
@@ -971,25 +968,25 @@ export function BatchZipModal({
                 <button
                   type="button"
                   onClick={() => void handleReexportSaved(savedJob, 'parcial')}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-500 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/25 cursor-pointer"
                 >
                   <Download className="h-3.5 w-3.5" />
-                  <span>Gerar ZIP Parcial ({savedJob.completedIndices.length})</span>
+                  <span>Salvar parcial ({savedJob.completedIndices.length})</span>
                 </button>
               )}
             </div>
           </div>
         )}
 
-        {/* Completed Cached Job Banner (Re-download or Direct Disk Save) */}
+        {/* Completed Cached Job Banner */}
         {hasCompletedCachedJob && (
-          <div className="rounded-lg border border-emerald-500/40 bg-emerald-950/20 p-3.5 space-y-2.5">
+          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3.5 space-y-2.5">
             <div className="flex items-start justify-between gap-2">
               <div>
                 <div className="text-xs font-semibold text-emerald-200">
-                  Pacote pronto no cache local
+                  Pacote pronto para baixar novamente
                 </div>
-                <p className="text-[11px] text-slate-300 tabular-nums">
+                <p className="text-[11px] text-slate-400 tabular-nums">
                   {MODE_LABELS[savedJob.contentMode]} · {savedJob.completedIndices.length} pacotes ·{' '}
                   {formatBytesCompact(savedJob.totalBytes)}
                 </p>
@@ -997,29 +994,29 @@ export function BatchZipModal({
               <button
                 type="button"
                 onClick={() => void handleDiscardSaved()}
-                className="inline-flex items-center gap-1 rounded border border-slate-700 bg-[#0B0F17] px-2 py-1 text-[11px] text-slate-300 hover:border-slate-500 cursor-pointer"
+                className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-[#090B10] px-2 py-1 text-[11px] text-slate-400 hover:text-white cursor-pointer"
               >
                 <Trash2 className="h-3 w-3" />
-                <span>Limpar Cache</span>
+                <span>Limpar</span>
               </button>
             </div>
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => void handleReexportSaved(savedJob)}
-                className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 cursor-pointer"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
-                <span>Baixar ZIP Novamente</span>
+                <span>Baixar novamente</span>
               </button>
               {supportsSavePicker && (
                 <button
                   type="button"
                   onClick={() => void handleDirectSaveToDisk(savedJob)}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-500 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/25 cursor-pointer"
                 >
                   <HardDriveDownload className="h-3.5 w-3.5" />
-                  <span>Salvar Direto no Disco...</span>
+                  <span>Salvar no disco...</span>
                 </button>
               )}
             </div>
@@ -1028,38 +1025,36 @@ export function BatchZipModal({
 
         {/* Content Format Choice */}
         <div className="space-y-2">
-          <span className="block text-xs font-medium text-slate-300">Conteúdo do ZIP</span>
-          <div className="space-y-2">
+          <span className="block text-xs font-medium text-slate-300">Formato do pacote</span>
+          <div className="overflow-hidden rounded-xl border border-white/[0.07] bg-[#090B10] divide-y divide-white/[0.06]">
             {(
               [
                 {
                   id: 'idle-only',
-                  label: '1 Sprite Principal por Pacote (PNG)',
-                  desc: 'Rápido e leve — extrai a pose principal em PNG + combate_e_habilidades.json.',
+                  label: 'Sprite principal (PNG)',
+                  desc: 'Leve e rápido — pose principal em PNG e dados de combate.',
                 },
                 {
                   id: 'all-sliced',
-                  label: 'Todos os Frames Fatiados (Pastas + PNGs)',
-                  desc: 'Fatia todos os frames em pastas (+ .atlas, .json, combate_e_habilidades.json e partículas opcionais).',
+                  label: 'Todos os frames recortados (PNG)',
+                  desc: 'Recorta cada frame em pastas junto com arquivos de animação e dados.',
                 },
                 {
                   id: 'raw-bundle',
-                  label: 'Pacotes Originais (.webp + .atlas + .json)',
-                  desc: 'Baixa folhas originais + combate_e_habilidades.json organizados em pastas por categoria.',
+                  label: 'Arquivos originais (.webp + .atlas + .json)',
+                  desc: 'Folhas originais e dados de combate organizados por categoria.',
                 },
                 {
                   id: 'complete-animated',
-                  label: 'Personagem Completo (Animações + Partículas + Originais)',
-                  desc: 'Inclui originais, frames, partículas (noe_*), animacoes_instrucoes.json, combate_e_habilidades.json e animações renderizadas.',
+                  label: 'Personagem completo (Animações + Partículas)',
+                  desc: 'Inclui originais, frames, partículas, animações renderizadas e combate.',
                 },
               ] as const
             ).map((opt) => (
               <label
                 key={opt.id}
-                className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${
-                  contentMode === opt.id
-                    ? 'border-orange-500 bg-[#182232]'
-                    : 'border-slate-800 bg-[#0B0F17] hover:border-slate-700'
+                className={`flex items-start gap-3 px-3.5 py-3 cursor-pointer transition-colors ${
+                  contentMode === opt.id ? 'bg-orange-500/[0.08]' : 'hover:bg-white/[0.02]'
                 }`}
               >
                 <input
@@ -1079,24 +1074,22 @@ export function BatchZipModal({
           </div>
         </div>
 
-        {/* Always-available skill icons toggle for ALL batch export modes */}
-        <div className="space-y-2.5 rounded-lg border border-slate-800 bg-[#0B0F17] p-3 text-xs">
-          <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
+        {/* Additional inclusions */}
+        <div className="space-y-2.5 rounded-xl border border-white/[0.07] bg-[#090B10] p-3.5 text-xs">
+          <label className="flex items-center gap-2.5 text-slate-200 cursor-pointer">
             <input
               type="checkbox"
               disabled={running || packaging}
               checked={includeSkillIcons}
               onChange={(e) => setIncludeSkillIcons(e.target.checked)}
-              className="accent-amber-500"
+              className="accent-orange-500"
             />
-            <span>
-              Incluir ícones das skills e passivas em qualidade máxima (<code className="font-mono text-amber-300">icones_skills/*.png</code>)
-            </span>
+            <span>Ícones de habilidades e passivas (PNG)</span>
           </label>
 
           {contentMode !== 'idle-only' && (
             <>
-              <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
+              <label className="flex items-center gap-2.5 text-slate-200 cursor-pointer">
                 <input
                   type="checkbox"
                   disabled={running || packaging}
@@ -1104,59 +1097,54 @@ export function BatchZipModal({
                   onChange={(e) => setIncludeLinkedEffects(e.target.checked)}
                   className="accent-orange-500"
                 />
-                <span>
-                  Incluir pacotes de partículas vinculados (<code className="font-mono text-orange-300">particulas/noe_*</code>) e{' '}
-                  <code className="font-mono text-orange-300">animacoes_instrucoes.json</code>
-                </span>
+                <span>Partículas vinculadas e instruções de animação</span>
               </label>
 
-              <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
+              <label className="flex items-center gap-2.5 text-slate-200 cursor-pointer">
                 <input
                   type="checkbox"
                   disabled={running || packaging}
                   checked={includeMediaAndAuras}
                   onChange={(e) => setIncludeMediaAndAuras(e.target.checked)}
-                  className="accent-cyan-500"
+                  className="accent-orange-500"
                 />
-                <span>
-                  Incluir aura passiva (idle), vídeos <code className="font-mono text-cyan-300">videos/*.mp4</code> e vozes/áudios <code className="font-mono text-cyan-300">audios/*.mp3</code>
-                </span>
+                <span>Aura passiva, vídeos MP4 e áudios</span>
               </label>
 
-            {(includeLinkedEffects || contentMode === 'complete-animated') && (
-              <div className="flex flex-wrap items-center justify-between gap-2 pl-5">
-                <span className="text-[11px] text-slate-400">Escopo das partículas:</span>
-                <select
-                  disabled={running || packaging}
-                  value={effectScope}
-                  onChange={(e) => setEffectScope(e.target.value as EffectIncludeScope)}
-                  aria-label="Escopo das partículas no lote"
-                  className="rounded border border-slate-800 bg-[#131A26] px-2 py-1 text-[11px] text-slate-200"
-                >
-                  <option value="powers">Com poderes (personagem + tela)</option>
-                  <option value="all">Completa (+ impactos no alvo)</option>
-                  <option value="base">Somente personagem (sem partículas)</option>
-                </select>
-              </div>
-            )}
-
-            {contentMode === 'complete-animated' && (
-              <>
-                <label className="flex items-center gap-2 pl-5 text-slate-200 cursor-pointer">
-                  <input
-                    type="checkbox"
+              {(includeLinkedEffects || contentMode === 'complete-animated') && (
+                <div className="flex flex-wrap items-center justify-between gap-2 pl-6 pt-0.5">
+                  <span className="text-[11px] text-slate-400">Escopo das partículas</span>
+                  <select
                     disabled={running || packaging}
-                    checked={includeAnimGifs}
-                    onChange={(e) => setIncludeAnimGifs(e.target.checked)}
-                    className="accent-emerald-500"
-                  />
-                  <span>Gerar GIF animado para cada animação (além de PNGs e Spritesheet)</span>
-                </label>
-                <p className="pl-5 text-[11px] text-amber-300/90">
-                  Dica: o modo completo gera muitos arquivos e imagens — recomenda-se dividir o ZIP em 25 ou 50 pacotes.
-                </p>
-              </>
-            )}
+                    value={effectScope}
+                    onChange={(e) => setEffectScope(e.target.value as EffectIncludeScope)}
+                    aria-label="Escopo das partículas no lote"
+                    className="rounded-lg border border-white/10 bg-[#11141C] px-2.5 py-1 text-[11px] text-slate-200"
+                  >
+                    <option value="powers">Com poderes</option>
+                    <option value="all">Completa (+ impactos)</option>
+                    <option value="base">Somente personagem</option>
+                  </select>
+                </div>
+              )}
+
+              {contentMode === 'complete-animated' && (
+                <>
+                  <label className="flex items-center gap-2.5 pl-6 text-slate-200 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      disabled={running || packaging}
+                      checked={includeAnimGifs}
+                      onChange={(e) => setIncludeAnimGifs(e.target.checked)}
+                      className="accent-orange-500"
+                    />
+                    <span>Gerar GIF animado por animação</span>
+                  </label>
+                  <p className="pl-6 text-[11px] text-slate-500">
+                    Para lotes completos, recomenda-se dividir em partes de 25 ou 50 pacotes.
+                  </p>
+                </>
+              )}
             </>
           )}
         </div>
@@ -1172,7 +1160,7 @@ export function BatchZipModal({
               disabled={running || packaging}
               value={startIdx}
               onChange={(e) => setStartIdx(Number(e.target.value))}
-              className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 font-mono text-slate-100"
+              className="w-full rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 font-mono text-slate-100 focus:border-orange-500/60 focus:outline-none"
             />
           </label>
           <label className="space-y-1">
@@ -1184,7 +1172,7 @@ export function BatchZipModal({
               disabled={running || packaging}
               value={endIdx}
               onChange={(e) => setEndIdx(Number(e.target.value))}
-              className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 font-mono text-slate-100"
+              className="w-full rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 font-mono text-slate-100 focus:border-orange-500/60 focus:outline-none"
             />
           </label>
           <label className="space-y-1">
@@ -1193,7 +1181,7 @@ export function BatchZipModal({
               disabled={running || packaging}
               value={chunkSize}
               onChange={(e) => setChunkSize(Number(e.target.value))}
-              className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1.5 font-mono text-slate-100"
+              className="w-full rounded-lg border border-white/10 bg-[#090B10] px-2 py-1.5 font-mono text-slate-100 focus:border-orange-500/60 focus:outline-none"
             >
               <option value={25}>25 pacotes</option>
               <option value={50}>50 pacotes</option>
@@ -1208,7 +1196,7 @@ export function BatchZipModal({
               disabled={running || packaging}
               value={concurrency}
               onChange={(e) => setConcurrency(Number(e.target.value))}
-              className="w-full rounded-md border border-slate-800 bg-[#0B0F17] px-2 py-1.5 font-mono text-slate-100"
+              className="w-full rounded-lg border border-white/10 bg-[#090B10] px-2 py-1.5 font-mono text-slate-100 focus:border-orange-500/60 focus:outline-none"
             >
               <option value={4}>Normal (4x)</option>
               <option value={8}>Rápida (8x)</option>
@@ -1218,13 +1206,13 @@ export function BatchZipModal({
         </div>
 
         {(running || packaging || statusMessage) && (
-          <div className="space-y-2 rounded-lg border border-slate-800 bg-[#0B0F17] p-3">
+          <div className="space-y-2 rounded-xl border border-white/[0.07] bg-[#090B10] p-3.5">
             <div className="flex items-center justify-between text-xs font-mono tabular-nums">
-              <span className="text-slate-200 truncate">
+              <span className="text-slate-300 truncate">
                 {progress.zipPercent !== null
-                  ? statusMessage || 'Empacotando ZIP...'
+                  ? statusMessage || 'Gerando arquivo ZIP...'
                   : running
-                  ? `Baixando (${progress.ratePerSec}/s · ${formatBytesCompact(progress.savedBytes)}): ${progress.currentId}...`
+                  ? `${progress.ratePerSec}/s · ${formatBytesCompact(progress.savedBytes)} · ${progress.currentId}`
                   : statusMessage}
               </span>
               <span className="text-orange-400 shrink-0 ml-2">
@@ -1233,7 +1221,7 @@ export function BatchZipModal({
                   : `${progress.done}/${progress.total} (${pct}%)`}
               </span>
             </div>
-            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.06]">
               <div
                 className="h-full bg-orange-500 transition-all duration-150"
                 style={{ width: `${pct}%` }}
@@ -1241,22 +1229,22 @@ export function BatchZipModal({
             </div>
             {progress.errors > 0 && (
               <p className="text-[11px] text-amber-400 tabular-nums">
-                {progress.errors} pacote(s) não encontrados ou ignorados.
+                {progress.errors} pacote(s) ignorados.
               </p>
             )}
           </div>
         )}
 
-        <div className="flex items-center justify-end gap-3 pt-1">
+        <div className="flex items-center justify-end gap-2.5 pt-1">
           {running ? (
             <button
               type="button"
               disabled={packaging}
               onClick={handlePause}
-              className="inline-flex items-center gap-2 rounded-lg border border-amber-700 bg-amber-950/50 px-4 py-2 text-xs font-semibold text-amber-200 hover:bg-amber-900/50 disabled:opacity-40 cursor-pointer"
+              className="inline-flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-xs font-semibold text-amber-200 hover:bg-amber-500/20 disabled:opacity-40 cursor-pointer"
             >
               <Pause className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Pausar Download</span>
+              <span>Pausar</span>
             </button>
           ) : (
             <>
@@ -1264,9 +1252,9 @@ export function BatchZipModal({
                 type="button"
                 disabled={packaging}
                 onClick={onClose}
-                className="rounded-lg border border-slate-700 bg-[#0B0F17] px-4 py-2 text-xs font-medium text-slate-300 hover:border-slate-500 disabled:opacity-40 cursor-pointer"
+                className="rounded-lg border border-white/10 bg-[#090B10] px-4 py-2 text-xs font-medium text-slate-300 hover:border-white/25 disabled:opacity-40 cursor-pointer"
               >
-                Fechar
+                Cancelar
               </button>
               <button
                 type="button"
@@ -1277,8 +1265,8 @@ export function BatchZipModal({
                 <Download className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>
                   {hasResumablePausedJob
-                    ? `Novo Download (${targetList.length})`
-                    : `Baixar ${targetList.length} Pacotes (ZIP)`}
+                    ? `Novo download (${targetList.length})`
+                    : `Exportar ${targetList.length} pacotes`}
                 </span>
               </button>
             </>

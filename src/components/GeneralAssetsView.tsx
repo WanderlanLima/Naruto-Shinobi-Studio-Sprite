@@ -128,9 +128,7 @@ export function GeneralAssetsView({
       }));
       const res = await exportUrlAssetsAsZip('shinobi_folhas_sprites.zip', items, (done, total, phase) => {
         setBatchStatus(
-          phase === 'zipping'
-            ? 'Compactando folhas em ZIP streaming...'
-            : `Baixando folhas: ${done}/${total}`
+          phase === 'zipping' ? 'Gerando arquivo ZIP...' : `Baixando folhas: ${done}/${total}`
         );
       });
       setBatchStatus(
@@ -154,9 +152,7 @@ export function GeneralAssetsView({
       }));
       const res = await exportUrlAssetsAsZip('shinobi_ativos_ui_itens.zip', items, (done, total, phase) => {
         setBatchStatus(
-          phase === 'zipping'
-            ? 'Compactando ativos em ZIP streaming...'
-            : `Baixando ativos: ${done}/${total}`
+          phase === 'zipping' ? 'Gerando arquivo ZIP...' : `Baixando ativos: ${done}/${total}`
         );
       });
       setBatchStatus(
@@ -172,7 +168,7 @@ export function GeneralAssetsView({
   const handleSliceAndZipEmojiSheet = async (asset: GameAssetEntry) => {
     if (batchBusy) return;
     setBatchBusy(true);
-    setBatchStatus(`Fatiando ${asset.name} em PNGs individuais...`);
+    setBatchStatus(`Fatiando ${asset.name}...`);
     try {
       const proxyUrl = resolveAssetFetchUrl(asset.url);
       const count = await sliceImageUrlToZip(proxyUrl, 'shinobi_emojis_png.zip', {
@@ -182,7 +178,7 @@ export function GeneralAssetsView({
         minSize: 12,
         mergeGap: 2,
       });
-      setBatchStatus(`${count} emoji(s) fatiados e baixados em shinobi_emojis_png.zip.`);
+      setBatchStatus(`${count} emoji(s) exportados em shinobi_emojis_png.zip.`);
     } catch (err) {
       setBatchStatus(err instanceof Error ? err.message : 'Erro ao fatiar folha de emojis.');
     } finally {
@@ -193,7 +189,7 @@ export function GeneralAssetsView({
   const handleSliceAndZipSingleSheet = async (sheet: SheetEntry) => {
     if (batchBusy) return;
     setBatchBusy(true);
-    setBatchStatus(`Fatiando ${sheet.name} por transparência...`);
+    setBatchStatus(`Fatiando ${sheet.name}...`);
     try {
       const proxyUrl = resolveAssetFetchUrl(sheet.url);
       const base = sheet.name.replace(/\.[^.]+$/, '');
@@ -204,7 +200,7 @@ export function GeneralAssetsView({
         minSize: 8,
         mergeGap: 2,
       });
-      setBatchStatus(`${count} frame(s) extraído(s) de ${sheet.name} para ZIP.`);
+      setBatchStatus(`${count} frame(s) extraído(s) de ${sheet.name}.`);
     } catch (err) {
       setBatchStatus(err instanceof Error ? err.message : `Erro ao fatiar ${sheet.name}.`);
     } finally {
@@ -214,168 +210,177 @@ export function GeneralAssetsView({
 
   if (sheets.length === 0 && assets.length === 0) {
     return (
-      <div className="mx-auto max-w-2xl rounded-lg border border-slate-800 bg-[#131A26] p-10 text-center">
+      <div className="mx-auto max-w-lg rounded-xl border border-white/[0.07] bg-[#11141C] p-10 text-center">
         <h2 className="font-display text-lg font-semibold text-slate-100">
-          Nenhum ativo adicional carregado
+          Nenhum ativo carregado
         </h2>
-        <p className="mt-2 text-sm text-slate-400">
-          Faça uma extração na aba Extrator URL para listar folhas ASTC, emojis, heróis, itens e interface do jogo.
+        <p className="mt-2 text-xs text-slate-400">
+          Carregue uma fonte no Catálogo ou abra um backup offline para explorar folhas, emojis e interface.
         </p>
       </div>
     );
   }
 
   return (
-    <section className="space-y-5">
-      <div className="flex flex-col gap-4 border-b border-slate-800/80 pb-4">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-wrap items-center gap-1 rounded-lg border border-slate-800 bg-[#131A26] p-1 w-fit">
-            <button
-              type="button"
-              onClick={() => setSubTab('sheets')}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
-                subTab === 'sheets'
-                  ? 'bg-orange-600 text-white'
-                  : 'text-slate-400 hover:text-slate-100'
-              }`}
-            >
-              Folhas ASTC / Sprites ({sheets.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setSubTab('emojis')}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
-                subTab === 'emojis'
-                  ? 'bg-orange-600 text-white'
-                  : 'text-slate-400 hover:text-slate-100'
-              }`}
-            >
-              Emojis ({emojiAssets.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setSubTab('assets')}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
-                subTab === 'assets'
-                  ? 'bg-orange-600 text-white'
-                  : 'text-slate-400 hover:text-slate-100'
-              }`}
-            >
-              UI, Itens, Heróis e Cenários ({generalAssets.length})
-            </button>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            {subTab === 'sheets' && (
-              <>
-                <select
-                  value={sheetKindFilter}
-                  onChange={(e) =>
-                    setSheetKindFilter(e.target.value as 'all' | 'astc_sheet' | 'spine_sheet')
-                  }
-                  aria-label="Filtrar tipo de folha"
-                  className="rounded-lg border border-slate-800 bg-[#131A26] px-3 py-2 text-xs text-slate-200 focus:border-orange-500 focus:outline-none cursor-pointer"
-                >
-                  <option value="all">Todas folhas ({sheetCounts.all})</option>
-                  <option value="astc_sheet">Folhas no_* ({sheetCounts.astc})</option>
-                  <option value="spine_sheet">Folhas Spine ({sheetCounts.spine})</option>
-                </select>
-
-                <select
-                  value={sheetSizeFilter}
-                  onChange={(e) => setSheetSizeFilter(e.target.value as 'all' | 'compact' | 'hd')}
-                  aria-label="Filtrar por tamanho"
-                  className="rounded-lg border border-slate-800 bg-[#131A26] px-3 py-2 text-xs text-slate-200 focus:border-orange-500 focus:outline-none cursor-pointer"
-                >
-                  <option value="all">Qualquer tamanho</option>
-                  <option value="compact">Compactas (&lt; 1 MB)</option>
-                  <option value="hd">Alta resolução (&ge; 1 MB)</option>
-                </select>
-              </>
-            )}
-
-            {subTab === 'assets' && (
-              <select
-                value={category}
-                onChange={(e) =>
-                  setCategory(e.target.value as 'all' | Exclude<GameAssetCategory, 'emoji'>)
-                }
-                aria-label="Filtrar por categoria"
-                className="rounded-lg border border-slate-800 bg-[#131A26] px-3 py-2 text-xs text-slate-200 focus:border-orange-500 focus:outline-none cursor-pointer"
-              >
-                <option value="all">Todas categorias</option>
-                <option value="item">Itens e Ícones</option>
-                <option value="hero">Heróis e Expressões</option>
-                <option value="ui">Interface (UI)</option>
-                <option value="bg">Cenários e Fundos</option>
-                <option value="sprite">Sprites</option>
-                <option value="other">Outros</option>
-              </select>
-            )}
-
-            <div className="relative min-w-[220px]">
-              <Search
-                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
-                aria-hidden="true"
-              />
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Buscar arquivo..."
-                aria-label="Buscar arquivo"
-                className="w-full rounded-lg border border-slate-800 bg-[#131A26] py-2 pl-9 pr-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
-              />
-            </div>
-
-            {subTab === 'sheets' && (
-              <button
-                type="button"
-                disabled={filteredSheets.length === 0 || batchBusy}
-                onClick={() => void handleBatchDownloadSheets()}
-                className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Baixar Folhas ({filteredSheets.length}) ZIP</span>
-              </button>
-            )}
-
-            {subTab === 'assets' && (
-              <button
-                type="button"
-                disabled={filteredAssets.length === 0 || batchBusy}
-                onClick={() => void handleBatchDownloadAssets()}
-                className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Baixar Filtrados ({filteredAssets.length}) ZIP</span>
-              </button>
-            )}
-          </div>
+    <section className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-col gap-4 border-b border-white/[0.07] pb-5 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="font-display text-2xl font-bold tracking-tight text-slate-50">Ativos</h1>
+          <p className="mt-1 font-mono text-xs text-slate-400 tabular-nums">
+            {sheets.length} folhas · {emojiAssets.length} emojis · {generalAssets.length} itens e interface
+          </p>
         </div>
 
-        {batchStatus && (
-          <div className="rounded-lg border border-slate-800 bg-[#131A26] px-4 py-2.5 font-mono text-xs text-slate-200 tabular-nums">
-            {batchStatus}
-          </div>
+        {subTab === 'sheets' && (
+          <button
+            type="button"
+            disabled={filteredSheets.length === 0 || batchBusy}
+            onClick={() => void handleBatchDownloadSheets()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Baixar folhas ({filteredSheets.length})</span>
+          </button>
+        )}
+
+        {subTab === 'assets' && (
+          <button
+            type="button"
+            disabled={filteredAssets.length === 0 || batchBusy}
+            onClick={() => void handleBatchDownloadAssets()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Baixar filtrados ({filteredAssets.length})</span>
+          </button>
         )}
       </div>
+
+      {/* Toolbar */}
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="inline-flex flex-wrap items-center rounded-lg border border-white/[0.07] bg-[#11141C] p-1 w-fit">
+          <button
+            type="button"
+            onClick={() => setSubTab('sheets')}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
+              subTab === 'sheets'
+                ? 'bg-orange-600 text-white'
+                : 'text-slate-400 hover:text-slate-100'
+            }`}
+          >
+            Folhas ({sheets.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('emojis')}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
+              subTab === 'emojis'
+                ? 'bg-orange-600 text-white'
+                : 'text-slate-400 hover:text-slate-100'
+            }`}
+          >
+            Emojis ({emojiAssets.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('assets')}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
+              subTab === 'assets'
+                ? 'bg-orange-600 text-white'
+                : 'text-slate-400 hover:text-slate-100'
+            }`}
+          >
+            Interface e Itens ({generalAssets.length})
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5">
+          {subTab === 'sheets' && (
+            <>
+              <select
+                value={sheetKindFilter}
+                onChange={(e) =>
+                  setSheetKindFilter(e.target.value as 'all' | 'astc_sheet' | 'spine_sheet')
+                }
+                aria-label="Filtrar tipo de folha"
+                className="rounded-lg border border-white/10 bg-[#11141C] px-3 py-2 text-xs text-slate-200 focus:border-orange-500/60 focus:outline-none cursor-pointer"
+              >
+                <option value="all">Todas ({sheetCounts.all})</option>
+                <option value="astc_sheet">Spritesheets ({sheetCounts.astc})</option>
+                <option value="spine_sheet">Spine ({sheetCounts.spine})</option>
+              </select>
+
+              <select
+                value={sheetSizeFilter}
+                onChange={(e) => setSheetSizeFilter(e.target.value as 'all' | 'compact' | 'hd')}
+                aria-label="Filtrar por tamanho"
+                className="rounded-lg border border-white/10 bg-[#11141C] px-3 py-2 text-xs text-slate-200 focus:border-orange-500/60 focus:outline-none cursor-pointer"
+              >
+                <option value="all">Qualquer tamanho</option>
+                <option value="compact">Compactas (&lt; 1 MB)</option>
+                <option value="hd">Alta resolução (&ge; 1 MB)</option>
+              </select>
+            </>
+          )}
+
+          {subTab === 'assets' && (
+            <select
+              value={category}
+              onChange={(e) =>
+                setCategory(e.target.value as 'all' | Exclude<GameAssetCategory, 'emoji'>)
+              }
+              aria-label="Filtrar por categoria"
+              className="rounded-lg border border-white/10 bg-[#11141C] px-3 py-2 text-xs text-slate-200 focus:border-orange-500/60 focus:outline-none cursor-pointer"
+            >
+              <option value="all">Todas categorias</option>
+              <option value="item">Itens e ícones</option>
+              <option value="hero">Heróis e expressões</option>
+              <option value="ui">Interface</option>
+              <option value="bg">Cenários</option>
+              <option value="sprite">Sprites</option>
+              <option value="other">Outros</option>
+            </select>
+          )}
+
+          <div className="relative min-w-[200px] flex-1 sm:flex-initial">
+            <Search
+              className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500"
+              aria-hidden="true"
+            />
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Buscar arquivo..."
+              aria-label="Buscar arquivo"
+              className="w-full rounded-lg border border-white/10 bg-[#11141C] py-2 pl-8 pr-3 text-sm sm:text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500/60 focus:outline-none"
+            />
+          </div>
+        </div>
+      </div>
+
+      {batchStatus && (
+        <div className="rounded-lg border border-white/[0.08] bg-[#11141C] px-4 py-2.5 font-mono text-xs text-slate-300 tabular-nums">
+          {batchStatus}
+        </div>
+      )}
 
       {subTab === 'sheets' && (
         <>
           {pagedSheets.length === 0 ? (
-            <div className="rounded-lg border border-slate-800 bg-[#131A26] p-8 text-center text-sm text-slate-400">
+            <div className="rounded-xl border border-white/[0.07] bg-[#11141C] p-10 text-center text-xs text-slate-400">
               Nenhuma folha encontrada para os filtros atuais.
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {pagedSheets.map((sheet) => {
                 const proxyUrl = resolveAssetFetchUrl(sheet.url);
-                const kindLabel = getSheetKind(sheet) === 'astc_sheet' ? 'Folha ASTC' : 'Folha Spine';
+                const kindLabel = getSheetKind(sheet) === 'astc_sheet' ? 'Spritesheet' : 'Spine';
                 return (
                   <div
                     key={sheet.url}
-                    className="flex flex-col overflow-hidden rounded-lg border border-slate-800 bg-[#131A26]"
+                    className="flex flex-col overflow-hidden rounded-xl border border-white/[0.07] bg-[#11141C]"
                   >
                     <div className="sprite-checkerboard flex h-44 items-center justify-center p-3">
                       <img
@@ -386,22 +391,25 @@ export function GeneralAssetsView({
                         className="max-h-full max-w-full object-contain"
                       />
                     </div>
-                    <div className="flex flex-col gap-2.5 border-t border-slate-800/80 p-3">
+                    <div className="flex flex-col gap-2.5 border-t border-white/[0.06] p-3">
                       <div>
-                        <div className="truncate font-mono text-xs font-semibold text-slate-100" title={sheet.name}>
+                        <div
+                          className="truncate font-mono text-xs font-medium text-slate-100"
+                          title={sheet.name}
+                        >
                           {sheet.name}
                         </div>
-                        <div className="mt-0.5 font-mono text-[11px] text-slate-400 tabular-nums">
-                          {sheet.width && sheet.height ? `${sheet.width} × ${sheet.height} px` : 'Imagem'}
+                        <div className="mt-0.5 font-mono text-[11px] text-slate-500 tabular-nums">
+                          {sheet.width && sheet.height ? `${sheet.width}×${sheet.height}` : 'Imagem'}
                           {sheet.bytes ? ` · ${(sheet.bytes / (1024 * 1024)).toFixed(2)} MB` : ''}
                           {` · ${kindLabel}`}
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5">
                         <button
                           type="button"
                           onClick={() => onSendToSlicer(proxyUrl, sheet.name)}
-                          className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:border-orange-500/60 hover:text-white cursor-pointer whitespace-nowrap"
+                          className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:border-white/25 hover:text-white cursor-pointer whitespace-nowrap"
                         >
                           <Scissors className="h-3.5 w-3.5" aria-hidden="true" />
                           <span>Fatiar</span>
@@ -411,16 +419,17 @@ export function GeneralAssetsView({
                           disabled={batchBusy}
                           onClick={() => void handleSliceAndZipSingleSheet(sheet)}
                           title="Fatiar automaticamente e baixar PNGs em ZIP"
-                          className="inline-flex items-center justify-center gap-1 rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:border-orange-500/60 hover:text-white disabled:opacity-40 cursor-pointer whitespace-nowrap"
+                          className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:border-white/25 hover:text-white disabled:opacity-40 cursor-pointer whitespace-nowrap"
                         >
                           <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>ZIP PNGs</span>
+                          <span>PNGs</span>
                         </button>
                         <a
                           href={proxyUrl}
                           download={sheet.name}
-                          className="inline-flex items-center justify-center rounded-md border border-slate-700 bg-[#0B0F17] p-1.5 text-slate-300 hover:border-slate-500 hover:text-white"
+                          className="inline-flex items-center justify-center rounded-lg border border-white/10 bg-[#090B10] p-1.5 text-slate-400 hover:border-white/25 hover:text-white"
                           aria-label={`Baixar ${sheet.name}`}
+                          title="Baixar folha original"
                         >
                           <Download className="h-3.5 w-3.5" aria-hidden="true" />
                         </a>
@@ -437,38 +446,36 @@ export function GeneralAssetsView({
       {subTab === 'emojis' && (
         <>
           {filteredEmojis.length === 0 ? (
-            <div className="rounded-lg border border-slate-800 bg-[#131A26] p-8 text-center text-sm text-slate-400">
-              Nenhuma folha de emojis encontrada nesta extração.
+            <div className="rounded-xl border border-white/[0.07] bg-[#11141C] p-10 text-center text-xs text-slate-400">
+              Nenhuma folha de emojis encontrada.
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
               {filteredEmojis.map((asset) => {
                 const proxyUrl = resolveAssetFetchUrl(asset.url);
                 return (
                   <div
                     key={asset.url}
-                    className="flex flex-col overflow-hidden rounded-lg border border-slate-800 bg-[#131A26]"
+                    className="flex flex-col overflow-hidden rounded-xl border border-white/[0.07] bg-[#11141C]"
                   >
-                    <div className="sprite-checkerboard flex min-h-64 items-center justify-center p-4">
+                    <div className="sprite-checkerboard flex min-h-60 items-center justify-center p-4">
                       <img
                         src={proxyUrl}
                         alt={asset.name}
                         loading="lazy"
                         referrerPolicy="no-referrer"
-                        className="max-h-80 max-w-full object-contain"
+                        className="max-h-72 max-w-full object-contain"
                       />
                     </div>
-                    <div className="flex flex-col gap-3 border-t border-slate-800/80 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 font-display text-sm font-semibold text-slate-100">
-                            <Smile className="h-4 w-4 text-orange-400 shrink-0" aria-hidden="true" />
-                            <span className="truncate">{asset.name}</span>
-                          </div>
-                          <p className="mt-1 truncate font-mono text-xs text-slate-400" title={asset.url}>
-                            {asset.ext.toUpperCase()} · Auto-fatiável em PNGs individuais
-                          </p>
+                    <div className="flex flex-col gap-3 border-t border-white/[0.06] p-4">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 font-display text-sm font-semibold text-slate-100">
+                          <Smile className="h-4 w-4 text-orange-400 shrink-0" aria-hidden="true" />
+                          <span className="truncate">{asset.name}</span>
                         </div>
+                        <p className="mt-0.5 font-mono text-[11px] text-slate-500 uppercase">
+                          {asset.ext} · Folha de emojis
+                        </p>
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2">
@@ -476,26 +483,26 @@ export function GeneralAssetsView({
                           type="button"
                           disabled={batchBusy}
                           onClick={() => void handleSliceAndZipEmojiSheet(asset)}
-                          className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors cursor-pointer whitespace-nowrap"
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors cursor-pointer whitespace-nowrap"
                         >
                           <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Fatiar e Baixar Emojis (ZIP)</span>
+                          <span>Extrair PNGs (ZIP)</span>
                         </button>
                         <button
                           type="button"
                           onClick={() => onSendToSlicer(proxyUrl, asset.name)}
-                          className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-[#0B0F17] px-3.5 py-2 text-xs font-medium text-slate-200 hover:border-orange-500/60 hover:text-white cursor-pointer whitespace-nowrap"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs font-medium text-slate-200 hover:border-white/25 hover:text-white cursor-pointer whitespace-nowrap"
                         >
                           <Scissors className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Abrir no Fatiador Local</span>
+                          <span>Fatiar</span>
                         </button>
                         <a
                           href={proxyUrl}
                           download={asset.name}
-                          className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-[#0B0F17] px-3.5 py-2 text-xs font-medium text-slate-300 hover:border-slate-500 hover:text-white whitespace-nowrap"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs font-medium text-slate-300 hover:border-white/25 hover:text-white whitespace-nowrap"
                         >
                           <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Folha Original</span>
+                          <span>Original</span>
                         </a>
                       </div>
                     </div>
@@ -510,17 +517,17 @@ export function GeneralAssetsView({
       {subTab === 'assets' && (
         <>
           {pagedAssets.length === 0 ? (
-            <div className="rounded-lg border border-slate-800 bg-[#131A26] p-8 text-center text-sm text-slate-400">
+            <div className="rounded-xl border border-white/[0.07] bg-[#11141C] p-10 text-center text-xs text-slate-400">
               Nenhum ativo encontrado nesta categoria.
             </div>
           ) : (
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+            <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
               {pagedAssets.map((asset) => {
                 const proxyUrl = resolveAssetFetchUrl(asset.url);
                 return (
                   <div
                     key={asset.url}
-                    className="flex flex-col overflow-hidden rounded-lg border border-slate-800 bg-[#131A26]"
+                    className="flex flex-col overflow-hidden rounded-xl border border-white/[0.07] bg-[#11141C]"
                   >
                     <div className="sprite-checkerboard flex h-32 items-center justify-center p-2">
                       <img
@@ -531,20 +538,23 @@ export function GeneralAssetsView({
                         className="max-h-full max-w-full object-contain"
                       />
                     </div>
-                    <div className="flex flex-col gap-2 border-t border-slate-800/80 p-2.5">
-                      <div className="truncate font-mono text-xs text-slate-100" title={asset.name}>
+                    <div className="flex flex-col gap-1.5 border-t border-white/[0.06] p-2.5">
+                      <div
+                        className="truncate font-mono text-xs text-slate-100"
+                        title={asset.name}
+                      >
                         {asset.name}
                       </div>
-                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                      <div className="flex items-center justify-between text-[11px] text-slate-500">
                         <span className="font-mono uppercase truncate">
                           {asset.ext} · {ASSET_CATEGORY_LABELS[asset.category]}
                         </span>
-                        <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex items-center gap-0.5 shrink-0">
                           <button
                             type="button"
                             onClick={() => onSendToSlicer(proxyUrl, asset.name)}
                             title="Abrir no Fatiador"
-                            className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-orange-400 cursor-pointer"
+                            className="rounded p-1 text-slate-400 hover:bg-white/[0.06] hover:text-orange-400 cursor-pointer"
                           >
                             <Scissors className="h-3.5 w-3.5" aria-hidden="true" />
                           </button>
@@ -552,7 +562,7 @@ export function GeneralAssetsView({
                             href={proxyUrl}
                             download={asset.name}
                             title="Baixar arquivo"
-                            className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+                            className="rounded p-1 text-slate-400 hover:bg-white/[0.06] hover:text-white"
                           >
                             <Download className="h-3.5 w-3.5" aria-hidden="true" />
                           </a>
@@ -568,8 +578,8 @@ export function GeneralAssetsView({
       )}
 
       {subTab !== 'emojis' && totalPages > 1 && (
-        <div className="flex items-center justify-between border-t border-slate-800/80 pt-4">
-          <span className="text-xs text-slate-400 font-mono tabular-nums">
+        <div className="flex items-center justify-between border-t border-white/[0.07] pt-4">
+          <span className="font-mono text-xs text-slate-500 tabular-nums">
             Página {safePage} de {totalPages}
           </span>
           <div className="flex items-center gap-2">
@@ -577,7 +587,7 @@ export function GeneralAssetsView({
               type="button"
               disabled={safePage <= 1}
               onClick={() => setPage((p) => Math.max(1, p - 1))}
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-[#131A26] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-600 disabled:opacity-40 cursor-pointer"
+              className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-[#11141C] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/20 disabled:opacity-40 cursor-pointer"
             >
               <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Anterior</span>
@@ -586,7 +596,7 @@ export function GeneralAssetsView({
               type="button"
               disabled={safePage >= totalPages}
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-[#131A26] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-600 disabled:opacity-40 cursor-pointer"
+              className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-[#11141C] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/20 disabled:opacity-40 cursor-pointer"
             >
               <span>Próxima</span>
               <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />

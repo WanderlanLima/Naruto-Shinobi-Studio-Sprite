@@ -1297,7 +1297,7 @@ async function ensureBackupManifestPack(catalog, cachedTables) {
       const parsed = JSON.parse(await existing.file('backup-manifest.json').async('text'));
       if (
         parsed &&
-        parsed.skillIconsIncluded === true &&
+        parsed.skillIconsInBase === true &&
         parsed.catalogNinjaCount === catalogNinjaCount &&
         Array.isArray(parsed.spriteFiles) &&
         parsed.spriteFiles.length > 0
@@ -1331,7 +1331,12 @@ async function ensureBackupManifestPack(catalog, cachedTables) {
     if (artRel) baseSet.add(artRel);
   }
   for (const rel of fileSet) {
-    if (rel.startsWith('acervo/asset/spine-no-estados/')) {
+    const low = rel.toLowerCase();
+    if (
+      rel.startsWith('acervo/asset/spine-no-estados/') ||
+      ((rel.startsWith('acervo/asset/items/skill_') || rel.startsWith('acervo/asset/ui/icon/')) &&
+        (low.endsWith('.png') || low.endsWith('.webp')))
+    ) {
       baseSet.add(rel);
     }
   }
@@ -1364,11 +1369,6 @@ async function ensureBackupManifestPack(catalog, cachedTables) {
       } else if (/\.(webp|png|jpe?g)$/i.test(lower)) {
         if (!baseSet.has(rel)) spriteSet.add(rel);
       }
-    } else if (
-      rel.startsWith('acervo/asset/items/skill_') &&
-      rel.toLowerCase().endsWith('.png')
-    ) {
-      if (!baseSet.has(rel)) assetSet.add(rel);
     }
   }
 
@@ -1401,6 +1401,7 @@ async function ensureBackupManifestPack(catalog, cachedTables) {
     generatedAt: new Date().toISOString(),
     catalogNinjaCount,
     skillIconsIncluded: true,
+    skillIconsInBase: true,
     baseFiles: toSizedPairs(baseSet),
     videoFiles: toSizedPairs(videoFiles),
     audioFiles: toSizedPairs(audioFiles),

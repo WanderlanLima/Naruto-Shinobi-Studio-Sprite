@@ -21,13 +21,12 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
-  ShieldCheck,
+  Settings2,
+  Smartphone,
   Sparkles,
   Terminal,
   Trash2,
   Upload,
-  WifiOff,
-  Zap,
 } from 'lucide-react';
 import type { NinjaEntry } from '../types/sprite';
 import {
@@ -53,6 +52,7 @@ import {
 } from '../utils/remoteClient';
 import {
   assembleAndSaveBackupJobZip,
+  buildBackupMetaArchiveBase64,
   clearAllResumableBackupJobs,
   formatEta,
   getLatestSavedBackupJob,
@@ -124,7 +124,19 @@ export function OfflineBackupView({
   const [loadingPlan, setLoadingPlan] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
   const [downloadedIds, setDownloadedIds] = useState<Set<string>>(() => new Set());
-  const [downloadTab, setDownloadTab] = useState<'modular' | 'presets' | 'custom'>('modular');
+  const [viewMode, setViewMode] = useState<'download' | 'open'>(() =>
+    offlineZip.active ? 'open' : 'download'
+  );
+  const [showConnectionPanel, setShowConnectionPanel] = useState(false);
+  const [downloadTab, setDownloadTab] = useState<'presets' | 'modular' | 'custom'>('presets');
+
+  // Direct zero-CORS script export state (Android Termux / Linux / macOS / Windows)
+  const [exportingDirectKey, setExportingDirectKey] = useState<string | null>(null);
+  const [showAndroidGuide, setShowAndroidGuide] = useState(false);
+  const [copiedTermuxCmd, setCopiedTermuxCmd] = useState(false);
+  const [lastShScriptName, setLastShScriptName] = useState(
+    'baixar_shinobi_backup_completo_tudo.sh'
+  );
 
   // Resumable high-speed download state (IndexedDB-backed)
   const [activeJob, setActiveJob] = useState<ResumableBackupJob | null>(null);
@@ -515,16 +527,32 @@ export function OfflineBackupView({
   };
 
   const handleOpenWorkerGuide = () => {
+    setViewMode('download');
+    setShowConnectionPanel(true);
     setShowWorkerGuide(true);
     setTimeout(() => {
       workerPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }, 60);
   };
 
+  const handleCopyTermuxCommand = async (scriptFilename: string) => {
+    const cmd = `termux-setup-storage && bash ~/storage/downloads/${scriptFilename}`;
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopiedTermuxCmd(true);
+      setTimeout(() => setCopiedTermuxCmd(false), 2200);
+    } catch {
+      setCopiedTermuxCmd(false);
+    }
+  };
+
   const handleExportDirectForModule = async (
     mod: BackupModulePlanItem,
     format: 'ps1' | 'sh' | 'txt'
   ) => {
+    const key = `${mod.id}-${format}`;
+    setExportingDirectKey(key);
+    setPlanError(null);
     try {
       const bundle = await ensureStaticBundle();
       const files = bundle.moduleFilesById.get(mod.id) || [];
@@ -532,33 +560,203 @@ export function OfflineBackupView({
         setPlanError(`Nenhum arquivo mapeado para o módulo ${mod.label}.`);
         return;
       }
+      const metaArchiveBase64 =
+        format !== 'txt' && mod.module === 'base'
+          ? await buildBackupMetaArchiveBase64({
+              origin: bundle.origin,
+              moduleId: mod.id,
+              label: mod.label,
+              expectedFiles: files.length,
+              ninjasForCatalog: ninjas,
+              includeCatalogMeta: true,
+            })
+          : undefined;
       const spec = {
         moduleId: mod.id,
         label: mod.label,
         filename: mod.filename,
         origin: bundle.origin,
         paths: files.map((f) => f.path),
+        metaArchiveBase64,
       };
       if (format === 'ps1') downloadDirectWindowsScript(spec);
-      else if (format === 'sh') downloadDirectUnixScript(spec);
-      else downloadDirectUrlList(spec);
+      else if (format === 'sh') {
+        downloadDirectUnixScript(spec);
+        const base = mod.filename.replace(/\.zip$/i, '').replace(/[^a-zA-Z0-9._-]/g, '_');
+        setLastShScriptName(`baixar_${base}.sh`);
+      } else downloadDirectUrlList(spec);
     } catch (err) {
       setPlanError(err instanceof Error ? err.message : 'Erro ao gerar script de download direto.');
+    } finally {
+      setExportingDirectKey(null);
     }
   };
 
-  const handleExportDirectForActiveJob = (format: 'ps1' | 'sh' | 'txt') => {
+  const handleExportDirectForPreset = async (
+    moduleKey: 'mp4_ninjas' | 'complete',
+    filename: string,
+    format: 'ps1' | 'sh' | 'txt'
+  ) => {
+    const key = `${moduleKey}-${format}`;
+    setExportingDirectKey(key);
+    setPlanError(null);
+    try {
+      const bundle = await ensureStaticBundle();
+      let files: Array<{ path: string; size: number }>;
+      let label: string;
+      let customNinjaIds: string[] | undefined;
+
+      if (moduleKey === 'complete') {
+        files = bundle.completeFiles;
+        label = 'Backup Completo — 100% em 1 Arquivo (ZIP64)';
+      } else {
+        const sourceNinjas =
+          ninjas.length > 0 ? ninjas : (await fetchStaticCatalogJson())?.ninjas || [];
+        const mp4Ninjas = sourceNinjas.filter((n) => n.hasVideo);
+        files = await resolveStandaloneNinjasFileList(mp4Ninjas, bundle, {
+          includeParticles: true,
+          includeVideos: true,
+          includeAudio: true,
+          includeNameArt: true,
+        });
+        label = `Todos os ${mp4Ninjas.length || plan?.mp4NinjaCount || 139} Ninjas com Vídeo MP4`;
+        customNinjaIds = mp4Ninjas.map((n) => n.id);
+      }
+
+      const metaArchiveBase64 =
+        format !== 'txt'
+          ? await buildBackupMetaArchiveBase64({
+              origin: bundle.origin,
+              moduleId: moduleKey,
+              label,
+              expectedFiles: files.length,
+              ninjasForCatalog: ninjas,
+              customNinjaIds,
+              includeCatalogMeta: true,
+            })
+          : undefined;
+
+      const spec = {
+        moduleId: moduleKey,
+        label,
+        filename,
+        origin: bundle.origin,
+        paths: files.map((f) => f.path),
+        metaArchiveBase64,
+      };
+
+      if (format === 'ps1') downloadDirectWindowsScript(spec);
+      else if (format === 'sh') {
+        downloadDirectUnixScript(spec);
+        const base = filename.replace(/\.zip$/i, '').replace(/[^a-zA-Z0-9._-]/g, '_');
+        setLastShScriptName(`baixar_${base}.sh`);
+        setShowAndroidGuide(true);
+      } else downloadDirectUrlList(spec);
+    } catch (err) {
+      setPlanError(err instanceof Error ? err.message : 'Erro ao gerar script de download direto.');
+    } finally {
+      setExportingDirectKey(null);
+    }
+  };
+
+  const handleExportDirectForCustom = async (format: 'ps1' | 'sh' | 'txt') => {
+    if (selectedIds.size === 0 || exportingDirectKey) return;
+    const key = `custom-${format}`;
+    setExportingDirectKey(key);
+    setCustomStatus('Preparando script direto com catálogo e dados de combate...');
+    try {
+      const bundle = await ensureStaticBundle();
+      const selectedList = ninjas.filter((n) => selectedIds.has(n.id));
+      const files = await resolveStandaloneNinjasFileList(selectedList, bundle, {
+        includeParticles: customIncludeParticles,
+        includeVideos: customIncludeVideos,
+        includeAudio: customIncludeAudio,
+        includeNameArt: customIncludeNameArt,
+      });
+      if (files.length === 0) {
+        throw new Error('Nenhum arquivo encontrado para os ninjas selecionados.');
+      }
+
+      const filename =
+        selectedList.length === 1
+          ? `shinobi_backup_${selectedList[0].id}.zip`
+          : `shinobi_backup_personalizado_${selectedList.length}_ninjas.zip`;
+      const label = `Backup Personalizado (${selectedList.length} ${selectedList.length === 1 ? 'Ninja' : 'Ninjas'})`;
+
+      const metaArchiveBase64 =
+        format !== 'txt'
+          ? await buildBackupMetaArchiveBase64({
+              origin: bundle.origin,
+              moduleId: `custom-${selectedList.length}`,
+              label,
+              expectedFiles: files.length,
+              ninjasForCatalog: ninjas,
+              customNinjaIds: selectedList.map((n) => n.id),
+              includeCatalogMeta: true,
+            })
+          : undefined;
+
+      const spec = {
+        moduleId: `custom-${selectedList.length}`,
+        label,
+        filename,
+        origin: bundle.origin,
+        paths: files.map((f) => f.path),
+        metaArchiveBase64,
+      };
+
+      if (format === 'ps1') downloadDirectWindowsScript(spec);
+      else if (format === 'sh') {
+        downloadDirectUnixScript(spec);
+        const base = filename.replace(/\.zip$/i, '').replace(/[^a-zA-Z0-9._-]/g, '_');
+        setLastShScriptName(`baixar_${base}.sh`);
+      } else downloadDirectUrlList(spec);
+
+      setCustomStatus(
+        `Script gerado com ${files.length.toLocaleString('pt-BR')} arquivos (sem CORS, retomável).`
+      );
+    } catch (err) {
+      setCustomStatus(err instanceof Error ? err.message : 'Erro ao gerar script personalizado.');
+    } finally {
+      setExportingDirectKey(null);
+    }
+  };
+
+  const handleExportDirectForActiveJob = async (format: 'ps1' | 'sh' | 'txt') => {
     if (!activeJob) return;
-    const spec = {
-      moduleId: activeJob.moduleId,
-      label: activeJob.label,
-      filename: activeJob.filename,
-      origin: activeJob.origin,
-      paths: activeJob.files.map((f) => f.path),
-    };
-    if (format === 'ps1') downloadDirectWindowsScript(spec);
-    else if (format === 'sh') downloadDirectUnixScript(spec);
-    else downloadDirectUrlList(spec);
+    setExportingDirectKey(`active-${format}`);
+    try {
+      const metaArchiveBase64 =
+        format !== 'txt' && activeJob.includeCatalogMeta
+          ? await buildBackupMetaArchiveBase64({
+              origin: activeJob.origin,
+              moduleId: activeJob.moduleId,
+              label: activeJob.label,
+              expectedFiles: activeJob.files.length,
+              ninjasForCatalog: ninjas,
+              customNinjaIds: activeJob.customNinjaIds,
+              includeCatalogMeta: true,
+            })
+          : undefined;
+      const spec = {
+        moduleId: activeJob.moduleId,
+        label: activeJob.label,
+        filename: activeJob.filename,
+        origin: activeJob.origin,
+        paths: activeJob.files.map((f) => f.path),
+        metaArchiveBase64,
+      };
+      if (format === 'ps1') downloadDirectWindowsScript(spec);
+      else if (format === 'sh') {
+        downloadDirectUnixScript(spec);
+        const base = activeJob.filename.replace(/\.zip$/i, '').replace(/[^a-zA-Z0-9._-]/g, '_');
+        setLastShScriptName(`baixar_${base}.sh`);
+      } else downloadDirectUrlList(spec);
+    } catch (err) {
+      setPlanError(err instanceof Error ? err.message : 'Erro ao gerar script de download direto.');
+    } finally {
+      setExportingDirectKey(null);
+    }
   };
 
   const filteredCustomNinjas = useMemo(() => {
@@ -645,6 +843,8 @@ export function OfflineBackupView({
     return Math.min(100, Math.round((processed / activeJob.files.length) * 100));
   }, [activeJob]);
 
+  const videoNinjaCount = useMemo(() => ninjas.filter((n) => n.hasVideo).length, [ninjas]);
+
   return (
     <div className="space-y-6">
       {/* Hidden native file inputs for Android & Desktop */}
@@ -665,1074 +865,1290 @@ export function OfflineBackupView({
         onChange={(e) => void handleMountFiles(e.target.files, true)}
       />
 
-      {/* SECTION 1: OPEN LOCAL ZIP (100% OFFLINE MODE) */}
-      <section className="rounded-lg border border-slate-800 bg-[#131A26] p-4 sm:p-6 space-y-5">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-1.5">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="font-display text-xl sm:text-2xl font-bold tracking-tight text-slate-50">
-                Modo Backup Offline (Leitura Direta do ZIP)
-              </h1>
+      {/* Unified Page Header */}
+      <div className="flex flex-col gap-4 border-b border-white/[0.07] pb-5 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="font-display text-2xl font-bold tracking-tight text-slate-50">Backup</h1>
+          <p className="mt-1 text-xs text-slate-400 tabular-nums">
+            {offlineZip.active
+              ? `Modo offline ativo · ${offlineZip.archives.length} ZIP · ${offlineZip.stats.totalEntries.toLocaleString('pt-BR')} arquivos`
+              : 'Baixe pacotes para uso sem internet ou abra arquivos .zip salvos no dispositivo'}
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex items-center rounded-lg border border-white/[0.07] bg-[#11141C] p-1">
+            <button
+              type="button"
+              onClick={() => setViewMode('download')}
+              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                viewMode === 'download'
+                  ? 'bg-orange-600 text-white'
+                  : 'text-slate-400 hover:text-slate-100'
+              }`}
+            >
+              Baixar backup
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('open')}
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                viewMode === 'open'
+                  ? 'bg-orange-600 text-white'
+                  : 'text-slate-400 hover:text-slate-100'
+              }`}
+            >
+              <span>Abrir ZIP local</span>
               {offlineZip.active && (
-                <span className="inline-flex items-center gap-1.5 rounded bg-emerald-950/90 border border-emerald-500/40 px-2.5 py-0.5 text-xs font-semibold text-emerald-300">
-                  <WifiOff className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>ZIP Offline Ativo</span>
-                </span>
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" />
               )}
-            </div>
-            <p className="text-xs sm:text-sm text-slate-400 max-w-3xl leading-relaxed">
-              Abra um ou vários arquivos <code className="font-mono text-slate-200">.zip</code> salvos no seu Android ou PC. A leitura usa índice direto via <code className="font-mono text-slate-200">File.slice()</code> sem descompactar tudo na RAM — roda liso mesmo com backups de vários gigabytes e sem depender do servidor do jogo.
-            </p>
+            </button>
           </div>
 
-          {offlineZip.active && (
+          {viewMode === 'download' && staticMode && (
+            <button
+              type="button"
+              onClick={() => setShowConnectionPanel((v) => !v)}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                showConnectionPanel || corsProxySaved
+                  ? 'border-orange-500/40 bg-orange-500/10 text-orange-300'
+                  : 'border-white/10 bg-[#11141C] text-slate-300 hover:border-white/20 hover:text-white'
+              }`}
+            >
+              <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>{corsProxySaved ? 'Proxy ativo' : 'Conexão'}</span>
+            </button>
+          )}
+
+          {viewMode === 'download' && (
+            <button
+              type="button"
+              disabled={loadingPlan}
+              onClick={() => void fetchBackupPlan()}
+              title="Recalcular tamanhos dos pacotes"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#11141C] px-3 py-2 text-xs font-medium text-slate-300 hover:border-white/20 hover:text-white disabled:opacity-40 transition-colors cursor-pointer"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loadingPlan ? 'animate-spin' : ''}`}
+                aria-hidden="true"
+              />
+              <span className="hidden sm:inline">{loadingPlan ? 'Atualizando...' : 'Atualizar'}</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* ACTIVE / PAUSED / COMPLETED RESUMABLE DOWNLOAD PANEL (Visible across both views if active) */}
+      {activeJob && (
+        <div className="rounded-xl border border-orange-500/35 bg-[#11141C] p-4 sm:p-5 space-y-3.5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`h-2 w-2 rounded-full shrink-0 ${
+                    activeJob.status === 'running' || activeJob.status === 'assembling'
+                      ? 'bg-orange-400 animate-pulse'
+                      : activeJob.status === 'completed'
+                      ? 'bg-emerald-400'
+                      : activeJob.status === 'error'
+                      ? 'bg-red-400'
+                      : 'bg-amber-400'
+                  }`}
+                  aria-hidden="true"
+                />
+                <span className="font-display text-sm font-semibold text-slate-100">
+                  {activeJob.label}
+                </span>
+                <span className="text-xs text-slate-400">
+                  ·{' '}
+                  {activeJob.status === 'running'
+                    ? 'Baixando'
+                    : activeJob.status === 'assembling'
+                    ? `Montando ZIP (${assemblePercent}%)`
+                    : activeJob.status === 'completed'
+                    ? 'Concluído'
+                    : activeJob.status === 'error'
+                    ? 'Interrompido — progresso salvo'
+                    : activeJob.pauseReason === 'network'
+                    ? 'Sem conexão — retomará automaticamente'
+                    : 'Pausado — progresso salvo'}
+                </span>
+              </div>
+              <div className="font-mono text-[11px] text-slate-500 break-all">
+                {activeJob.filename}
+                {currentFile && activeJob.status === 'running' ? ` · ${currentFile}` : ''}
+              </div>
+            </div>
+
             <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {offlineZip.hasCatalog && (
+              {activeJob.status === 'running' && (
                 <button
                   type="button"
-                  onClick={onGoToCatalog}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 transition-colors cursor-pointer"
+                  onClick={() => runControllerRef.current?.pause()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-200 hover:bg-amber-500/20 cursor-pointer"
                 >
-                  <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Abrir Catálogo Offline</span>
+                  <Pause className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Pausar</span>
                 </button>
               )}
-              <button
-                type="button"
-                onClick={handleUnmount}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-red-900/60 bg-red-950/30 px-3 py-2 text-xs font-medium text-red-200 hover:bg-red-950/60 transition-colors cursor-pointer"
-              >
-                <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Desconectar ZIP</span>
-              </button>
+
+              {(activeJob.status === 'paused' || activeJob.status === 'error') && (
+                <button
+                  type="button"
+                  onClick={() => launchJobExecution({ mode: 'resume', job: activeJob })}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 cursor-pointer"
+                >
+                  <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Retomar</span>
+                </button>
+              )}
+
+              {activeJob.status !== 'running' &&
+                activeJob.status !== 'assembling' &&
+                activeJob.failedPaths.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      launchJobExecution({
+                        mode: 'resume',
+                        job: activeJob,
+                        retryFailedOnly: true,
+                      })
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/20 cursor-pointer"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Tentar falhas ({activeJob.failedPaths.length})</span>
+                  </button>
+                )}
+
+              {activeJob.status !== 'running' &&
+                activeJob.status !== 'assembling' &&
+                activeJob.completedPaths.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={manualSaving}
+                    onClick={() => void handleManualSaveZipNow()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/20 disabled:opacity-40 cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>
+                      {manualSaving
+                        ? `Montando (${assemblePercent}%)...`
+                        : activeJob.status === 'completed'
+                        ? 'Baixar novamente'
+                        : 'Salvar parcial'}
+                    </span>
+                  </button>
+                )}
+
+              {activeJob.status !== 'running' && activeJob.status !== 'assembling' && (
+                <button
+                  type="button"
+                  onClick={() => void handleDiscardActiveJob()}
+                  className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 text-xs text-slate-400 hover:border-red-500/40 hover:text-red-300 cursor-pointer"
+                >
+                  <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Limpar</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.06]">
+              <div
+                className={`h-full transition-all duration-200 ${
+                  activeJob.status === 'completed' ? 'bg-emerald-500' : 'bg-orange-500'
+                }`}
+                style={{
+                  width: `${
+                    activeJob.status === 'assembling'
+                      ? Math.max(5, assemblePercent)
+                      : jobProgressPct
+                  }%`,
+                }}
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] text-slate-400 tabular-nums">
+              <span>
+                {activeJob.completedPaths.length.toLocaleString('pt-BR')} /{' '}
+                {activeJob.files.length.toLocaleString('pt-BR')} arquivos ({jobProgressPct}%) ·{' '}
+                {formatSize(activeJob.downloadedBytes)}
+                {activeJob.totalEstimatedBytes > 0
+                  ? ` / ${formatSize(activeJob.totalEstimatedBytes)}`
+                  : ''}
+              </span>
+              <span>
+                {activeJob.status === 'running'
+                  ? `${formatSpeed(speedBytesPerSec)} · restante ${formatEta(etaSeconds)}`
+                  : activeJob.failedPaths.length > 0
+                  ? `${activeJob.failedPaths.length} falhas`
+                  : ''}
+              </span>
+            </div>
+          </div>
+
+          {activeJob.statusMessage && (
+            <p className="text-xs text-slate-300 leading-relaxed">{activeJob.statusMessage}</p>
+          )}
+
+          {activeJob.status === 'paused' && activeJob.pauseReason === 'cors' && (
+            <div className="border-t border-white/[0.06] pt-3 space-y-2.5">
+              <div className="text-xs font-medium text-slate-200">
+                Alternativas de download direto para este pacote:
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={Boolean(exportingDirectKey)}
+                  onClick={() => void handleExportDirectForActiveJob('sh')}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 cursor-pointer"
+                >
+                  <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Android Termux / Linux (.sh)</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(exportingDirectKey)}
+                  onClick={() => void handleExportDirectForActiveJob('ps1')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/25 disabled:opacity-40 cursor-pointer"
+                >
+                  <Terminal className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                  <span>Windows (.ps1)</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(exportingDirectKey)}
+                  onClick={() => void handleExportDirectForActiveJob('txt')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/25 disabled:opacity-40 cursor-pointer"
+                >
+                  <FileText className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                  <span>Links 1DM / ADM (.txt)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenWorkerGuide}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 cursor-pointer"
+                >
+                  <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Configurar proxy</span>
+                </button>
+              </div>
             </div>
           )}
         </div>
+      )}
 
-        {/* Dropzone / File Selector */}
-        <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setIsDragging(true);
-          }}
-          onDragLeave={() => setIsDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setIsDragging(false);
-            void handleMountFiles(e.dataTransfer.files, offlineZip.active);
-          }}
-          className={`rounded-lg border-2 border-dashed p-5 sm:p-6 text-center transition-colors ${
-            isDragging
-              ? 'border-orange-500 bg-orange-500/10'
-              : offlineZip.active
-              ? 'border-emerald-500/40 bg-[#0B0F17]'
-              : 'border-slate-700 bg-[#0B0F17] hover:border-slate-500'
-          }`}
-        >
-          <div className="mx-auto flex max-w-xl flex-col items-center gap-3">
-            <div className="rounded-lg bg-slate-800/80 p-3 text-orange-400">
-              {offlineZip.active ? (
-                <PackageCheck className="h-6 w-6 text-emerald-400" aria-hidden="true" />
-              ) : (
-                <FolderOpen className="h-6 w-6" aria-hidden="true" />
-              )}
-            </div>
-            <div className="space-y-1">
-              <p className="text-sm font-semibold text-slate-100">
-                {mounting
-                  ? 'Indexando arquivos ZIP (lendo índice central)...'
-                  : offlineZip.active
-                  ? `${offlineZip.archives.length} arquivo(s) ZIP montado(s) · ${offlineZip.stats.totalEntries.toLocaleString('pt-BR')} arquivos indexados`
-                  : 'Selecione seus arquivos .zip de backup no Android ou arraste aqui'}
-              </p>
-              <p className="text-xs text-slate-400">
-                Você pode selecionar 1 backup completo, 1 backup personalizado ou todas as partes modulares juntas (Base + Vídeos + Áudios + Partículas + Sprites).
-              </p>
-            </div>
+      {/* VIEW 1: OPEN LOCAL ZIP (OFFLINE MODE) */}
+      {viewMode === 'open' && (
+        <section className="space-y-5">
+          {/* Dropzone */}
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragging(true);
+            }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragging(false);
+              void handleMountFiles(e.dataTransfer.files, offlineZip.active);
+            }}
+            className={`rounded-xl border border-dashed p-8 text-center transition-colors ${
+              isDragging
+                ? 'border-orange-500 bg-orange-500/10'
+                : offlineZip.active
+                ? 'border-emerald-500/35 bg-[#11141C]'
+                : 'border-white/15 bg-[#11141C] hover:border-white/25'
+            }`}
+          >
+            <div className="mx-auto flex max-w-md flex-col items-center gap-3">
+              <div className="rounded-lg bg-[#090B10] border border-white/[0.07] p-3">
+                {offlineZip.active ? (
+                  <PackageCheck className="h-5 w-5 text-emerald-400" aria-hidden="true" />
+                ) : (
+                  <FolderOpen className="h-5 w-5 text-orange-400" aria-hidden="true" />
+                )}
+              </div>
 
-            <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
-              <button
-                type="button"
-                disabled={mounting}
-                onClick={() => replaceInputRef.current?.click()}
-                className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50 transition-colors cursor-pointer"
-              >
-                <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>
-                  {offlineZip.active ? 'Trocar Arquivo(s) ZIP' : 'Abrir Backup .ZIP do Dispositivo'}
-                </span>
-              </button>
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-slate-100">
+                  {mounting
+                    ? 'Indexando arquivos ZIP...'
+                    : offlineZip.active
+                    ? `${offlineZip.archives.length} pacote(s) carregado(s)`
+                    : 'Arraste seus arquivos .zip ou selecione do dispositivo'}
+                </p>
+                <p className="text-xs text-slate-400">
+                  Compatível com backup completo, personalizado ou múltiplas partes juntas.
+                </p>
+              </div>
 
-              {offlineZip.active && (
+              <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
                 <button
                   type="button"
                   disabled={mounting}
-                  onClick={() => appendInputRef.current?.click()}
-                  className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-[#131A26] px-4 py-2 text-xs font-semibold text-slate-100 hover:border-orange-500/60 disabled:opacity-50 transition-colors cursor-pointer"
+                  onClick={() => replaceInputRef.current?.click()}
+                  className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50 transition-colors cursor-pointer"
                 >
-                  <Plus className="h-3.5 w-3.5 text-orange-400" aria-hidden="true" />
-                  <span>Adicionar Mais Partes (.ZIP)</span>
+                  <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>{offlineZip.active ? 'Trocar arquivos' : 'Selecionar .ZIP'}</span>
                 </button>
+
+                {offlineZip.active && (
+                  <button
+                    type="button"
+                    disabled={mounting}
+                    onClick={() => appendInputRef.current?.click()}
+                    className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#090B10] px-4 py-2 text-xs font-medium text-slate-200 hover:border-white/20 disabled:opacity-50 transition-colors cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Adicionar partes</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {mountError && (
+            <div
+              role="alert"
+              className="rounded-lg border border-red-500/30 bg-red-950/30 px-4 py-3 text-xs text-red-200"
+            >
+              {mountError}
+            </div>
+          )}
+
+          {offlineZip.active && (
+            <div className="rounded-xl border border-white/[0.07] bg-[#11141C] overflow-hidden">
+              {/* Inline Hairline Stats Row */}
+              <div className="grid grid-cols-3 sm:grid-cols-6 divide-x divide-y sm:divide-y-0 divide-white/[0.06] border-b border-white/[0.06]">
+                <div className="px-4 py-3">
+                  <div className="text-[11px] text-slate-500">Ninjas</div>
+                  <div className="mt-0.5 font-mono text-base font-semibold text-slate-100 tabular-nums">
+                    {offlineZip.stats.catalogNinjas}
+                  </div>
+                </div>
+                <div className="px-4 py-3">
+                  <div className="text-[11px] text-slate-500">Esqueletos</div>
+                  <div className="mt-0.5 font-mono text-base font-semibold text-slate-100 tabular-nums">
+                    {offlineZip.stats.spineAtlases}
+                  </div>
+                </div>
+                <div className="px-4 py-3">
+                  <div className="text-[11px] text-slate-500">Sprites</div>
+                  <div className="mt-0.5 font-mono text-base font-semibold text-slate-100 tabular-nums">
+                    {offlineZip.stats.spriteSheets}
+                  </div>
+                </div>
+                <div className="px-4 py-3">
+                  <div className="text-[11px] text-slate-500">Partículas</div>
+                  <div className="mt-0.5 font-mono text-base font-semibold text-slate-100 tabular-nums">
+                    {offlineZip.stats.particleFiles}
+                  </div>
+                </div>
+                <div className="px-4 py-3">
+                  <div className="text-[11px] text-slate-500">Vídeos</div>
+                  <div className="mt-0.5 font-mono text-base font-semibold text-slate-100 tabular-nums">
+                    {offlineZip.stats.videosMp4}
+                  </div>
+                </div>
+                <div className="px-4 py-3">
+                  <div className="text-[11px] text-slate-500">Áudios</div>
+                  <div className="mt-0.5 font-mono text-base font-semibold text-slate-100 tabular-nums">
+                    {offlineZip.stats.audiosMp3}
+                  </div>
+                </div>
+              </div>
+
+              {/* Strict Offline + Actions */}
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
+                <label className="inline-flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={offlineZip.strictOffline}
+                    onChange={(e) => setStrictOfflineMode(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-orange-500"
+                  />
+                  <span>Modo offline estrito (bloquear requisições externas)</span>
+                </label>
+
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[11px] text-slate-500 tabular-nums mr-1">
+                    {formatSize(offlineZip.stats.totalBytes)}
+                  </span>
+                  {offlineZip.hasCatalog && (
+                    <button
+                      type="button"
+                      onClick={onGoToCatalog}
+                      className="rounded-lg bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 transition-colors cursor-pointer"
+                    >
+                      Abrir Catálogo
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleUnmount}
+                    className="rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-red-500/40 hover:text-red-300 transition-colors cursor-pointer"
+                  >
+                    Desconectar
+                  </button>
+                </div>
+              </div>
+
+              {!offlineZip.hasCatalog && (
+                <div className="border-b border-white/[0.06] bg-amber-500/5 px-4 py-2.5 text-xs text-amber-200">
+                  Adicione também a parte Base (<span className="font-mono">01_shinobi_base_catalogo_esqueletos.zip</span>) para listar todos os personagens.
+                </div>
               )}
-            </div>
-          </div>
-        </div>
 
-        {mountError && (
-          <div
-            role="alert"
-            className="rounded-lg border border-red-900/60 bg-red-950/30 px-4 py-3 text-xs text-red-200"
-          >
-            {mountError}
-          </div>
-        )}
-
-        {/* Active ZIP Coverage & Archives List */}
-        {offlineZip.active && (
-          <div className="space-y-4 border-t border-slate-800/80 pt-4">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-              <div className="rounded-lg border border-slate-800 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Ninjas no Catálogo</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-orange-400 tabular-nums">
-                  {offlineZip.stats.catalogNinjas}
-                </div>
-              </div>
-              <div className="rounded-lg border border-slate-800 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Atlas Spine</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-slate-100 tabular-nums">
-                  {offlineZip.stats.spineAtlases}
-                </div>
-              </div>
-              <div className="rounded-lg border border-slate-800 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Folhas de Sprites</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-slate-100 tabular-nums">
-                  {offlineZip.stats.spriteSheets}
-                </div>
-              </div>
-              <div className="rounded-lg border border-slate-800 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Partículas e Auras</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-purple-300 tabular-nums">
-                  {offlineZip.stats.particleFiles}
-                </div>
-              </div>
-              <div className="rounded-lg border border-slate-800 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Vídeos MP4</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-cyan-300 tabular-nums">
-                  {offlineZip.stats.videosMp4}
-                </div>
-              </div>
-              <div className="rounded-lg border border-slate-800 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Áudios/Vozes MP3</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-emerald-300 tabular-nums">
-                  {offlineZip.stats.audiosMp3}
-                </div>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-800 bg-[#0B0F17] px-4 py-3">
-              <label className="inline-flex items-center gap-2.5 text-xs text-slate-200 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={offlineZip.strictOffline}
-                  onChange={(e) => setStrictOfflineMode(e.target.checked)}
-                  className="h-4 w-4 accent-emerald-500"
-                />
-                <span>
-                  <strong className="font-semibold text-slate-100">Modo 100% Offline Estrito:</strong>{' '}
-                  bloquear qualquer requisição ao servidor do jogo (usa somente o que estiver dentro dos arquivos ZIP carregados).
-                </span>
-              </label>
-              <span className="font-mono text-[11px] text-slate-400 tabular-nums">
-                Total indexado: {formatSize(offlineZip.stats.totalBytes)}
-              </span>
-            </div>
-
-            {!offlineZip.hasCatalog && (
-              <div className="rounded-lg border border-amber-500/40 bg-amber-950/30 px-4 py-3 text-xs text-amber-200">
-                Você carregou uma parte complementar sem o módulo Base. Clique em <strong>Adicionar Mais Partes (.ZIP)</strong> e inclua o arquivo <code className="font-mono">01_shinobi_base_catalogo_esqueletos.zip</code> para listar o catálogo de ninjas.
-              </div>
-            )}
-
-            <div className="space-y-2">
-              <div className="text-xs font-semibold text-slate-300">Arquivos ZIP Montados</div>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {/* Mounted Archives Hairline List */}
+              <div className="divide-y divide-white/[0.05]">
                 {offlineZip.archives.map((arc) => (
                   <div
                     key={arc.id}
-                    className="flex items-start justify-between gap-2 rounded-lg border border-slate-800 bg-[#0B0F17] p-3"
+                    className="flex items-center justify-between gap-3 px-4 py-3 text-xs"
                   >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <Archive className="h-3.5 w-3.5 shrink-0 text-emerald-400" aria-hidden="true" />
-                        <span className="truncate font-mono text-xs font-semibold text-slate-100" title={arc.fileName}>
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Archive className="h-3.5 w-3.5 shrink-0 text-emerald-400" aria-hidden="true" />
+                      <div className="min-w-0">
+                        <div className="truncate font-mono text-slate-100" title={arc.fileName}>
                           {arc.fileName}
-                        </span>
-                      </div>
-                      {arc.label && (
-                        <div className="mt-0.5 truncate text-[11px] text-slate-400" title={arc.label}>
-                          {arc.label}
                         </div>
-                      )}
-                      <div className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums">
-                        {formatSize(arc.fileSize)} · {arc.entryCount.toLocaleString('pt-BR')} arquivos
-                        {arc.isStoreFastPath ? ' · Leitura instantânea' : ''}
+                        {arc.label && (
+                          <div className="truncate text-[11px] text-slate-500" title={arc.label}>
+                            {arc.label}
+                          </div>
+                        )}
                       </div>
                     </div>
-                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400 mt-0.5" aria-hidden="true" />
+                    <div className="flex items-center gap-3 shrink-0 font-mono text-[11px] text-slate-400 tabular-nums">
+                      <span>
+                        {formatSize(arc.fileSize)} · {arc.entryCount.toLocaleString('pt-BR')} arq.
+                      </span>
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                    </div>
                   </div>
                 ))}
               </div>
             </div>
-          </div>
-        )}
-      </section>
+          )}
+        </section>
+      )}
 
-      {/* SECTION 2: HIGH-SPEED RESUMABLE FULL / MODULAR / CUSTOM OFFLINE BACKUPS */}
-      <section className="rounded-lg border border-slate-800 bg-[#131A26] p-4 sm:p-6 space-y-5">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="font-display text-lg sm:text-xl font-bold text-slate-50">
-                Baixar Backup Completo para seu Android ou PC (.ZIP)
-              </h2>
-              <span className="inline-flex items-center gap-1 rounded bg-orange-950/80 border border-orange-500/30 px-2 py-0.5 text-[11px] font-semibold text-orange-300">
-                <Zap className="h-3 w-3" aria-hidden="true" />
-                <span>Alta Velocidade · Retomável</span>
-              </span>
-            </div>
-            <p className="text-xs sm:text-sm text-slate-400 max-w-3xl leading-relaxed">
-              Baixa até <strong>16 arquivos em paralelo</strong> com checkpoint contínuo no dispositivo (IndexedDB) e empacotamento <strong>ZIP64 STORE</strong> (qualidade máxima sem perdas e leitura instantânea). Se a internet cair ou você fechar a aba, basta clicar em <strong>Retomar de onde parou</strong>.
-            </p>
-          </div>
-
-          <button
-            type="button"
-            disabled={loadingPlan}
-            onClick={() => void fetchBackupPlan()}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#0B0F17] px-3 py-2 text-xs font-medium text-slate-200 hover:border-slate-500 disabled:opacity-50 cursor-pointer shrink-0"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${loadingPlan ? 'animate-spin' : ''}`} aria-hidden="true" />
-            <span>{loadingPlan ? 'Calculando...' : 'Atualizar Tamanhos'}</span>
-          </button>
-        </div>
-
-        {/* ACTIVE / PAUSED / COMPLETED RESUMABLE DOWNLOAD PANEL */}
-        {activeJob && (
-          <div className="rounded-lg border border-orange-500/40 bg-[#0B0F17] p-4 space-y-3">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0 space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-display text-sm font-semibold text-slate-100">
-                    {activeJob.label}
-                  </span>
-                  <span
-                    className={`rounded px-2 py-0.5 text-[11px] font-semibold ${
-                      activeJob.status === 'running' || activeJob.status === 'assembling'
-                        ? 'bg-orange-950 text-orange-300 border border-orange-500/40'
-                        : activeJob.status === 'completed'
-                        ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40'
-                        : activeJob.status === 'error'
-                        ? 'bg-red-950 text-red-300 border border-red-500/40'
-                        : 'bg-amber-950 text-amber-300 border border-amber-500/40'
-                    }`}
-                  >
-                    {activeJob.status === 'running'
-                      ? 'Baixando em paralelo'
-                      : activeJob.status === 'assembling'
-                      ? `Montando ZIP (${assemblePercent}%)`
-                      : activeJob.status === 'completed'
-                      ? 'Concluído'
-                      : activeJob.status === 'error'
-                      ? 'Interrompido — Progresso Salvo'
-                      : activeJob.pauseReason === 'network'
-                      ? 'Sem conexão — Retomará automaticamente'
-                      : 'Pausado — Progresso Salvo'}
-                  </span>
+      {/* VIEW 2: DOWNLOAD BACKUPS */}
+      {viewMode === 'download' && (
+        <section className="space-y-5">
+          {/* Collapsible Proxy / Connection Panel (Static Mode Only) */}
+          {staticMode && showConnectionPanel && (
+            <div
+              ref={workerPanelRef}
+              className="rounded-xl border border-white/[0.08] bg-[#11141C] p-4 space-y-3"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-xs font-semibold text-slate-100">
+                    Proxy para vídeos e áudios no navegador
+                  </h2>
+                  <p className="mt-0.5 text-[11px] text-slate-400">
+                    Opcional. Necessário apenas se o navegador bloquear o download direto de vídeos MP4 ou áudios MP3.
+                  </p>
                 </div>
-                <div className="font-mono text-[11px] text-slate-400 break-all">
-                  {activeJob.filename}
-                  {currentFile && activeJob.status === 'running' ? ` · ${currentFile}` : ''}
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowWorkerGuide((v) => !v)}
+                  className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:text-white cursor-pointer shrink-0"
+                >
+                  <span>Como configurar</span>
+                  {showWorkerGuide ? (
+                    <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                </button>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2 shrink-0">
-                {activeJob.status === 'running' && (
-                  <button
-                    type="button"
-                    onClick={() => runControllerRef.current?.pause()}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-950/60 px-3 py-1.5 text-xs font-semibold text-amber-200 hover:bg-amber-900/60 cursor-pointer"
-                  >
-                    <Pause className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Pausar</span>
-                  </button>
-                )}
-
-                {(activeJob.status === 'paused' || activeJob.status === 'error') && (
-                  <button
-                    type="button"
-                    onClick={() => launchJobExecution({ mode: 'resume', job: activeJob })}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 cursor-pointer"
-                  >
-                    <Play className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Retomar de onde parou</span>
-                  </button>
-                )}
-
-                {activeJob.status !== 'running' &&
-                  activeJob.status !== 'assembling' &&
-                  activeJob.failedPaths.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        launchJobExecution({
-                          mode: 'resume',
-                          job: activeJob,
-                          retryFailedOnly: true,
-                        })
-                      }
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-950/50 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-900/60 cursor-pointer"
-                    >
-                      <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Tentar Falhas ({activeJob.failedPaths.length})</span>
-                    </button>
-                  )}
-
-                {activeJob.status !== 'running' &&
-                  activeJob.status !== 'assembling' &&
-                  activeJob.completedPaths.length > 0 && (
-                    <button
-                      type="button"
-                      disabled={manualSaving}
-                      onClick={() => void handleManualSaveZipNow()}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/50 px-3 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/60 disabled:opacity-50 cursor-pointer"
-                    >
-                      <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>
-                        {manualSaving
-                          ? `Montando (${assemblePercent}%)...`
-                          : activeJob.status === 'completed'
-                          ? 'Baixar ZIP Novamente'
-                          : 'Salvar ZIP Parcial Agora'}
-                      </span>
-                    </button>
-                  )}
-
-                {activeJob.status !== 'running' && activeJob.status !== 'assembling' && (
-                  <button
-                    type="button"
-                    onClick={() => void handleDiscardActiveJob()}
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-[#131A26] px-2.5 py-1.5 text-xs text-slate-300 hover:border-red-500/60 hover:text-red-200 cursor-pointer"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Limpar</span>
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Progress bar */}
-            <div className="space-y-1.5">
-              <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-800">
-                <div
-                  className={`h-full transition-all duration-200 ${
-                    activeJob.status === 'completed'
-                      ? 'bg-emerald-500'
-                      : activeJob.status === 'assembling'
-                      ? 'bg-cyan-500'
-                      : 'bg-orange-500'
-                  }`}
-                  style={{
-                    width: `${
-                      activeJob.status === 'assembling' ? Math.max(5, assemblePercent) : jobProgressPct
-                    }%`,
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="url"
+                  value={corsProxyInput}
+                  onChange={(e) => {
+                    setCorsProxyInput(e.target.value);
+                    setProxyTestResult(null);
                   }}
+                  placeholder="https://meu-proxy.workers.dev"
+                  className="flex-1 min-w-[220px] rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-sm sm:text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500/60 focus:outline-none"
                 />
+                <button
+                  type="button"
+                  disabled={proxyTesting}
+                  onClick={() => void handleSaveAndTestCorsProxy()}
+                  className="rounded-lg bg-orange-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50 cursor-pointer shrink-0"
+                >
+                  {proxyTesting
+                    ? 'Testando...'
+                    : corsProxyInput.trim()
+                    ? 'Testar e salvar'
+                    : 'Limpar proxy'}
+                </button>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] text-slate-300 tabular-nums">
-                <span>
-                  {activeJob.completedPaths.length.toLocaleString('pt-BR')} /{' '}
-                  {activeJob.files.length.toLocaleString('pt-BR')} arquivos ({jobProgressPct}%)
-                  {' · '}
-                  {formatSize(activeJob.downloadedBytes)}
-                  {activeJob.totalEstimatedBytes > 0
-                    ? ` / ${formatSize(activeJob.totalEstimatedBytes)}`
-                    : ''}
-                </span>
-                <span>
-                  {activeJob.status === 'running'
-                    ? `${formatSpeed(speedBytesPerSec)} · Restante: ${formatEta(etaSeconds)}`
-                    : activeJob.failedPaths.length > 0
-                    ? `${activeJob.failedPaths.length} falhas`
-                    : ''}
-                </span>
-              </div>
+              {proxyTestResult && (
+                <div
+                  className={`rounded-lg border px-3 py-2 text-xs ${
+                    proxyTestResult.ok
+                      ? 'border-emerald-500/30 bg-emerald-950/30 text-emerald-200'
+                      : 'border-amber-500/30 bg-amber-950/30 text-amber-200'
+                  }`}
+                >
+                  {proxyTestResult.message}
+                </div>
+              )}
+
+              {showWorkerGuide && (
+                <div className="border-t border-white/[0.06] pt-3 space-y-2.5 text-xs text-slate-300">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium text-slate-200">
+                      Passo a passo (Cloudflare Workers gratuito)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyWorkerCode()}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1 text-xs font-medium text-slate-200 hover:border-white/25 cursor-pointer"
+                    >
+                      {copiedWorkerCode ? (
+                        <>
+                          <Check className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                          <span>Copiado</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Copiar código</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  <ol className="list-decimal list-inside space-y-1 text-[11px] text-slate-400 leading-relaxed">
+                    <li>
+                      Acesse <span className="font-mono text-slate-200">dash.cloudflare.com</span> → Workers &amp; Pages → Create Worker → Deploy.
+                    </li>
+                    <li>
+                      Clique em Edit code, cole o código copiado e clique em Deploy.
+                    </li>
+                    <li>
+                      Cole a URL gerada no campo acima e clique em Testar e salvar.
+                    </li>
+                  </ol>
+                  <pre className="max-h-40 overflow-auto rounded-lg border border-white/[0.07] bg-[#090B10] p-2.5 font-mono text-[11px] text-slate-300 leading-relaxed">
+                    {CLOUDFLARE_WORKER_PROXY_CODE}
+                  </pre>
+                </div>
+              )}
             </div>
+          )}
 
-            {activeJob.statusMessage && (
-              <p className="text-xs text-slate-300 leading-relaxed">{activeJob.statusMessage}</p>
-            )}
-
-            {activeJob.status === 'paused' && activeJob.pauseReason === 'cors' && (
-              <div className="rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-3 space-y-2.5">
-                <div className="text-xs font-semibold text-cyan-200">
-                  Baixar agora em velocidade máxima (2 opções):
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleExportDirectForActiveJob('ps1')}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/60 px-3 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/60 cursor-pointer"
-                  >
-                    <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Sem Proxy: Script Windows (.ps1 → gera o ZIP)</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleExportDirectForActiveJob('sh')}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/60 px-3 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/60 cursor-pointer"
-                  >
-                    <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Sem Proxy: Android Termux / Linux (.sh)</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleExportDirectForActiveJob('txt')}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#131A26] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-cyan-500/60 cursor-pointer"
-                  >
-                    <FileText className="h-3.5 w-3.5 text-cyan-400" aria-hidden="true" />
-                    <span>Links Diretos 1DM/ADM (.txt)</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleOpenWorkerGuide}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-orange-500/40 bg-orange-950/50 px-3 py-1.5 text-xs font-semibold text-orange-200 hover:bg-orange-900/60 cursor-pointer"
-                  >
-                    <Zap className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Criar Proxy Gratuito (1 min) p/ Baixar no Chrome</span>
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Static mode GitHub Pages direct download & optional free Cloudflare Worker proxy */}
-        {staticMode && (
-          <div
-            ref={workerPanelRef}
-            className="rounded-lg border border-slate-800 bg-[#0B0F17] p-3.5 space-y-3"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div className="flex items-start gap-2 text-xs text-slate-300 flex-1 min-w-[240px]">
-                <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" aria-hidden="true" />
-                <div className="space-y-1">
-                  <p>
-                    <strong className="text-slate-100">GitHub Pages pronto para download:</strong>{' '}
-                    Base, Sprites, Partículas e Seleção Personalizada baixam direto em alta velocidade com pausa e retomada automática.
-                  </p>
-                  <p className="text-slate-400">
-                    Para <strong>Vídeos MP4</strong> e <strong>Áudios MP3</strong>: o app tenta relays públicos automaticamente, ou você pode baixar <strong>sem proxy</strong> usando os botões <strong>Script Direto / Links 1DM</strong> nos cartões abaixo — ou ativar um <strong>Cloudflare Worker gratuito</strong> (1 min) para baixar o <code className="font-mono text-slate-200">.ZIP</code> direto no navegador sem limite.
-                  </p>
-                </div>
-              </div>
+          {/* Mode Switcher */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="inline-flex items-center rounded-lg border border-white/[0.07] bg-[#11141C] p-1">
               <button
                 type="button"
-                onClick={() => setShowWorkerGuide((v) => !v)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#131A26] px-3 py-1.5 text-xs font-medium text-cyan-300 hover:border-cyan-500/60 cursor-pointer shrink-0"
-              >
-                <span>Como criar Proxy Grátis (1 min)</span>
-                {showWorkerGuide ? (
-                  <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
-                ) : (
-                  <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
-                )}
-              </button>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <input
-                type="url"
-                value={corsProxyInput}
-                onChange={(e) => {
-                  setCorsProxyInput(e.target.value);
-                  setProxyTestResult(null);
-                }}
-                placeholder="URL do seu Cloudflare Worker (ex: https://meu-proxy.workers.dev)"
-                className="flex-1 min-w-[220px] rounded-lg border border-slate-800 bg-[#131A26] px-3 py-1.5 text-base sm:text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
-              />
-              <button
-                type="button"
-                disabled={proxyTesting}
-                onClick={() => void handleSaveAndTestCorsProxy()}
-                className="rounded-lg border border-slate-700 bg-[#131A26] px-3 py-1.5 text-xs font-semibold text-slate-100 hover:border-orange-500 disabled:opacity-50 cursor-pointer shrink-0"
-              >
-                {proxyTesting
-                  ? 'Testando...'
-                  : corsProxyInput.trim()
-                  ? 'Testar e Salvar Proxy'
-                  : 'Limpar Proxy'}
-              </button>
-            </div>
-
-            {proxyTestResult && (
-              <div
-                className={`rounded-lg border px-3 py-2 text-xs ${
-                  proxyTestResult.ok
-                    ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
-                    : 'border-amber-500/40 bg-amber-950/30 text-amber-200'
+                onClick={() => setDownloadTab('presets')}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                  downloadTab === 'presets'
+                    ? 'bg-orange-600 text-white'
+                    : 'text-slate-400 hover:text-slate-100'
                 }`}
               >
-                {proxyTestResult.message}
-              </div>
-            )}
+                Arquivo único
+              </button>
+              <button
+                type="button"
+                onClick={() => setDownloadTab('modular')}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                  downloadTab === 'modular'
+                    ? 'bg-orange-600 text-white'
+                    : 'text-slate-400 hover:text-slate-100'
+                }`}
+              >
+                Particionado
+              </button>
+              <button
+                type="button"
+                onClick={() => setDownloadTab('custom')}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer tabular-nums ${
+                  downloadTab === 'custom'
+                    ? 'bg-orange-600 text-white'
+                    : 'text-slate-400 hover:text-slate-100'
+                }`}
+              >
+                Personalizado{selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}
+              </button>
+            </div>
 
-            {showWorkerGuide && (
-              <div className="rounded-lg border border-slate-800 bg-[#131A26] p-3.5 space-y-3 text-xs text-slate-300">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <strong className="text-slate-100">
-                    Passo a passo (100% gratuito — 100.000 arquivos/dia no Cloudflare Workers):
-                  </strong>
-                  <button
-                    type="button"
-                    onClick={() => void handleCopyWorkerCode()}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-500 cursor-pointer"
-                  >
-                    {copiedWorkerCode ? (
-                      <>
-                        <Check className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Código Copiado!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Copiar Código do Worker</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-                <ol className="list-decimal list-inside space-y-1 text-slate-300 leading-relaxed">
-                  <li>
-                    Acesse <code className="font-mono text-cyan-300">dash.cloudflare.com</code> (conta gratuita) → <strong>Workers &amp; Pages</strong> → <strong>Create Worker</strong> → <strong>Deploy</strong>.
-                  </li>
-                  <li>
-                    Clique em <strong>Edit code</strong>, apague o texto padrão, cole o código copiado acima e clique em <strong>Deploy</strong>.
-                  </li>
-                  <li>
-                    Copie o endereço gerado (ex: <code className="font-mono text-slate-200">https://shinobi-proxy.seu-nome.workers.dev</code>), cole no campo acima e clique em <strong>Testar e Salvar Proxy</strong>.
-                  </li>
-                  <li>
-                    Pronto! Todos os <strong>Vídeos MP4</strong> e <strong>Áudios MP3</strong> baixam em velocidade máxima direto pelo navegador (inclusive no Android Chrome).
-                  </li>
-                </ol>
-                <pre className="max-h-44 overflow-auto rounded-lg border border-slate-800 bg-[#0B0F17] p-2.5 font-mono text-[11px] text-slate-300 leading-relaxed">
-                  {CLOUDFLARE_WORKER_PROXY_CODE}
-                </pre>
-              </div>
+            {plan && (
+              <span className="font-mono text-xs text-slate-500 tabular-nums">
+                Acervo completo · {formatSize(plan.completeEstimatedBytes)} ·{' '}
+                {plan.completeFileCount.toLocaleString('pt-BR')} arquivos
+              </span>
             )}
           </div>
-        )}
 
-        {/* Mode Tabs */}
-        <div className="flex flex-wrap items-center gap-1 rounded-lg border border-slate-800 bg-[#0B0F17] p-1 w-fit">
-          <button
-            type="button"
-            onClick={() => setDownloadTab('modular')}
-            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
-              downloadTab === 'modular'
-                ? 'bg-orange-600 text-white'
-                : 'text-slate-400 hover:text-slate-100'
-            }`}
-          >
-            Modular / Particionado (Recomendado)
-          </button>
-          <button
-            type="button"
-            onClick={() => setDownloadTab('presets')}
-            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
-              downloadTab === 'presets'
-                ? 'bg-orange-600 text-white'
-                : 'text-slate-400 hover:text-slate-100'
-            }`}
-          >
-            Arquivo Único (MP4 / Tudo)
-          </button>
-          <button
-            type="button"
-            onClick={() => setDownloadTab('custom')}
-            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
-              downloadTab === 'custom'
-                ? 'bg-orange-600 text-white'
-                : 'text-slate-400 hover:text-slate-100'
-            }`}
-          >
-            Escolher Ninjas ({selectedIds.size})
-          </button>
-        </div>
+          {planError && (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-950/25 px-4 py-3 text-xs text-amber-200"
+            >
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
+              <span>{planError}</span>
+            </div>
+          )}
 
-        {planError && (
-          <div
-            role="alert"
-            className="flex items-start gap-2 rounded-lg border border-amber-800/60 bg-amber-950/30 px-4 py-3 text-xs text-amber-200"
-          >
-            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
-            <span>{planError}</span>
-          </div>
-        )}
-
-        {/* TAB 1: MODULAR ANDROID BACKUP */}
-        {downloadTab === 'modular' && (
-          <div className="space-y-4">
-            {loadingPlan && !plan ? (
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                {[0, 1, 2, 3].map((i) => (
-                  <div
-                    key={i}
-                    className="h-28 animate-pulse rounded-lg border border-slate-800 bg-[#0B0F17]"
-                  />
-                ))}
-              </div>
-            ) : plan ? (
-              <>
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-[#0B0F17] px-4 py-3 text-xs text-slate-300">
-                  <div className="flex items-center gap-2">
-                    <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" aria-hidden="true" />
-                    <span>
-                      Dividido em partes seguras (~150–300 MB) para baixar rápido e sem travar no celular. Cada parte salva o progresso automaticamente e retoma de onde parou se cair a rede.
-                    </span>
-                  </div>
-                  <span className="font-mono text-slate-400 tabular-nums shrink-0">
-                    Total completo: {formatSize(plan.completeEstimatedBytes)} ({plan.completeFileCount.toLocaleString('pt-BR')} arquivos)
-                  </span>
+          {/* SUB-TAB 1: MODULAR / PARTITIONED */}
+          {downloadTab === 'modular' && (
+            <div className="space-y-5">
+              {loadingPlan && !plan ? (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {[0, 1, 2, 3].map((i) => (
+                    <div
+                      key={i}
+                      className="h-28 animate-pulse rounded-xl border border-white/[0.06] bg-[#11141C]"
+                    />
+                  ))}
                 </div>
-
-                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                  {recommendedModules.map((mod) => {
-                    const isDone = downloadedIds.has(mod.id);
-                    const isThisPaused =
-                      activeJob?.moduleId === mod.id &&
-                      (activeJob.status === 'paused' || activeJob.status === 'error');
-                    const isThisRunning = activeJob?.moduleId === mod.id && isJobRunning;
-                    const showDirectNoProxyActions =
-                      staticMode && mod.requiresCorsProxyInStatic && !corsProxySaved;
-                    const icon =
-                      mod.module === 'videos' ? (
-                        <Clapperboard className="h-4 w-4 text-cyan-400 shrink-0" aria-hidden="true" />
-                      ) : mod.module === 'audios' ? (
-                        <Music className="h-4 w-4 text-emerald-400 shrink-0" aria-hidden="true" />
-                      ) : mod.module === 'particles' ? (
-                        <Sparkles className="h-4 w-4 text-purple-400 shrink-0" aria-hidden="true" />
-                      ) : mod.module === 'sprites' ? (
-                        <Layers className="h-4 w-4 text-orange-400 shrink-0" aria-hidden="true" />
-                      ) : (
-                        <HardDrive className="h-4 w-4 text-amber-400 shrink-0" aria-hidden="true" />
-                      );
-                    return (
-                      <div
-                        key={mod.id}
-                        className="flex flex-col justify-between gap-3 rounded-lg border border-slate-800 bg-[#0B0F17] p-4"
-                      >
-                        <div className="space-y-2">
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="flex items-center gap-2 min-w-0">
-                              {icon}
-                              <h3 className="font-display text-sm font-semibold text-slate-100">
-                                {mod.label}
-                              </h3>
-                            </div>
-                            <span className="rounded bg-slate-800 px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-200 tabular-nums shrink-0">
-                              {formatSize(mod.estimatedBytes)}
-                            </span>
-                          </div>
-                          <p className="text-xs text-slate-400 leading-relaxed">{mod.description}</p>
-                          {showDirectNoProxyActions && (
-                            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                              <span className="text-[11px] text-slate-400 mr-0.5">
-                                Sem proxy (direto):
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => void handleExportDirectForModule(mod, 'ps1')}
-                                title="Baixa script PowerShell para Windows que baixa tudo direto sem CORS e gera o .ZIP pronto"
-                                className="inline-flex items-center gap-1 rounded border border-slate-700 bg-[#131A26] px-2 py-0.5 text-[11px] font-medium text-emerald-300 hover:border-emerald-500/60 cursor-pointer"
-                              >
-                                <Terminal className="h-3 w-3" aria-hidden="true" />
-                                <span>PC .ps1</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void handleExportDirectForModule(mod, 'sh')}
-                                title="Baixa script Bash para Android Termux, Linux ou Mac que baixa tudo direto e gera o .ZIP"
-                                className="inline-flex items-center gap-1 rounded border border-slate-700 bg-[#131A26] px-2 py-0.5 text-[11px] font-medium text-cyan-300 hover:border-cyan-500/60 cursor-pointer"
-                              >
-                                <Terminal className="h-3 w-3" aria-hidden="true" />
-                                <span>Termux/Linux .sh</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void handleExportDirectForModule(mod, 'txt')}
-                                title="Exporta lista de URLs diretas compatível com 1DM, ADM e IDM"
-                                className="inline-flex items-center gap-1 rounded border border-slate-700 bg-[#131A26] px-2 py-0.5 text-[11px] font-medium text-slate-200 hover:border-slate-500 cursor-pointer"
-                              >
-                                <FileText className="h-3 w-3" aria-hidden="true" />
-                                <span>Links 1DM .txt</span>
-                              </button>
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/70 pt-3">
-                          <span className="truncate font-mono text-[11px] text-slate-500 tabular-nums">
-                            {mod.filename} · {mod.fileCount.toLocaleString('pt-BR')} arq.
-                          </span>
-                          <div className="flex items-center gap-2 shrink-0">
-                            {plan.planSource === 'server' && (
-                              <button
-                                type="button"
-                                onClick={() => handleDirectServerModuleDownload(mod)}
-                                title="Stream direto pelo servidor local"
-                                className="rounded-lg border border-slate-700 bg-[#131A26] px-2.5 py-1.5 text-[11px] font-medium text-slate-300 hover:border-slate-500 cursor-pointer"
-                              >
-                                Stream
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              disabled={isJobRunning && !isThisRunning}
-                              onClick={() => void handleModuleDownload(mod)}
-                              className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-45 cursor-pointer shrink-0 ${
-                                isThisPaused
-                                  ? 'bg-amber-600 text-white hover:bg-amber-500'
-                                  : isDone
-                                  ? 'border border-emerald-500/40 bg-emerald-950/60 text-emerald-200 hover:bg-emerald-950'
-                                  : 'bg-orange-600 text-white hover:bg-orange-500'
-                              }`}
-                            >
-                              {isThisPaused ? (
-                                <Play className="h-3.5 w-3.5" aria-hidden="true" />
-                              ) : isDone ? (
-                                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                              ) : (
-                                <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                              )}
-                              <span>
-                                {isThisRunning
-                                  ? 'Baixando...'
-                                  : isThisPaused
-                                  ? 'Retomar Parte'
-                                  : isDone
-                                  ? 'Baixar Novamente'
-                                  : 'Baixar Parte (.ZIP)'}
-                              </span>
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {optionalModules.length > 0 && (
-                  <div className="space-y-2.5 pt-2">
-                    <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                      Módulos Opcionais (Aba Outros Ativos)
-                    </div>
-                    <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                      {optionalModules.map((mod) => {
-                        const isDone = downloadedIds.has(mod.id);
-                        const isThisPaused =
-                          activeJob?.moduleId === mod.id &&
-                          (activeJob.status === 'paused' || activeJob.status === 'error');
-                        return (
-                          <div
-                            key={mod.id}
-                            className="flex flex-col justify-between gap-3 rounded-lg border border-slate-800/80 bg-[#0B0F17]/70 p-4"
-                          >
-                            <div className="space-y-1">
-                              <div className="flex items-start justify-between gap-2">
-                                <h3 className="font-display text-sm font-semibold text-slate-200">
+              ) : plan ? (
+                <>
+                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                    {recommendedModules.map((mod) => {
+                      const isDone = downloadedIds.has(mod.id);
+                      const isThisPaused =
+                        activeJob?.moduleId === mod.id &&
+                        (activeJob.status === 'paused' || activeJob.status === 'error');
+                      const isThisRunning = activeJob?.moduleId === mod.id && isJobRunning;
+                      const showDirectNoProxyActions =
+                        staticMode && mod.requiresCorsProxyInStatic && !corsProxySaved;
+                      const icon =
+                        mod.module === 'videos' ? (
+                          <Clapperboard className="h-4 w-4 text-slate-400 shrink-0" aria-hidden="true" />
+                        ) : mod.module === 'audios' ? (
+                          <Music className="h-4 w-4 text-slate-400 shrink-0" aria-hidden="true" />
+                        ) : mod.module === 'particles' ? (
+                          <Sparkles className="h-4 w-4 text-slate-400 shrink-0" aria-hidden="true" />
+                        ) : mod.module === 'sprites' ? (
+                          <Layers className="h-4 w-4 text-slate-400 shrink-0" aria-hidden="true" />
+                        ) : (
+                          <HardDrive className="h-4 w-4 text-slate-400 shrink-0" aria-hidden="true" />
+                        );
+                      return (
+                        <div
+                          key={mod.id}
+                          className="flex flex-col justify-between gap-3 rounded-xl border border-white/[0.07] bg-[#11141C] p-4"
+                        >
+                          <div className="space-y-1.5">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex items-center gap-2 min-w-0">
+                                {icon}
+                                <h3 className="font-display text-sm font-semibold text-slate-100 truncate">
                                   {mod.label}
                                 </h3>
-                                <span className="rounded bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-slate-300 tabular-nums shrink-0">
-                                  {formatSize(mod.estimatedBytes)}
-                                </span>
                               </div>
-                              <p className="text-xs text-slate-500">{mod.description}</p>
-                            </div>
-                            <div className="flex items-center justify-between gap-2 border-t border-slate-800/60 pt-2.5">
-                              <span className="truncate font-mono text-[11px] text-slate-500">
-                                {mod.fileCount.toLocaleString('pt-BR')} arquivos
+                              <span className="font-mono text-xs text-slate-300 tabular-nums shrink-0">
+                                {formatSize(mod.estimatedBytes)}
                               </span>
+                            </div>
+                            <p className="text-xs text-slate-400 leading-relaxed">
+                              {mod.description}
+                            </p>
+                            {showDirectNoProxyActions && (
+                              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                                <span className="text-[11px] text-slate-500">Direto (sem CORS):</span>
+                                <button
+                                  type="button"
+                                  disabled={Boolean(exportingDirectKey)}
+                                  onClick={() => void handleExportDirectForModule(mod, 'sh')}
+                                  className="rounded border border-orange-500/35 bg-orange-500/10 px-2 py-0.5 text-[11px] font-medium text-orange-300 hover:bg-orange-500/20 disabled:opacity-40 cursor-pointer"
+                                >
+                                  Android .sh
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={Boolean(exportingDirectKey)}
+                                  onClick={() => void handleExportDirectForModule(mod, 'ps1')}
+                                  className="rounded border border-white/10 bg-[#090B10] px-2 py-0.5 text-[11px] text-slate-300 hover:border-white/25 hover:text-white disabled:opacity-40 cursor-pointer"
+                                >
+                                  Windows .ps1
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={Boolean(exportingDirectKey)}
+                                  onClick={() => void handleExportDirectForModule(mod, 'txt')}
+                                  className="rounded border border-white/10 bg-[#090B10] px-2 py-0.5 text-[11px] text-slate-300 hover:border-white/25 hover:text-white disabled:opacity-40 cursor-pointer"
+                                >
+                                  Links .txt
+                                </button>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] pt-3">
+                            <span className="truncate font-mono text-[11px] text-slate-500 tabular-nums">
+                              {mod.fileCount.toLocaleString('pt-BR')} arquivos
+                            </span>
+                            <div className="flex items-center gap-2 shrink-0">
+                              {plan.planSource === 'server' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleDirectServerModuleDownload(mod)}
+                                  title="Download direto pelo servidor"
+                                  className="rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 text-[11px] font-medium text-slate-300 hover:border-white/25 cursor-pointer"
+                                >
+                                  Direto
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                disabled={isJobRunning && !isThisRunning}
+                                onClick={() => void handleModuleDownload(mod)}
+                                className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-40 cursor-pointer shrink-0 ${
+                                  isThisPaused
+                                    ? 'bg-amber-600 text-white hover:bg-amber-500'
+                                    : isDone
+                                    ? 'border border-emerald-500/35 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
+                                    : 'bg-orange-600 text-white hover:bg-orange-500'
+                                }`}
+                              >
+                                {isThisPaused ? (
+                                  <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                                ) : isDone ? (
+                                  <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                                ) : (
+                                  <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                                )}
+                                <span>
+                                  {isThisRunning
+                                    ? 'Baixando...'
+                                    : isThisPaused
+                                    ? 'Retomar'
+                                    : isDone
+                                    ? 'Baixar novamente'
+                                    : 'Baixar'}
+                                </span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {optionalModules.length > 0 && (
+                    <div className="rounded-xl border border-white/[0.07] bg-[#11141C] overflow-hidden">
+                      <div className="border-b border-white/[0.06] px-4 py-2.5 text-xs font-medium text-slate-400">
+                        Pacotes opcionais
+                      </div>
+                      <div className="divide-y divide-white/[0.05]">
+                        {optionalModules.map((mod) => {
+                          const isDone = downloadedIds.has(mod.id);
+                          const isThisPaused =
+                            activeJob?.moduleId === mod.id &&
+                            (activeJob.status === 'paused' || activeJob.status === 'error');
+                          return (
+                            <div
+                              key={mod.id}
+                              className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
+                            >
+                              <div className="min-w-0">
+                                <div className="text-xs font-medium text-slate-200">{mod.label}</div>
+                                <div className="mt-0.5 text-[11px] text-slate-500 tabular-nums">
+                                  {formatSize(mod.estimatedBytes)} ·{' '}
+                                  {mod.fileCount.toLocaleString('pt-BR')} arquivos
+                                </div>
+                              </div>
                               <button
                                 type="button"
                                 disabled={isJobRunning}
                                 onClick={() => void handleModuleDownload(mod)}
-                                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#131A26] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-orange-500/60 disabled:opacity-45 cursor-pointer shrink-0"
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-white/25 disabled:opacity-40 cursor-pointer shrink-0"
                               >
                                 <Download className="h-3.5 w-3.5" aria-hidden="true" />
                                 <span>
                                   {isThisPaused
                                     ? 'Retomar'
                                     : isDone
-                                    ? 'Baixar Novamente'
-                                    : 'Baixar Opcional'}
+                                    ? 'Baixar novamente'
+                                    : 'Baixar'}
                                 </span>
                               </button>
                             </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </div>
+          )}
+
+          {/* SUB-TAB 2: SINGLE-FILE PRESETS */}
+          {downloadTab === 'presets' && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {/* COMPLETE SINGLE-ZIP BACKUP (100% OF EVERYTHING) */}
+                <div className="flex flex-col justify-between gap-4 rounded-xl border border-orange-500/25 bg-[#11141C] p-5">
+                  <div className="space-y-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <HardDrive className="h-4 w-4 text-orange-400 shrink-0" aria-hidden="true" />
+                        <h3 className="font-display text-base font-semibold text-slate-100">
+                          Backup completo — 100% tudo
+                        </h3>
+                      </div>
+                      <span className="font-mono text-xs text-slate-300 tabular-nums shrink-0">
+                        {plan ? formatSize(plan.completeEstimatedBytes) : '...'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      Um único arquivo <span className="font-mono text-slate-300">.zip</span> com
+                      todo o acervo: catálogo, sprites, partículas, ícones de skills, ativos/emojis,
+                      vídeos MP4, áudios MP3 e dados de combate/perseguição.
+                    </p>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={loadingPlan || Boolean(exportingDirectKey)}
+                        onClick={() =>
+                          void handleExportDirectForPreset(
+                            'complete',
+                            'shinobi_backup_completo_tudo.zip',
+                            'sh'
+                          )
+                        }
+                        className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors cursor-pointer"
+                      >
+                        <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>
+                          {exportingDirectKey === 'complete-sh'
+                            ? 'Preparando script...'
+                            : 'Android — 1 ZIP (.sh)'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={loadingPlan || preparingCustom || isJobRunning}
+                        onClick={() =>
+                          void handlePresetDownload('complete', 'shinobi_backup_completo_tudo.zip')
+                        }
+                        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3.5 py-2.5 text-xs font-medium text-slate-200 hover:border-white/25 hover:text-white disabled:opacity-40 transition-colors cursor-pointer"
+                      >
+                        <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>
+                          {activeJob?.moduleId === 'complete' && activeJob.status === 'paused'
+                            ? 'Retomar'
+                            : 'Navegador'}
+                        </span>
+                      </button>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] pt-3">
+                      <span className="font-mono text-[11px] text-slate-500 tabular-nums">
+                        {plan ? `${plan.completeFileCount.toLocaleString('pt-BR')} arquivos` : '...'}
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={loadingPlan || Boolean(exportingDirectKey)}
+                          onClick={() =>
+                            void handleExportDirectForPreset(
+                              'complete',
+                              'shinobi_backup_completo_tudo.zip',
+                              'ps1'
+                            )
+                          }
+                          className="rounded border border-white/10 bg-[#090B10] px-2.5 py-1 text-[11px] font-medium text-slate-300 hover:border-white/25 hover:text-white disabled:opacity-40 cursor-pointer"
+                        >
+                          {exportingDirectKey === 'complete-ps1' ? 'Gerando...' : 'Windows .ps1'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={loadingPlan || Boolean(exportingDirectKey)}
+                          onClick={() =>
+                            void handleExportDirectForPreset(
+                              'complete',
+                              'shinobi_backup_completo_tudo.zip',
+                              'txt'
+                            )
+                          }
+                          className="rounded border border-white/10 bg-[#090B10] px-2.5 py-1 text-[11px] font-medium text-slate-300 hover:border-white/25 hover:text-white disabled:opacity-40 cursor-pointer"
+                        >
+                          Links 1DM .txt
+                        </button>
+                        {plan?.planSource === 'server' && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleDirectServerPresetDownload(
+                                'complete',
+                                'shinobi_backup_completo_tudo.zip'
+                              )
+                            }
+                            className="rounded border border-white/10 bg-[#090B10] px-2.5 py-1 text-[11px] font-medium text-slate-300 hover:border-white/25 hover:text-white cursor-pointer"
+                          >
+                            Servidor direto
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
-                )}
-              </>
-            ) : null}
-          </div>
-        )}
-
-        {/* TAB 2: ONE-CLICK SINGLE-FILE PRESETS */}
-        {downloadTab === 'presets' && (
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <div className="flex flex-col justify-between gap-4 rounded-lg border border-cyan-500/30 bg-[#0B0F17] p-5">
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Clapperboard className="h-5 w-5 text-cyan-400" aria-hidden="true" />
-                  <h3 className="font-display text-base font-semibold text-slate-100">
-                    Todos os {plan?.mp4NinjaCount || 139} Ninjas com Vídeo MP4 (1 ZIP Autocontido)
-                  </h3>
                 </div>
-                <p className="text-xs text-slate-400 leading-relaxed">
-                  Gera um único arquivo <code className="font-mono text-slate-200">.zip</code> pronto para rodar 100% offline com todos os personagens que possuem vídeo de ultimate/apresentação — incluindo catálogo, esqueletos, folhas de sprites em qualidade máxima, partículas <code className="font-mono text-slate-200">noe_*</code>, auras Susano’o e mídias (com pausa e retomada automática).
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={loadingPlan || preparingCustom || isJobRunning}
-                  onClick={() =>
-                    void handlePresetDownload(
-                      'mp4_ninjas',
-                      `shinobi_backup_${plan?.mp4NinjaCount || 139}_ninjas_com_mp4.zip`
-                    )
-                  }
-                  className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-cyan-500 disabled:opacity-45 transition-colors cursor-pointer"
-                >
-                  <Download className="h-4 w-4" aria-hidden="true" />
-                  <span>
-                    {activeJob?.moduleId === 'mp4_ninjas' && activeJob.status === 'paused'
-                      ? `Retomar Pacote dos ${plan?.mp4NinjaCount || 139} Ninjas (.ZIP)`
-                      : `Baixar Pacote dos ${plan?.mp4NinjaCount || 139} Ninjas (.ZIP)`}
-                  </span>
-                </button>
-                {plan?.planSource === 'server' && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleDirectServerPresetDownload(
-                        'mp4_ninjas',
-                        `shinobi_backup_${plan?.mp4NinjaCount || 139}_ninjas_com_mp4.zip`
-                      )
-                    }
-                    className="rounded-lg border border-slate-700 bg-[#131A26] px-3 py-2.5 text-xs font-medium text-slate-200 hover:border-slate-500 cursor-pointer"
-                  >
-                    Stream Servidor
-                  </button>
-                )}
-              </div>
-            </div>
 
-            <div className="flex flex-col justify-between gap-4 rounded-lg border border-slate-800 bg-[#0B0F17] p-5">
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <HardDrive className="h-5 w-5 text-orange-400" aria-hidden="true" />
-                  <h3 className="font-display text-base font-semibold text-slate-100">
-                    Backup Único Completo — Tudo em 1 Arquivo (ZIP64)
-                  </h3>
-                </div>
-                <p className="text-xs text-slate-400 leading-relaxed">
-                  Junta Base + Partículas + todas as Folhas de Sprites + Vídeos/Áudios ({plan ? formatSize(plan.completeEstimatedBytes) : '~7 GB'}) em um único arquivo ZIP64 com checkpoint retomável. No PC usa gravação direta em disco; no celular recomendamos a aba <strong>Modular / Particionado</strong> para não estourar o limite de arquivo único do navegador mobile.
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={loadingPlan || preparingCustom || isJobRunning}
-                  onClick={() =>
-                    void handlePresetDownload('complete', 'shinobi_backup_completo_tudo.zip')
-                  }
-                  className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-45 transition-colors cursor-pointer"
-                >
-                  <Download className="h-4 w-4" aria-hidden="true" />
-                  <span>
-                    {activeJob?.moduleId === 'complete' && activeJob.status === 'paused'
-                      ? `Retomar Tudo em 1 ZIP (${plan ? formatSize(plan.completeEstimatedBytes) : ''})`
-                      : `Baixar Tudo em 1 ZIP (${plan ? formatSize(plan.completeEstimatedBytes) : '...'})`}
-                  </span>
-                </button>
-                {plan?.planSource === 'server' && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleDirectServerPresetDownload('complete', 'shinobi_backup_completo_tudo.zip')
-                    }
-                    className="rounded-lg border border-slate-700 bg-[#131A26] px-3 py-2.5 text-xs font-medium text-slate-200 hover:border-slate-500 cursor-pointer"
-                  >
-                    Stream Servidor
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
+                {/* MP4 NINJAS SINGLE-ZIP PRESET */}
+                <div className="flex flex-col justify-between gap-4 rounded-xl border border-white/[0.07] bg-[#11141C] p-5">
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Clapperboard className="h-4 w-4 text-orange-400 shrink-0" aria-hidden="true" />
+                      <h3 className="font-display text-base font-semibold text-slate-100">
+                        Ninjas com vídeo ({plan?.mp4NinjaCount || 139})
+                      </h3>
+                    </div>
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      Um único arquivo <span className="font-mono text-slate-300">.zip</span> com
+                      todos os personagens que possuem vídeo, incluindo sprites, partículas, ícones
+                      de skills, auras, combate e áudios.
+                    </p>
+                  </div>
 
-        {/* TAB 3: CUSTOM SELECTION STANDALONE BACKUP */}
-        {downloadTab === 'custom' && (
-          <div className="space-y-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="relative flex-1 max-w-md">
-                <Search
-                  className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
-                  aria-hidden="true"
-                />
-                <input
-                  type="search"
-                  value={customSearch}
-                  onChange={(e) => setCustomSearch(e.target.value)}
-                  placeholder="Buscar ninja (ex: Sasuke, Naruto, Itachi, Pain, Madara)..."
-                  className="w-full rounded-lg border border-slate-800 bg-[#0B0F17] py-2 pl-9 pr-3 text-xs sm:text-sm text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
-                />
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setSelectedIds(new Set(ninjas.filter((n) => n.hasVideo).map((n) => n.id)))
-                  }
-                  className="rounded-lg border border-cyan-500/40 bg-cyan-950/40 px-3 py-1.5 text-xs font-medium text-cyan-200 hover:bg-cyan-950/70 cursor-pointer"
-                >
-                  Selecionar Com MP4 ({ninjas.filter((n) => n.hasVideo).length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSelectedIds(new Set())}
-                  className="rounded-lg border border-slate-700 bg-[#0B0F17] px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-500 cursor-pointer"
-                >
-                  Limpar ({selectedIds.size})
-                </button>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-4 rounded-lg border border-slate-800 bg-[#0B0F17] px-4 py-2.5 text-xs text-slate-300">
-              <label className="inline-flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={customIncludeParticles}
-                  onChange={(e) => setCustomIncludeParticles(e.target.checked)}
-                  className="accent-orange-500"
-                />
-                <span>Partículas e Auras (Susano’o / noe_*)</span>
-              </label>
-              <label className="inline-flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={customIncludeVideos}
-                  onChange={(e) => setCustomIncludeVideos(e.target.checked)}
-                  className="accent-orange-500"
-                />
-                <span>Vídeos MP4</span>
-              </label>
-              <label className="inline-flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={customIncludeAudio}
-                  onChange={(e) => setCustomIncludeAudio(e.target.checked)}
-                  className="accent-orange-500"
-                />
-                <span>Vozes e Áudios MP3</span>
-              </label>
-              <label className="inline-flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={customIncludeNameArt}
-                  onChange={(e) => setCustomIncludeNameArt(e.target.checked)}
-                  className="accent-orange-500"
-                />
-                <span>Artes de Nome</span>
-              </label>
-            </div>
-
-            <div className="max-h-64 overflow-y-auto rounded-lg border border-slate-800 bg-[#0B0F17] p-2">
-              {filteredCustomNinjas.length === 0 ? (
-                <div className="p-6 text-center text-xs text-slate-500">
-                  Nenhum personagem encontrado para "{customSearch}".
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
-                  {filteredCustomNinjas.map((n) => {
-                    const checked = selectedIds.has(n.id);
-                    return (
-                      <label
-                        key={n.id}
-                        className={`flex items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-xs cursor-pointer transition-colors ${
-                          checked
-                            ? 'border-orange-500/60 bg-orange-950/30 text-slate-100'
-                            : 'border-slate-800/80 bg-[#131A26]/60 text-slate-300 hover:border-slate-700'
-                        }`}
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={loadingPlan || Boolean(exportingDirectKey)}
+                        onClick={() =>
+                          void handleExportDirectForPreset(
+                            'mp4_ninjas',
+                            `shinobi_backup_${plan?.mp4NinjaCount || 139}_ninjas_com_mp4.zip`,
+                            'sh'
+                          )
+                        }
+                        className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors cursor-pointer"
                       >
-                        <div className="flex items-center gap-2 min-w-0">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleCustomNinja(n.id)}
-                            className="accent-orange-500 shrink-0"
-                          />
-                          <div className="min-w-0">
-                            <div className="truncate font-medium">{n.name || n.id}</div>
-                            <div className="truncate font-mono text-[10px] text-slate-400">
-                              {n.id}
+                        <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>
+                          {exportingDirectKey === 'mp4_ninjas-sh'
+                            ? 'Preparando script...'
+                            : 'Android — 1 ZIP (.sh)'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={loadingPlan || preparingCustom || isJobRunning}
+                        onClick={() =>
+                          void handlePresetDownload(
+                            'mp4_ninjas',
+                            `shinobi_backup_${plan?.mp4NinjaCount || 139}_ninjas_com_mp4.zip`
+                          )
+                        }
+                        className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3.5 py-2.5 text-xs font-medium text-slate-200 hover:border-white/25 hover:text-white disabled:opacity-40 transition-colors cursor-pointer"
+                      >
+                        <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>
+                          {activeJob?.moduleId === 'mp4_ninjas' && activeJob.status === 'paused'
+                            ? 'Retomar'
+                            : 'Navegador'}
+                        </span>
+                      </button>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] pt-3">
+                      <span className="font-mono text-[11px] text-slate-500 tabular-nums">
+                        {plan?.mp4NinjaCount || 139} personagens selecionados
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={loadingPlan || Boolean(exportingDirectKey)}
+                          onClick={() =>
+                            void handleExportDirectForPreset(
+                              'mp4_ninjas',
+                              `shinobi_backup_${plan?.mp4NinjaCount || 139}_ninjas_com_mp4.zip`,
+                              'ps1'
+                            )
+                          }
+                          className="rounded border border-white/10 bg-[#090B10] px-2.5 py-1 text-[11px] font-medium text-slate-300 hover:border-white/25 hover:text-white disabled:opacity-40 cursor-pointer"
+                        >
+                          {exportingDirectKey === 'mp4_ninjas-ps1' ? 'Gerando...' : 'Windows .ps1'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={loadingPlan || Boolean(exportingDirectKey)}
+                          onClick={() =>
+                            void handleExportDirectForPreset(
+                              'mp4_ninjas',
+                              `shinobi_backup_${plan?.mp4NinjaCount || 139}_ninjas_com_mp4.zip`,
+                              'txt'
+                            )
+                          }
+                          className="rounded border border-white/10 bg-[#090B10] px-2.5 py-1 text-[11px] font-medium text-slate-300 hover:border-white/25 hover:text-white disabled:opacity-40 cursor-pointer"
+                        >
+                          Links 1DM .txt
+                        </button>
+                        {plan?.planSource === 'server' && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleDirectServerPresetDownload(
+                                'mp4_ninjas',
+                                `shinobi_backup_${plan?.mp4NinjaCount || 139}_ninjas_com_mp4.zip`
+                              )
+                            }
+                            className="rounded border border-white/10 bg-[#090B10] px-2.5 py-1 text-[11px] font-medium text-slate-300 hover:border-white/25 hover:text-white cursor-pointer"
+                          >
+                            Servidor direto
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Discreet Collapsible Android Termux Guide */}
+              <div className="rounded-xl border border-white/[0.07] bg-[#11141C] overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShowAndroidGuide((v) => !v)}
+                  className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-white/[0.02] transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Terminal className="h-3.5 w-3.5 text-orange-400 shrink-0" aria-hidden="true" />
+                    <span className="text-xs font-medium text-slate-200 truncate">
+                      Como executar no Android (Termux) — 16 conexões diretas, sem erro de CORS
+                    </span>
+                  </div>
+                  {showAndroidGuide ? (
+                    <ChevronUp className="h-4 w-4 text-slate-400 shrink-0" aria-hidden="true" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4 text-slate-400 shrink-0" aria-hidden="true" />
+                  )}
+                </button>
+
+                {showAndroidGuide && (
+                  <div className="border-t border-white/[0.06] px-4 py-3.5 space-y-3 text-xs text-slate-300">
+                    <ol className="list-decimal list-inside space-y-1.5 text-xs text-slate-400 leading-relaxed">
+                      <li>
+                        Toque em <span className="text-slate-200 font-medium">Android — 1 ZIP (.sh)</span> acima para salvar o script na pasta Downloads.
+                      </li>
+                      <li>
+                        Abra o aplicativo <span className="text-slate-200 font-medium">Termux</span> (instale pelo F-Droid ou GitHub) e cole o comando abaixo.
+                      </li>
+                      <li>
+                        O script baixa tudo em 16 conexões simultâneas, monta 1 único <span className="font-mono text-slate-200">.zip</span> direto em Downloads e limpa o cache automaticamente. Depois, selecione o arquivo em <span className="text-slate-200 font-medium">Abrir ZIP local</span>.
+                      </li>
+                    </ol>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/[0.07] bg-[#090B10] px-3 py-2">
+                      <code className="font-mono text-[11px] text-orange-300 break-all">
+                        termux-setup-storage &amp;&amp; bash ~/storage/downloads/{lastShScriptName}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyTermuxCommand(lastShScriptName)}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-[#11141C] px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:border-white/25 cursor-pointer shrink-0"
+                      >
+                        {copiedTermuxCmd ? (
+                          <>
+                            <Check className="h-3 w-3 text-emerald-400" aria-hidden="true" />
+                            <span>Copiado</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3 w-3" aria-hidden="true" />
+                            <span>Copiar</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    <p className="text-[11px] text-slate-500">
+                      Se a internet cair ou o app fechar, execute o mesmo comando novamente para continuar exatamente do arquivo onde parou. No Linux ou macOS, basta rodar <span className="font-mono text-slate-400">bash {lastShScriptName}</span>.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* SUB-TAB 3: CUSTOM SELECTION */}
+          {downloadTab === 'custom' && (
+            <div className="rounded-xl border border-white/[0.07] bg-[#11141C] overflow-hidden">
+              <div className="flex flex-col gap-3 border-b border-white/[0.06] p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="relative flex-1 max-w-sm">
+                  <Search
+                    className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500"
+                    aria-hidden="true"
+                  />
+                  <input
+                    type="search"
+                    value={customSearch}
+                    onChange={(e) => setCustomSearch(e.target.value)}
+                    placeholder="Buscar personagem..."
+                    className="w-full rounded-lg border border-white/10 bg-[#090B10] py-1.5 pl-8 pr-3 text-sm sm:text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500/60 focus:outline-none"
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSelectedIds(new Set(ninjas.filter((n) => n.hasVideo).map((n) => n.id)))
+                    }
+                    className="rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-white/20 hover:text-white cursor-pointer tabular-nums"
+                  >
+                    Com vídeo ({videoNinjaCount})
+                  </button>
+                  <button
+                    type="button"
+                    disabled={selectedIds.size === 0}
+                    onClick={() => setSelectedIds(new Set())}
+                    className="rounded-lg border border-white/10 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-400 hover:text-white disabled:opacity-40 cursor-pointer"
+                  >
+                    Limpar
+                  </button>
+                </div>
+              </div>
+
+              {/* Options strip */}
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-white/[0.06] px-4 py-2.5 text-xs text-slate-300">
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={customIncludeParticles}
+                    onChange={(e) => setCustomIncludeParticles(e.target.checked)}
+                    className="accent-orange-500"
+                  />
+                  <span>Partículas e auras</span>
+                </label>
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={customIncludeVideos}
+                    onChange={(e) => setCustomIncludeVideos(e.target.checked)}
+                    className="accent-orange-500"
+                  />
+                  <span>Vídeos MP4</span>
+                </label>
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={customIncludeAudio}
+                    onChange={(e) => setCustomIncludeAudio(e.target.checked)}
+                    className="accent-orange-500"
+                  />
+                  <span>Áudios e vozes</span>
+                </label>
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={customIncludeNameArt}
+                    onChange={(e) => setCustomIncludeNameArt(e.target.checked)}
+                    className="accent-orange-500"
+                  />
+                  <span>Artes de nome</span>
+                </label>
+              </div>
+
+              {/* Selectable list */}
+              <div className="max-h-72 overflow-y-auto p-3">
+                {filteredCustomNinjas.length === 0 ? (
+                  <div className="py-8 text-center text-xs text-slate-500">
+                    Nenhum personagem encontrado para &ldquo;{customSearch}&rdquo;.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
+                    {filteredCustomNinjas.map((n) => {
+                      const checked = selectedIds.has(n.id);
+                      return (
+                        <label
+                          key={n.id}
+                          className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs cursor-pointer transition-colors ${
+                            checked
+                              ? 'border-orange-500/50 bg-orange-500/10 text-slate-100'
+                              : 'border-white/[0.05] bg-[#090B10] text-slate-300 hover:border-white/15'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleCustomNinja(n.id)}
+                              className="accent-orange-500 shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">{n.name || n.id}</div>
+                              <div className="truncate font-mono text-[10px] text-slate-500">
+                                {n.id}
+                                {n.hasVideo ? ' · Vídeo' : ''}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                        {n.hasVideo && (
-                          <span className="rounded bg-cyan-950/90 border border-cyan-500/30 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-cyan-300 shrink-0">
-                            MP4
-                          </span>
-                        )}
-                      </label>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-xs text-slate-400">
-                Gera 1 arquivo <code className="font-mono text-slate-200">.zip</code> autocontido com os sprites, partículas, vídeos e vozes exatos dos ninjas selecionados — retomável caso a conexão oscile.
-              </p>
-              <button
-                type="button"
-                disabled={selectedIds.size === 0 || preparingCustom || isJobRunning}
-                onClick={() => void handleDownloadCustomBackup()}
-                className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors cursor-pointer shrink-0"
-              >
-                <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>
-                  {preparingCustom
-                    ? 'Preparando...'
-                    : `Baixar Backup Personalizado (${selectedIds.size} ${selectedIds.size === 1 ? 'Ninja' : 'Ninjas'})`}
-                </span>
-              </button>
-            </div>
-
-            {customStatus && (
-              <div className="rounded-lg border border-slate-800 bg-[#0B0F17] px-4 py-2.5 text-xs text-slate-200">
-                {customStatus}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        )}
-      </section>
+
+              {/* Footer */}
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.06] px-4 py-3">
+                <span className="text-xs text-slate-400">
+                  {customStatus ||
+                    `${selectedIds.size} ${selectedIds.size === 1 ? 'personagem selecionado' : 'personagens selecionados'}`}
+                </span>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={selectedIds.size === 0 || Boolean(exportingDirectKey)}
+                    onClick={() => void handleExportDirectForCustom('sh')}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs font-medium text-slate-200 hover:border-white/25 hover:text-white disabled:opacity-40 transition-colors cursor-pointer"
+                  >
+                    <Smartphone className="h-3.5 w-3.5 text-orange-400" aria-hidden="true" />
+                    <span>{exportingDirectKey === 'custom-sh' ? 'Gerando...' : 'Android .sh'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={selectedIds.size === 0 || Boolean(exportingDirectKey)}
+                    onClick={() => void handleExportDirectForCustom('ps1')}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs font-medium text-slate-200 hover:border-white/25 hover:text-white disabled:opacity-40 transition-colors cursor-pointer"
+                  >
+                    <Terminal className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                    <span>{exportingDirectKey === 'custom-ps1' ? 'Gerando...' : 'Windows .ps1'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={selectedIds.size === 0 || preparingCustom || isJobRunning}
+                    onClick={() => void handleDownloadCustomBackup()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>
+                      {preparingCustom
+                        ? 'Preparando...'
+                        : `Navegador (${selectedIds.size})`}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }
