@@ -9,6 +9,7 @@ import {
   isStaticHostingMode,
   loadStaticAtlasPack,
   loadStaticEffectsPack,
+  loadStaticNinjaSkillsPack,
   readStaticPackFileBytes,
 } from './remoteClient';
 import {
@@ -676,10 +677,11 @@ export async function resolveStandaloneNinjasFileList(
   const effectIds = new Set<string>();
   const decoder = new TextDecoder('utf-8');
 
-  // Pre-warm static atlas/effects packs in parallel
-  await Promise.all([
+  // Pre-warm static atlas/effects/skills packs in parallel
+  const [, , skillsPack] = await Promise.all([
     loadStaticAtlasPack(),
     options.includeParticles ? loadStaticEffectsPack() : Promise.resolve(null),
+    loadStaticNinjaSkillsPack(),
   ]);
 
   for (const ninja of selectedNinjas) {
@@ -723,11 +725,55 @@ export async function resolveStandaloneNinjasFileList(
       const artRel = toSafeRelPath(ninja.nameArtUrl, origin);
       if (artRel) pathSet.add(artRel);
     }
-    if (options.includeVideos && ninja.code) {
-      const codeLow = ninja.code.toLowerCase();
-      for (const vf of bundle.videoFiles) {
-        if (vf.path.toLowerCase().includes(codeLow)) {
-          pathSet.add(vf.path);
+
+    // Include skill icons, named videos (e.g. Sasuke_texie.mp4), and mapped voice clips from static skills pack
+    const staticEntry = skillsPack
+      ? skillsPack.ninjas[ninja.id] ||
+        skillsPack.ninjasLower.get(ninja.id.toLowerCase()) ||
+        (ninja.code
+          ? skillsPack.ninjas[ninja.code] || skillsPack.ninjasLower.get(ninja.code.toLowerCase())
+          : undefined)
+      : undefined;
+
+    if (staticEntry?.skills) {
+      for (const skill of Object.values(staticEntry.skills)) {
+        if (skill?.iconUrl) {
+          const iconRel = toSafeRelPath(skill.iconUrl, origin);
+          if (iconRel) pathSet.add(iconRel);
+        }
+      }
+    }
+    if (staticEntry?.passives) {
+      for (const passive of staticEntry.passives) {
+        if (passive?.iconUrl) {
+          const iconRel = toSafeRelPath(passive.iconUrl, origin);
+          if (iconRel) pathSet.add(iconRel);
+        }
+      }
+    }
+    if (options.includeVideos) {
+      if (staticEntry?.videos) {
+        for (const v of staticEntry.videos) {
+          if (v?.url) {
+            const vRel = toSafeRelPath(v.url, origin);
+            if (vRel) pathSet.add(vRel);
+          }
+        }
+      }
+      if (ninja.code) {
+        const codeLow = ninja.code.toLowerCase();
+        for (const vf of bundle.videoFiles) {
+          if (vf.path.toLowerCase().includes(codeLow)) {
+            pathSet.add(vf.path);
+          }
+        }
+      }
+    }
+    if (options.includeAudio && staticEntry?.voices) {
+      for (const vc of staticEntry.voices) {
+        if (vc?.url) {
+          const aRel = toSafeRelPath(vc.url, origin);
+          if (aRel) pathSet.add(aRel);
         }
       }
     }
@@ -766,53 +812,108 @@ function isAudioOrVideoPath(relPath: string): boolean {
   return /\.(mp4|mp3|ogg|wav|webm)$/i.test(relPath);
 }
 
-function resolveDownloadUrlForPath(
+const PUBLIC_MEDIA_CORS_RELAYS = [
+  'https://api.cors.lol/?url=',
+  'https://api.allorigins.win/raw?url=',
+  'https://api.codetabs.com/v1/proxy?quest=',
+];
+
+let preferredPublicRelayIdx = 0;
+const publicRelayCooldownUntil = new Map<string, number>();
+
+interface DownloadCandidate {
+  url: string;
+  relayKey?: string;
+  isPublicRelay?: boolean;
+}
+
+function resolveDownloadCandidatesForPath(
   origin: string,
   relPath: string
-): { url: string | null; corsBlockedInStatic: boolean } {
+): DownloadCandidate[] {
   const fullUrl = `${origin}/${relPath.replace(/^\/+/, '')}`;
 
   if (!isStaticHostingMode()) {
-    return {
-      url: `/api/proxy?url=${encodeURIComponent(fullUrl)}`,
-      corsBlockedInStatic: false,
-    };
+    return [{ url: `/api/proxy?url=${encodeURIComponent(fullUrl)}` }];
   }
 
   const customProxy = getSavedCorsProxy();
   if (customProxy) {
-    return {
-      url: buildCorsRelayUrl(fullUrl, customProxy),
-      corsBlockedInStatic: false,
-    };
+    const list: DownloadCandidate[] = [
+      { url: buildCorsRelayUrl(fullUrl, customProxy) },
+    ];
+    // For images, wsrv.nl can still act as a fast backup if the custom proxy hiccups
+    if (isImagePath(relPath)) {
+      list.push({ url: buildWsrvImageUrl(fullUrl) });
+    }
+    return list;
+  }
+
+  const orderedPublicRelays: DownloadCandidate[] = [];
+  const now = Date.now();
+  for (let offset = 0; offset < PUBLIC_MEDIA_CORS_RELAYS.length; offset++) {
+    const idx = (preferredPublicRelayIdx + offset) % PUBLIC_MEDIA_CORS_RELAYS.length;
+    const prefix = PUBLIC_MEDIA_CORS_RELAYS[idx];
+    const cooldownUntil = publicRelayCooldownUntil.get(prefix) || 0;
+    if (cooldownUntil > now) continue;
+    orderedPublicRelays.push({
+      url: buildCorsRelayUrl(fullUrl, prefix),
+      relayKey: prefix,
+      isPublicRelay: true,
+    });
+  }
+
+  // If every public relay is currently in cooldown, still allow trying the preferred one once
+  if (orderedPublicRelays.length === 0) {
+    const prefix = PUBLIC_MEDIA_CORS_RELAYS[preferredPublicRelayIdx] || PUBLIC_MEDIA_CORS_RELAYS[0];
+    orderedPublicRelays.push({
+      url: buildCorsRelayUrl(fullUrl, prefix),
+      relayKey: prefix,
+      isPublicRelay: true,
+    });
   }
 
   if (isImagePath(relPath)) {
-    return {
-      url: buildWsrvImageUrl(fullUrl),
-      corsBlockedInStatic: false,
-    };
+    return [{ url: buildWsrvImageUrl(fullUrl) }, ...orderedPublicRelays];
   }
 
-  if (isAudioOrVideoPath(relPath)) {
-    // Public free relays block/429 large MP4/MP3 binaries when no custom proxy is set
-    return {
-      url: null,
-      corsBlockedInStatic: true,
-    };
-  }
+  return orderedPublicRelays;
+}
 
-  return {
-    url: buildCorsRelayUrl(fullUrl, 'https://api.codetabs.com/v1/proxy?quest='),
-    corsBlockedInStatic: false,
-  };
+function isInvalidBinaryPayload(
+  relPath: string,
+  contentType: string,
+  bytes: Uint8Array
+): boolean {
+  if (bytes.byteLength === 0) return true;
+  if (!isAudioOrVideoPath(relPath) && !isImagePath(relPath)) {
+    return false;
+  }
+  const ct = contentType.toLowerCase();
+  if (ct.includes('text/html') || ct.includes('text/plain') || ct.includes('application/json')) {
+    return true;
+  }
+  const head = new TextDecoder('ascii')
+    .decode(bytes.subarray(0, Math.min(64, bytes.byteLength)))
+    .trimStart()
+    .toLowerCase();
+  if (
+    head.startsWith('<!doctype') ||
+    head.startsWith('<html') ||
+    head.startsWith('rate limit') ||
+    head.startsWith('{"error') ||
+    head.startsWith('{"message')
+  ) {
+    return true;
+  }
+  return false;
 }
 
 async function fetchFileBytesWithRetry(
   origin: string,
   relPath: string,
   signal: AbortSignal,
-  attempts = 4
+  attempts = 3
 ): Promise<{
   bytes: Uint8Array | null;
   status: 'ok' | 'missing' | 'cors_blocked' | 'network_error';
@@ -823,43 +924,100 @@ async function fetchFileBytesWithRetry(
     return { bytes: staticBytes, status: 'ok' };
   }
 
-  const resolved = resolveDownloadUrlForPath(origin, relPath);
-  if (resolved.corsBlockedInStatic || !resolved.url) {
-    return { bytes: null, status: 'cors_blocked' };
-  }
+  const isMedia = isAudioOrVideoPath(relPath);
+  const usingPublicOnlyForMedia =
+    isStaticHostingMode() && !getSavedCorsProxy() && isMedia;
+  const maxOuterAttempts = usingPublicOnlyForMedia ? 1 : attempts;
 
-  for (let attempt = 0; attempt < attempts; attempt++) {
+  let sawCorsOrRateLimit = false;
+
+  for (let attempt = 0; attempt < maxOuterAttempts; attempt++) {
     if (signal.aborted) {
       throw new DOMException('Aborted', 'AbortError');
     }
-    try {
-      const resp = await fetch(resolved.url, {
-        signal,
-        cache: 'force-cache',
-      });
-      if (resp.status === 404) {
-        return { bytes: null, status: 'missing' };
-      }
-      if (resp.ok) {
-        const buf = await resp.arrayBuffer();
-        if (buf.byteLength > 0) {
-          return { bytes: new Uint8Array(buf), status: 'ok' };
-        }
-        return { bytes: null, status: 'missing' };
-      }
-      if (resp.status === 403 || resp.status === 401) {
-        return { bytes: null, status: 'cors_blocked' };
-      }
-    } catch (err) {
+
+    const candidates = resolveDownloadCandidatesForPath(origin, relPath);
+    for (const candidate of candidates) {
       if (signal.aborted) {
         throw new DOMException('Aborted', 'AbortError');
       }
-      if (attempt === attempts - 1) {
-        return { bytes: null, status: 'network_error' };
+
+      const perRequestTimeoutMs = candidate.isPublicRelay ? 9000 : 25000;
+      const reqCtrl = new AbortController();
+      const onParentAbort = () => reqCtrl.abort();
+      signal.addEventListener('abort', onParentAbort, { once: true });
+      const timer = setTimeout(() => reqCtrl.abort(), perRequestTimeoutMs);
+
+      try {
+        const resp = await fetch(candidate.url, {
+          signal: reqCtrl.signal,
+          cache: candidate.isPublicRelay ? 'default' : 'force-cache',
+        });
+
+        if (resp.status === 404 && !candidate.isPublicRelay) {
+          return { bytes: null, status: 'missing' };
+        }
+
+        if (resp.ok) {
+          const ct = resp.headers.get('content-type') || '';
+          const buf = await resp.arrayBuffer();
+          const bytes = new Uint8Array(buf);
+          if (!isInvalidBinaryPayload(relPath, ct, bytes)) {
+            if (candidate.relayKey) {
+              const idx = PUBLIC_MEDIA_CORS_RELAYS.indexOf(candidate.relayKey);
+              if (idx >= 0) preferredPublicRelayIdx = idx;
+            }
+            return { bytes, status: 'ok' };
+          }
+          // Proxy returned an HTML/text error page disguised as 200
+          sawCorsOrRateLimit = true;
+          if (candidate.relayKey) {
+            publicRelayCooldownUntil.set(candidate.relayKey, Date.now() + 20000);
+          }
+          continue;
+        }
+
+        if (resp.status === 401 || resp.status === 403 || resp.status === 429) {
+          sawCorsOrRateLimit = true;
+          if (candidate.relayKey) {
+            const cooldownMs = resp.status === 429 ? 25000 : 60000;
+            publicRelayCooldownUntil.set(candidate.relayKey, Date.now() + cooldownMs);
+          }
+          continue;
+        }
+
+        if (resp.status === 404 && candidate.isPublicRelay) {
+          // Only treat as missing if we're confident it came from upstream
+          return { bytes: null, status: 'missing' };
+        }
+      } catch (err) {
+        if (signal.aborted) {
+          throw new DOMException('Aborted', 'AbortError');
+        }
+        if (candidate.isPublicRelay) {
+          sawCorsOrRateLimit = true;
+          if (candidate.relayKey) {
+            publicRelayCooldownUntil.set(candidate.relayKey, Date.now() + 15000);
+          }
+          continue;
+        }
+        if (err instanceof TypeError) {
+          sawCorsOrRateLimit = true;
+        }
+      } finally {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onParentAbort);
       }
     }
-    const backoff = Math.min(3000, 350 * Math.pow(2, attempt));
-    await new Promise((r) => setTimeout(r, backoff));
+
+    if (attempt < maxOuterAttempts - 1) {
+      const backoff = Math.min(3000, 350 * Math.pow(2, attempt));
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
+
+  if (sawCorsOrRateLimit && (usingPublicOnlyForMedia || isStaticHostingMode())) {
+    return { bytes: null, status: 'cors_blocked' };
   }
   return { bytes: null, status: 'network_error' };
 }
@@ -994,7 +1152,7 @@ export function startOrResumeBackupDownload(params: {
         ...params.existingJob,
         completedPaths: [...params.existingJob.completedPaths],
         failedPaths: params.retryFailedOnly ? [] : [...params.existingJob.failedPaths],
-        corsSkippedPaths: [...(params.existingJob.corsSkippedPaths || [])],
+        corsSkippedPaths: [],
         status: 'running',
         pauseReason: null,
         statusMessage: 'Retomando download de onde parou...',
@@ -1069,10 +1227,22 @@ export function startOrResumeBackupDownload(params: {
 
     const isMobile =
       typeof navigator !== 'undefined' && /android|iphone|ipad|mobile/i.test(navigator.userAgent);
-    const concurrency = isMobile ? 12 : 16;
+    const mediaPendingCount = pendingFiles.filter((f) => isAudioOrVideoPath(f.path)).length;
+    const isPublicRelayedMediaJob =
+      isStaticHostingMode() &&
+      !getSavedCorsProxy() &&
+      pendingFiles.length > 0 &&
+      mediaPendingCount / pendingFiles.length > 0.5;
+    // Gentle concurrency on free public relays to avoid instant 429 bursts; full speed everywhere else
+    const concurrency = isPublicRelayedMediaJob ? 2 : isMobile ? 12 : 16;
+
+    // Reset relay cooldowns at the start of a fresh run or user resume
+    publicRelayCooldownUntil.clear();
 
     let queueIdx = 0;
     let consecutiveNetworkErrors = 0;
+    let consecutiveCorsBlocked = 0;
+    let corsPaused = false;
     let currentFile = '';
     const pendingDbWrites: StoredBackupFileRecord[] = [];
     let pendingDbBytes = 0;
@@ -1157,6 +1327,7 @@ export function startOrResumeBackupDownload(params: {
 
           if (res.status === 'ok' && res.bytes) {
             consecutiveNetworkErrors = 0;
+            consecutiveCorsBlocked = 0;
             const bytes = res.bytes;
             const size = bytes.byteLength;
             const crc32 = computeCrc32(bytes);
@@ -1183,7 +1354,14 @@ export function startOrResumeBackupDownload(params: {
             emitUi(false);
           } else if (res.status === 'cors_blocked') {
             corsSkippedSet.add(fileSpec.path);
+            consecutiveCorsBlocked++;
             emitUi(false);
+            // If this is primarily a media job and public relays are all throttling/blocking, pause cleanly right away
+            if (isPublicRelayedMediaJob && consecutiveCorsBlocked >= 3) {
+              corsPaused = true;
+              abortCtrl.abort();
+              break;
+            }
           } else if (res.status === 'missing') {
             // 404 on origin — mark handled so resume won't get stuck retrying nonexistent files
             completedSet.add(fileSpec.path);
@@ -1226,6 +1404,18 @@ export function startOrResumeBackupDownload(params: {
       }
     }
 
+    if (corsPaused) {
+      job.status = 'paused';
+      job.pauseReason = 'cors';
+      job.statusMessage =
+        completedSet.size > 0
+          ? `Progresso salvo (${completedSet.size}/${job.files.length} arquivos). Os relays públicos gratuitos atingiram limite de requisições para MP4/MP3. Use o Download Direto Sem Proxy abaixo (Script .ps1/.sh ou Links 1DM) ou ative seu Cloudflare Worker gratuito (1 min) e clique em Retomar.`
+          : 'Os relays públicos gratuitos bloquearam ou limitaram o tráfego de MP4/MP3 no GitHub Pages. Use o Download Direto Sem Proxy abaixo (gera o .ZIP em velocidade máxima) ou ative seu Proxy Cloudflare gratuito (1 min) e clique em Retomar.';
+      await saveBackupJobRecord(job);
+      params.onPaused({ ...job });
+      return;
+    }
+
     if (userPaused || networkPaused || abortCtrl.signal.aborted) {
       job.status = 'paused';
       job.pauseReason = networkPaused ? 'network' : 'user';
@@ -1237,12 +1427,12 @@ export function startOrResumeBackupDownload(params: {
       return;
     }
 
-    // Check if ALL requested files were blocked by CORS (e.g., MP4/MP3 module on GitHub Pages without Custom CORS Proxy)
+    // Check if ALL requested files were blocked by CORS/rate-limits
     if (completedSet.size === 0 && corsSkippedSet.size > 0) {
       job.status = 'paused';
       job.pauseReason = 'cors';
       job.statusMessage =
-        'Este módulo contém arquivos MP4/MP3 bloqueados por CORS no GitHub Pages. Configure um Proxy CORS próprio (ex: Cloudflare Worker) ou rode o servidor local para baixar vídeos/áudios, e clique em Retomar.';
+        'Os relays públicos gratuitos bloquearam os arquivos MP4/MP3 no GitHub Pages. Use o Download Direto Sem Proxy abaixo (gera o .ZIP em velocidade máxima) ou ative seu Proxy Cloudflare gratuito (1 min) e clique em Retomar.';
       await saveBackupJobRecord(job);
       params.onPaused({ ...job });
       return;

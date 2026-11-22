@@ -2,9 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Archive,
+  Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clapperboard,
+  Copy,
   Download,
+  FileText,
   FolderOpen,
   HardDrive,
   Layers,
@@ -18,12 +23,20 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  Terminal,
   Trash2,
   Upload,
   WifiOff,
   Zap,
 } from 'lucide-react';
 import type { NinjaEntry } from '../types/sprite';
+import {
+  CLOUDFLARE_WORKER_PROXY_CODE,
+  downloadDirectUnixScript,
+  downloadDirectUrlList,
+  downloadDirectWindowsScript,
+  testCorsProxyForMedia,
+} from '../utils/directBackupScript';
 import {
   mountBackupZipFiles,
   setStrictOfflineMode,
@@ -121,9 +134,16 @@ export function OfflineBackupView({
   const [assemblePercent, setAssemblePercent] = useState(0);
   const [manualSaving, setManualSaving] = useState(false);
 
-  // Optional custom CORS proxy for MP4/MP3 in static GitHub Pages mode
+  // Optional custom CORS proxy for full-speed in-browser MP4/MP3 ZIPs on GitHub Pages
   const [corsProxyInput, setCorsProxyInput] = useState(() => getSavedCorsProxy());
   const [corsProxySaved, setCorsProxySaved] = useState(() => Boolean(getSavedCorsProxy()));
+  const [proxyTesting, setProxyTesting] = useState(false);
+  const [proxyTestResult, setProxyTestResult] = useState<{ ok: boolean; message: string } | null>(
+    null
+  );
+  const [showWorkerGuide, setShowWorkerGuide] = useState(false);
+  const [copiedWorkerCode, setCopiedWorkerCode] = useState(false);
+  const workerPanelRef = useRef<HTMLDivElement | null>(null);
 
   // Custom ninja selection backup state
   const [customSearch, setCustomSearch] = useState('');
@@ -466,9 +486,79 @@ export function OfflineBackupView({
     setCurrentFile('');
   };
 
-  const handleSaveCorsProxy = () => {
-    setSavedCorsProxy(corsProxyInput);
-    setCorsProxySaved(Boolean(corsProxyInput.trim()));
+  const handleSaveAndTestCorsProxy = async () => {
+    const trimmed = corsProxyInput.trim();
+    setSavedCorsProxy(trimmed);
+    setCorsProxySaved(Boolean(trimmed));
+    if (!trimmed) {
+      setProxyTestResult(null);
+      return;
+    }
+    setProxyTesting(true);
+    setProxyTestResult(null);
+    try {
+      const result = await testCorsProxyForMedia(trimmed);
+      setProxyTestResult({ ok: result.ok, message: result.message });
+    } finally {
+      setProxyTesting(false);
+    }
+  };
+
+  const handleCopyWorkerCode = async () => {
+    try {
+      await navigator.clipboard.writeText(CLOUDFLARE_WORKER_PROXY_CODE);
+      setCopiedWorkerCode(true);
+      setTimeout(() => setCopiedWorkerCode(false), 2200);
+    } catch {
+      setCopiedWorkerCode(false);
+    }
+  };
+
+  const handleOpenWorkerGuide = () => {
+    setShowWorkerGuide(true);
+    setTimeout(() => {
+      workerPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 60);
+  };
+
+  const handleExportDirectForModule = async (
+    mod: BackupModulePlanItem,
+    format: 'ps1' | 'sh' | 'txt'
+  ) => {
+    try {
+      const bundle = await ensureStaticBundle();
+      const files = bundle.moduleFilesById.get(mod.id) || [];
+      if (files.length === 0) {
+        setPlanError(`Nenhum arquivo mapeado para o módulo ${mod.label}.`);
+        return;
+      }
+      const spec = {
+        moduleId: mod.id,
+        label: mod.label,
+        filename: mod.filename,
+        origin: bundle.origin,
+        paths: files.map((f) => f.path),
+      };
+      if (format === 'ps1') downloadDirectWindowsScript(spec);
+      else if (format === 'sh') downloadDirectUnixScript(spec);
+      else downloadDirectUrlList(spec);
+    } catch (err) {
+      setPlanError(err instanceof Error ? err.message : 'Erro ao gerar script de download direto.');
+    }
+  };
+
+  const handleExportDirectForActiveJob = (format: 'ps1' | 'sh' | 'txt') => {
+    if (!activeJob) return;
+    const spec = {
+      moduleId: activeJob.moduleId,
+      label: activeJob.label,
+      filename: activeJob.filename,
+      origin: activeJob.origin,
+      paths: activeJob.files.map((f) => f.path),
+    };
+    if (format === 'ps1') downloadDirectWindowsScript(spec);
+    else if (format === 'sh') downloadDirectUnixScript(spec);
+    else downloadDirectUrlList(spec);
   };
 
   const filteredCustomNinjas = useMemo(() => {
@@ -982,40 +1072,164 @@ export function OfflineBackupView({
             {activeJob.statusMessage && (
               <p className="text-xs text-slate-300 leading-relaxed">{activeJob.statusMessage}</p>
             )}
+
+            {activeJob.status === 'paused' && activeJob.pauseReason === 'cors' && (
+              <div className="rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-3 space-y-2.5">
+                <div className="text-xs font-semibold text-cyan-200">
+                  Baixar agora em velocidade máxima (2 opções):
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleExportDirectForActiveJob('ps1')}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/60 px-3 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/60 cursor-pointer"
+                  >
+                    <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Sem Proxy: Script Windows (.ps1 → gera o ZIP)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExportDirectForActiveJob('sh')}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/60 px-3 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/60 cursor-pointer"
+                  >
+                    <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Sem Proxy: Android Termux / Linux (.sh)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExportDirectForActiveJob('txt')}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#131A26] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-cyan-500/60 cursor-pointer"
+                  >
+                    <FileText className="h-3.5 w-3.5 text-cyan-400" aria-hidden="true" />
+                    <span>Links Diretos 1DM/ADM (.txt)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleOpenWorkerGuide}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-orange-500/40 bg-orange-950/50 px-3 py-1.5 text-xs font-semibold text-orange-200 hover:bg-orange-900/60 cursor-pointer"
+                  >
+                    <Zap className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Criar Proxy Gratuito (1 min) p/ Baixar no Chrome</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Static mode optional CORS proxy info for MP4/MP3 */}
+        {/* Static mode GitHub Pages direct download & optional free Cloudflare Worker proxy */}
         {staticMode && (
-          <div className="rounded-lg border border-slate-800 bg-[#0B0F17] p-3.5 space-y-2.5">
-            <div className="flex flex-wrap items-start gap-2 text-xs text-slate-300">
-              <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" aria-hidden="true" />
-              <div className="space-y-1">
-                <p>
-                  <strong className="text-slate-100">GitHub Pages pronto para download:</strong>{' '}
-                  Base (Catálogo, Esqueletos e Atlas), Folhas de Sprites (qualidade máxima), Partículas e Seleção Personalizada funcionam diretamente em alta velocidade com pausa e retomada automática.
-                </p>
-                <p className="text-slate-400">
-                  Para incluir também <strong>Vídeos MP4</strong> e <strong>Áudios MP3</strong> a partir do GitHub Pages (o servidor original bloqueia CORS nesses arquivos), informe um Proxy CORS próprio abaixo (ex: Cloudflare Worker) — ou rode localmente.
-                </p>
+          <div
+            ref={workerPanelRef}
+            className="rounded-lg border border-slate-800 bg-[#0B0F17] p-3.5 space-y-3"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="flex items-start gap-2 text-xs text-slate-300 flex-1 min-w-[240px]">
+                <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" aria-hidden="true" />
+                <div className="space-y-1">
+                  <p>
+                    <strong className="text-slate-100">GitHub Pages pronto para download:</strong>{' '}
+                    Base, Sprites, Partículas e Seleção Personalizada baixam direto em alta velocidade com pausa e retomada automática.
+                  </p>
+                  <p className="text-slate-400">
+                    Para <strong>Vídeos MP4</strong> e <strong>Áudios MP3</strong>: o app tenta relays públicos automaticamente, ou você pode baixar <strong>sem proxy</strong> usando os botões <strong>Script Direto / Links 1DM</strong> nos cartões abaixo — ou ativar um <strong>Cloudflare Worker gratuito</strong> (1 min) para baixar o <code className="font-mono text-slate-200">.ZIP</code> direto no navegador sem limite.
+                  </p>
+                </div>
               </div>
+              <button
+                type="button"
+                onClick={() => setShowWorkerGuide((v) => !v)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#131A26] px-3 py-1.5 text-xs font-medium text-cyan-300 hover:border-cyan-500/60 cursor-pointer shrink-0"
+              >
+                <span>Como criar Proxy Grátis (1 min)</span>
+                {showWorkerGuide ? (
+                  <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                ) : (
+                  <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                )}
+              </button>
             </div>
+
             <div className="flex flex-wrap items-center gap-2">
               <input
                 type="url"
                 value={corsProxyInput}
-                onChange={(e) => setCorsProxyInput(e.target.value)}
-                placeholder="Proxy CORS opcional para MP4/MP3 (ex: https://seu-worker.workers.dev/?url=)"
-                className="flex-1 min-w-[220px] rounded-lg border border-slate-800 bg-[#131A26] px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
+                onChange={(e) => {
+                  setCorsProxyInput(e.target.value);
+                  setProxyTestResult(null);
+                }}
+                placeholder="URL do seu Cloudflare Worker (ex: https://meu-proxy.workers.dev)"
+                className="flex-1 min-w-[220px] rounded-lg border border-slate-800 bg-[#131A26] px-3 py-1.5 text-base sm:text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
               />
               <button
                 type="button"
-                onClick={handleSaveCorsProxy}
-                className="rounded-lg border border-slate-700 bg-[#131A26] px-3 py-1.5 text-xs font-semibold text-slate-100 hover:border-orange-500 cursor-pointer shrink-0"
+                disabled={proxyTesting}
+                onClick={() => void handleSaveAndTestCorsProxy()}
+                className="rounded-lg border border-slate-700 bg-[#131A26] px-3 py-1.5 text-xs font-semibold text-slate-100 hover:border-orange-500 disabled:opacity-50 cursor-pointer shrink-0"
               >
-                {corsProxySaved && corsProxyInput.trim() ? 'Proxy Salvo' : 'Salvar Proxy'}
+                {proxyTesting
+                  ? 'Testando...'
+                  : corsProxyInput.trim()
+                  ? 'Testar e Salvar Proxy'
+                  : 'Limpar Proxy'}
               </button>
             </div>
+
+            {proxyTestResult && (
+              <div
+                className={`rounded-lg border px-3 py-2 text-xs ${
+                  proxyTestResult.ok
+                    ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
+                    : 'border-amber-500/40 bg-amber-950/30 text-amber-200'
+                }`}
+              >
+                {proxyTestResult.message}
+              </div>
+            )}
+
+            {showWorkerGuide && (
+              <div className="rounded-lg border border-slate-800 bg-[#131A26] p-3.5 space-y-3 text-xs text-slate-300">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <strong className="text-slate-100">
+                    Passo a passo (100% gratuito — 100.000 arquivos/dia no Cloudflare Workers):
+                  </strong>
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyWorkerCode()}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-500 cursor-pointer"
+                  >
+                    {copiedWorkerCode ? (
+                      <>
+                        <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Código Copiado!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Copiar Código do Worker</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+                <ol className="list-decimal list-inside space-y-1 text-slate-300 leading-relaxed">
+                  <li>
+                    Acesse <code className="font-mono text-cyan-300">dash.cloudflare.com</code> (conta gratuita) → <strong>Workers &amp; Pages</strong> → <strong>Create Worker</strong> → <strong>Deploy</strong>.
+                  </li>
+                  <li>
+                    Clique em <strong>Edit code</strong>, apague o texto padrão, cole o código copiado acima e clique em <strong>Deploy</strong>.
+                  </li>
+                  <li>
+                    Copie o endereço gerado (ex: <code className="font-mono text-slate-200">https://shinobi-proxy.seu-nome.workers.dev</code>), cole no campo acima e clique em <strong>Testar e Salvar Proxy</strong>.
+                  </li>
+                  <li>
+                    Pronto! Todos os <strong>Vídeos MP4</strong> e <strong>Áudios MP3</strong> baixam em velocidade máxima direto pelo navegador (inclusive no Android Chrome).
+                  </li>
+                </ol>
+                <pre className="max-h-44 overflow-auto rounded-lg border border-slate-800 bg-[#0B0F17] p-2.5 font-mono text-[11px] text-slate-300 leading-relaxed">
+                  {CLOUDFLARE_WORKER_PROXY_CODE}
+                </pre>
+              </div>
+            )}
           </div>
         )}
 
@@ -1099,7 +1313,7 @@ export function OfflineBackupView({
                       activeJob?.moduleId === mod.id &&
                       (activeJob.status === 'paused' || activeJob.status === 'error');
                     const isThisRunning = activeJob?.moduleId === mod.id && isJobRunning;
-                    const needsProxyNotice =
+                    const showDirectNoProxyActions =
                       staticMode && mod.requiresCorsProxyInStatic && !corsProxySaved;
                     const icon =
                       mod.module === 'videos' ? (
@@ -1118,7 +1332,7 @@ export function OfflineBackupView({
                         key={mod.id}
                         className="flex flex-col justify-between gap-3 rounded-lg border border-slate-800 bg-[#0B0F17] p-4"
                       >
-                        <div className="space-y-1.5">
+                        <div className="space-y-2">
                           <div className="flex items-start justify-between gap-2">
                             <div className="flex items-center gap-2 min-w-0">
                               {icon}
@@ -1131,10 +1345,39 @@ export function OfflineBackupView({
                             </span>
                           </div>
                           <p className="text-xs text-slate-400 leading-relaxed">{mod.description}</p>
-                          {needsProxyNotice && (
-                            <p className="text-[11px] text-amber-300/90">
-                              Requer Proxy CORS configurado acima (ou servidor local) no GitHub Pages.
-                            </p>
+                          {showDirectNoProxyActions && (
+                            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                              <span className="text-[11px] text-slate-400 mr-0.5">
+                                Sem proxy (direto):
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => void handleExportDirectForModule(mod, 'ps1')}
+                                title="Baixa script PowerShell para Windows que baixa tudo direto sem CORS e gera o .ZIP pronto"
+                                className="inline-flex items-center gap-1 rounded border border-slate-700 bg-[#131A26] px-2 py-0.5 text-[11px] font-medium text-emerald-300 hover:border-emerald-500/60 cursor-pointer"
+                              >
+                                <Terminal className="h-3 w-3" aria-hidden="true" />
+                                <span>PC .ps1</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleExportDirectForModule(mod, 'sh')}
+                                title="Baixa script Bash para Android Termux, Linux ou Mac que baixa tudo direto e gera o .ZIP"
+                                className="inline-flex items-center gap-1 rounded border border-slate-700 bg-[#131A26] px-2 py-0.5 text-[11px] font-medium text-cyan-300 hover:border-cyan-500/60 cursor-pointer"
+                              >
+                                <Terminal className="h-3 w-3" aria-hidden="true" />
+                                <span>Termux/Linux .sh</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleExportDirectForModule(mod, 'txt')}
+                                title="Exporta lista de URLs diretas compatível com 1DM, ADM e IDM"
+                                className="inline-flex items-center gap-1 rounded border border-slate-700 bg-[#131A26] px-2 py-0.5 text-[11px] font-medium text-slate-200 hover:border-slate-500 cursor-pointer"
+                              >
+                                <FileText className="h-3 w-3" aria-hidden="true" />
+                                <span>Links 1DM .txt</span>
+                              </button>
+                            </div>
                           )}
                         </div>
 

@@ -605,6 +605,10 @@ export function buildCorsRelayUrl(targetUrl: string, proxyPrefix = getSavedCorsP
   if (cleanPrefix.includes('{url}')) {
     return cleanPrefix.replace('{url}', encodeURIComponent(targetUrl));
   }
+  // If user pasted a bare worker/proxy origin like https://meu-proxy.workers.dev or https://meu-proxy.workers.dev/
+  if (/^https?:\/\/[^/?#]+\/?$/i.test(cleanPrefix)) {
+    return `${cleanPrefix.replace(/\/+$/, '')}/?url=${encodeURIComponent(targetUrl)}`;
+  }
   return `${cleanPrefix}${encodeURIComponent(targetUrl)}`;
 }
 
