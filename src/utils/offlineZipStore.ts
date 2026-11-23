@@ -86,7 +86,7 @@ interface BackupMetaJson {
 const MAX_U32 = 0xffffffff;
 const MAX_U16 = 0xffff;
 const MAX_CD_ENTRIES = 250_000;
-const MAX_BLOB_CACHE = 240;
+const MAX_BLOB_CACHE = 600;
 
 const textDecoder = new TextDecoder('utf-8');
 
@@ -690,6 +690,7 @@ const initialPrefs = loadPersistedPrefs();
 
 let exactEntryMap = new Map<string, ZipEntryRef>();
 let lowerEntryMap = new Map<string, ZipEntryRef>();
+let basenameEntryMap = new Map<string, ZipEntryRef>();
 let blobUrlLru = new Map<string, string>();
 let mediaProfilesById = new Map<string, NinjaMediaProfile>();
 let mediaProfilesByLower = new Map<string, NinjaMediaProfile>();
@@ -928,30 +929,96 @@ export function normalizeUrlToZipPath(targetUrl: string): string | null {
   return sanitizeZipPath(candidate);
 }
 
+function getBasenamePriority(lowerPath: string): number {
+  if (lowerPath.startsWith('acervo/asset/spine/')) return 4;
+  if (lowerPath.startsWith('acervo/asset/spine-no-estados/')) return 4;
+  if (lowerPath.startsWith('acervo/video/hero/')) return 4;
+  if (lowerPath.startsWith('acervo/video/recruit/')) return 3;
+  if (lowerPath.startsWith('acervo/som/')) return 4;
+  if (lowerPath.includes('/acervo/')) return 3;
+  if (lowerPath.includes('/particulas/') || lowerPath.includes('/videos/') || lowerPath.includes('/audios/')) return 2;
+  return 1;
+}
+
+function registerBasenameEntry(ref: ZipEntryRef) {
+  const lowPath = ref.path.toLowerCase();
+  const base = lowPath.split('/').pop();
+  if (!base) return;
+  const existing = basenameEntryMap.get(base);
+  if (!existing || getBasenamePriority(lowPath) >= getBasenamePriority(existing.path.toLowerCase())) {
+    basenameEntryMap.set(base, ref);
+  }
+}
+
+function lookupPathOrAltExt(lowerPath: string): ZipEntryRef | null {
+  const direct = lowerEntryMap.get(lowerPath);
+  if (direct) return direct;
+  if (lowerPath.endsWith('.png')) {
+    return lowerEntryMap.get(`${lowerPath.slice(0, -4)}.webp`) || null;
+  }
+  if (lowerPath.endsWith('.webp')) {
+    return lowerEntryMap.get(`${lowerPath.slice(0, -5)}.png`) || null;
+  }
+  return null;
+}
+
 function findEntryByUrlOrPath(urlOrPath: string): ZipEntryRef | null {
   if (exactEntryMap.size === 0) return null;
   const rel = normalizeUrlToZipPath(urlOrPath);
   if (!rel) return null;
 
-  const direct = exactEntryMap.get(rel) || lowerEntryMap.get(rel.toLowerCase());
+  const relLower = rel.toLowerCase();
+  const direct = exactEntryMap.get(rel) || lookupPathOrAltExt(relLower);
   if (direct) return direct;
 
-  // Fallback for single-character exported ZIPs where files live under `<ninjaId>/...`
-  const baseName = rel.split('/').pop()?.toLowerCase();
+  // Cross-folder Spine fallback (spine/ <-> spine-no-estados/) + png/webp swap
+  if (relLower.includes('/spine/')) {
+    const swapped = relLower.replace('/spine/', '/spine-no-estados/');
+    const hit = lookupPathOrAltExt(swapped);
+    if (hit) return hit;
+  } else if (relLower.includes('/spine-no-estados/')) {
+    const swapped = relLower.replace('/spine-no-estados/', '/spine/');
+    const hit = lookupPathOrAltExt(swapped);
+    if (hit) return hit;
+  }
+
+  // Video fallback: _left.mp4 <-> .mp4 and hero/ <-> recruit/
+  const baseName = relLower.split('/').pop() || '';
   if (baseName) {
-    if (rel.includes('/video/') && baseName.endsWith('.mp4')) {
-      for (const [lowPath, ref] of lowerEntryMap) {
-        if (lowPath.endsWith(`/${baseName}`) || lowPath === baseName) return ref;
+    if (relLower.includes('/video/') && baseName.endsWith('.mp4')) {
+      const stem = baseName.slice(0, -4);
+      const videoCandidates = [
+        baseName,
+        stem.endsWith('_left') ? `${stem.slice(0, -5)}.mp4` : `${stem}_left.mp4`,
+      ];
+      for (const cand of videoCandidates) {
+        const hitHero = lowerEntryMap.get(`acervo/video/hero/${cand}`);
+        if (hitHero) return hitHero;
+        const hitRecruit = lowerEntryMap.get(`acervo/video/recruit/${cand}`);
+        if (hitRecruit) return hitRecruit;
+        const hitBase = basenameEntryMap.get(cand);
+        if (hitBase) return hitBase;
       }
     }
-    if (rel.includes('/som/') && baseName.endsWith('.mp3')) {
-      for (const [lowPath, ref] of lowerEntryMap) {
-        if (lowPath.endsWith(`/${baseName}`) || lowPath === baseName) return ref;
-      }
+
+    if (relLower.includes('/som/') && baseName.endsWith('.mp3')) {
+      const hitBase = basenameEntryMap.get(baseName);
+      if (hitBase) return hitBase;
     }
-    if (rel.includes('/spine-no-estados/') || rel.includes('/spine/')) {
-      for (const [lowPath, ref] of lowerEntryMap) {
-        if (lowPath.endsWith(`/${baseName}`) || lowPath === baseName) return ref;
+
+    if (
+      relLower.includes('/spine-no-estados/') ||
+      relLower.includes('/spine/') ||
+      relLower.includes('/particulas/')
+    ) {
+      const hitBase = basenameEntryMap.get(baseName);
+      if (hitBase) return hitBase;
+      if (baseName.endsWith('.png')) {
+        const hitWebp = basenameEntryMap.get(`${baseName.slice(0, -4)}.webp`);
+        if (hitWebp) return hitWebp;
+      } else if (baseName.endsWith('.webp')) {
+        const hitPng = basenameEntryMap.get(`${baseName.slice(0, -5)}.png`);
+        if (hitPng) return hitPng;
       }
     }
   }
@@ -1140,6 +1207,7 @@ export async function mountBackupZipFiles(
     revokeAllBlobUrls();
     exactEntryMap = new Map();
     lowerEntryMap = new Map();
+    basenameEntryMap = new Map();
     mediaProfilesById = new Map();
     mediaProfilesByLower = new Map();
     offlineSonsMap = {};
@@ -1158,6 +1226,7 @@ export async function mountBackupZipFiles(
       localExact.set(entry.path, entry);
       exactEntryMap.set(entry.path, entry);
       lowerEntryMap.set(entry.path.toLowerCase(), entry);
+      registerBasenameEntry(entry);
     }
 
     let meta: BackupMetaJson | null = null;
@@ -1944,6 +2013,7 @@ export function unmountBackupZip(options?: { keepPreference?: boolean }): void {
   revokeAllBlobUrls();
   exactEntryMap = new Map();
   lowerEntryMap = new Map();
+  basenameEntryMap = new Map();
   mediaProfilesById = new Map();
   mediaProfilesByLower = new Map();
   offlineSonsMap = {};

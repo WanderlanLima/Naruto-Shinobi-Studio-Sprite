@@ -668,6 +668,21 @@ export function resolveAssetFetchUrl(targetUrl: string): string {
   return buildCorsRelayUrl(targetUrl, FALLBACK_TEXT_PROXIES[0]);
 }
 
+export async function resolveAssetFetchUrlAsync(targetUrl: string): Promise<string> {
+  if (!targetUrl) return '';
+  if (targetUrl.startsWith('blob:') || targetUrl.startsWith('data:')) {
+    return targetUrl;
+  }
+
+  if (isOfflineBackupActive()) {
+    const offlineUrl = await readOfflineBlobUrl(targetUrl);
+    if (offlineUrl) return offlineUrl;
+    if (isStrictOfflineMode()) return '';
+  }
+
+  return resolveAssetFetchUrl(targetUrl);
+}
+
 /**
  * Resolves a playable URL for HTML5 <audio> and <video> elements.
  * Unlike fetch()/canvas reads, cross-origin <audio>/<video> elements play directly
@@ -694,6 +709,25 @@ export function resolveMediaPlayUrl(targetUrl: string): string {
   }
 
   return resolveAssetFetchUrl(targetUrl);
+}
+
+/**
+ * Async version of resolveMediaPlayUrl that works reliably in Offline Mode even when
+ * MP4/MP3 entries inside the local ZIP are DEFLATE-compressed or have unverified offsets.
+ */
+export async function resolveMediaPlayUrlAsync(targetUrl: string): Promise<string> {
+  if (!targetUrl) return '';
+  if (targetUrl.startsWith('blob:') || targetUrl.startsWith('data:')) {
+    return targetUrl;
+  }
+
+  if (isOfflineBackupActive()) {
+    const offlineUrl = await readOfflineBlobUrl(targetUrl);
+    if (offlineUrl) return offlineUrl;
+    if (isStrictOfflineMode()) return '';
+  }
+
+  return resolveMediaPlayUrl(targetUrl);
 }
 
 export function getNinjaThumbUrl(atlasUrl: string, skeletonUrl: string): string | null {
@@ -859,86 +893,37 @@ export async function extractGameCatalog(targetUrl: string): Promise<ExtractResp
   };
 }
 
-export async function fetchNinjaBundle(
+function swapSpineFolderUrl(url: string): string | null {
+  if (/\/acervo\/asset\/spine\//i.test(url)) {
+    return url.replace(/\/acervo\/asset\/spine\//i, '/acervo/asset/spine-no-estados/');
+  }
+  if (/\/acervo\/asset\/spine-no-estados\//i.test(url)) {
+    return url.replace(/\/acervo\/asset\/spine-no-estados\//i, '/acervo/asset/spine/');
+  }
+  return null;
+}
+
+async function loadBundledStaticSpine(
   atlasUrl: string,
-  skeletonUrl: string,
-  options?: { skipSkeleton?: boolean }
-): Promise<NinjaBundleResponse> {
-  // Offline local ZIP backup path (zero RAM overhead via File.slice)
-  if (isOfflineBackupActive()) {
-    const offlineAtlas = await readOfflineText(atlasUrl);
-    if (offlineAtlas) {
-      const skeleton =
-        !options?.skipSkeleton && skeletonUrl
-          ? await readOfflineJson<SpineSkeleton>(skeletonUrl)
-          : null;
-
-      const pageFilenames = parseAtlasPageFilenames(offlineAtlas);
-      const pageUrls: Record<string, string> = {};
-      for (const pageFile of pageFilenames) {
-        const resolved = new URL(pageFile, atlasUrl).toString();
-        const blobUrl = await readOfflineBlobUrl(resolved);
-        if (blobUrl) {
-          pageUrls[pageFile] = blobUrl;
-        } else if (!isStrictOfflineMode()) {
-          pageUrls[pageFile] = resolveAssetFetchUrl(resolved);
-        }
-      }
-
-      return {
-        atlasText: offlineAtlas,
-        skeleton,
-        pageUrls,
-      };
-    }
-
-    if (isStrictOfflineMode()) {
-      const fileLabel = atlasUrl.split('/').pop() || atlasUrl;
-      throw new Error(
-        `Arquivo "${fileLabel}" não encontrado nos ZIPs carregados (Modo 100% Offline). Adicione a parte correspondente na aba Backup Offline.`
-      );
-    }
-  }
-
-  if (backendStatus !== 'static') {
-    try {
-      const resp = await fetch(
-        `/api/ninja-bundle?atlasUrl=${encodeURIComponent(atlasUrl)}&skeletonUrl=${encodeURIComponent(skeletonUrl)}`
-      );
-      const contentType = resp.headers.get('content-type') || '';
-      if (contentType.includes('application/json')) {
-        backendStatus = 'available';
-        const data = (await resp.json()) as NinjaBundleResponse & { error?: string };
-        if (!resp.ok) {
-          throw new Error(data.error || 'Falha ao carregar pacote do ninja.');
-        }
-        return data;
-      }
-      backendStatus = 'static';
-    } catch (err) {
-      if (
-        err instanceof Error &&
-        !err.message.includes('Failed to fetch') &&
-        backendStatus === 'available'
-      ) {
-        throw err;
-      }
-      backendStatus = 'static';
-    }
-  }
-
-  // Static GitHub Pages mode: first try bundled compressed atlas & skeleton packs (zero rate limits!)
+  skipSkeleton?: boolean
+): Promise<{
+  atlasText: string;
+  skeleton: SpineSkeleton | null;
+  idleFrameName?: string;
+  diagReason: string;
+}> {
   const ninjaId = extractNinjaIdFromAtlasUrl(atlasUrl);
   let atlasText = '';
   let idleFrameName: string | undefined;
   let skeletonChunkIdx: number | undefined;
   let effectSkeletonChunkIdx: number | undefined;
-  let staticDiagReason = '';
+  let resolvedSpineId = ninjaId || '';
+  let diagReason = '';
 
   if (ninjaId) {
     const pack = await loadStaticAtlasPack();
     if (!pack) {
-      staticDiagReason = lastStaticPackError
+      diagReason = lastStaticPackError
         ? `Pacote estático indisponível (${lastStaticPackError})`
         : 'Pacote estático data/naruto-atlas-pack.zip indisponível';
     } else {
@@ -956,45 +941,200 @@ export async function fetchNinjaBundle(
       }
       if (packedAtlas) {
         atlasText = await packedAtlas.async('text');
+        resolvedSpineId = resolvedId;
         const entry = pack.idleMap[resolvedId] || pack.idleMap[ninjaId];
         idleFrameName = entry?.frame;
         skeletonChunkIdx = entry?.s;
-      } else {
-        // Fallback to companion combat particle/effect static pack
-        const effectsPack = await loadStaticEffectsAtlasPack();
-        if (effectsPack) {
-          let effAtlas = effectsPack.zip.file(`atlas/${ninjaId}.atlas`) ?? null;
-          let effResolvedId = ninjaId;
-          if (!effAtlas) {
-            const targetLow = `atlas/${ninjaId}.atlas`.toLowerCase();
-            for (const [k, v] of Object.entries(effectsPack.zip.files)) {
-              if (!v.dir && k.toLowerCase() === targetLow) {
-                effAtlas = v;
-                effResolvedId = k.slice('atlas/'.length, -'.atlas'.length);
-                break;
-              }
+      }
+    }
+
+    // Fallback to companion combat particle/effect static pack (also runs even if mainPack failed)
+    if (!atlasText) {
+      const effectsPack = await loadStaticEffectsAtlasPack();
+      if (effectsPack) {
+        let effAtlas = effectsPack.zip.file(`atlas/${ninjaId}.atlas`) ?? null;
+        let effResolvedId = ninjaId;
+        if (!effAtlas) {
+          const targetLow = `atlas/${ninjaId}.atlas`.toLowerCase();
+          for (const [k, v] of Object.entries(effectsPack.zip.files)) {
+            if (!v.dir && k.toLowerCase() === targetLow) {
+              effAtlas = v;
+              effResolvedId = k.slice('atlas/'.length, -'.atlas'.length);
+              break;
             }
           }
-          if (effAtlas) {
-            atlasText = await effAtlas.async('text');
-            effectSkeletonChunkIdx =
-              effectsPack.chunkMap[effResolvedId] ??
-              effectsPack.chunkMap[ninjaId] ??
-              effectsPack.chunkMapLower.get(ninjaId.toLowerCase());
-          }
         }
-        if (!atlasText) {
-          const totalPacked = Object.keys(pack.idleMap).length;
-          staticDiagReason = `"${ninjaId}.atlas" ausente nos pacotes estáticos (${totalPacked} ninjas carregados)`;
+        if (effAtlas) {
+          atlasText = await effAtlas.async('text');
+          resolvedSpineId = effResolvedId;
+          effectSkeletonChunkIdx =
+            effectsPack.chunkMap[effResolvedId] ??
+            effectsPack.chunkMap[ninjaId] ??
+            effectsPack.chunkMapLower.get(ninjaId.toLowerCase());
         }
+      }
+      if (!atlasText && !diagReason) {
+        diagReason = `"${ninjaId}.atlas" ausente nos pacotes estáticos`;
       }
     }
   } else {
-    staticDiagReason = `ID de atlas não reconhecido em "${atlasUrl}"`;
+    diagReason = `ID de atlas não reconhecido em "${atlasUrl}"`;
   }
 
+  let skeleton: SpineSkeleton | null = null;
+  if (!skipSkeleton && resolvedSpineId) {
+    if (typeof skeletonChunkIdx === 'number') {
+      skeleton = await loadStaticSkeleton(resolvedSpineId, skeletonChunkIdx);
+    } else if (typeof effectSkeletonChunkIdx === 'number') {
+      skeleton = await loadStaticEffectSkeleton(resolvedSpineId, effectSkeletonChunkIdx);
+    }
+  }
+
+  return { atlasText, skeleton, idleFrameName, diagReason };
+}
+
+export async function fetchNinjaBundle(
+  atlasUrl: string,
+  skeletonUrl: string,
+  options?: { skipSkeleton?: boolean }
+): Promise<NinjaBundleResponse> {
+  // Offline local ZIP backup path (zero RAM overhead via File.slice)
+  if (isOfflineBackupActive()) {
+    let offlineAtlas = await readOfflineText(atlasUrl);
+    let skeleton =
+      !options?.skipSkeleton && skeletonUrl
+        ? await readOfflineJson<SpineSkeleton>(skeletonUrl)
+        : null;
+    let idleFrameName: string | undefined;
+
+    // Fallback to the app's own bundled local static atlas/skeleton packs when an effect
+    // (e.g., dajitexiao1, dianliu, huoshouji, feng) has its textures in the offline ZIP
+    // while its .atlas/.json live in bundled data/effects-atlas-pack.zip (zero internet needed).
+    if (!offlineAtlas || (!options?.skipSkeleton && !skeleton)) {
+      const staticFallback = await loadBundledStaticSpine(
+        atlasUrl,
+        Boolean(options?.skipSkeleton || skeleton)
+      );
+      if (!offlineAtlas && staticFallback.atlasText) {
+        offlineAtlas = staticFallback.atlasText;
+      }
+      if (!options?.skipSkeleton && !skeleton && staticFallback.skeleton) {
+        skeleton = staticFallback.skeleton;
+      }
+      if (staticFallback.idleFrameName) {
+        idleFrameName = staticFallback.idleFrameName;
+      }
+    }
+
+    if (offlineAtlas) {
+      const pageFilenames = parseAtlasPageFilenames(offlineAtlas);
+      const pageUrls: Record<string, string> = {};
+      for (const pageFile of pageFilenames) {
+        const resolved = new URL(pageFile, atlasUrl).toString();
+        let blobUrl = await readOfflineBlobUrl(resolved);
+        if (!blobUrl) {
+          const swapped = swapSpineFolderUrl(resolved);
+          if (swapped) {
+            blobUrl = await readOfflineBlobUrl(swapped);
+          }
+        }
+        if (blobUrl) {
+          pageUrls[pageFile] = blobUrl;
+        } else if (!isStrictOfflineMode()) {
+          pageUrls[pageFile] = resolveAssetFetchUrl(resolved);
+        }
+      }
+
+      return {
+        atlasText: offlineAtlas,
+        skeleton,
+        pageUrls,
+        idleFrameName,
+      };
+    }
+
+    if (isStrictOfflineMode()) {
+      const fileLabel = atlasUrl.split('/').pop() || atlasUrl;
+      throw new Error(
+        `Arquivo "${fileLabel}" não encontrado nos ZIPs carregados (Modo 100% Offline). Adicione a parte correspondente na aba Backup Offline.`
+      );
+    }
+  }
+
+  if (backendStatus !== 'static') {
+    const tryBackend = async (aUrl: string, sUrl: string): Promise<NinjaBundleResponse | null> => {
+      const resp = await fetch(
+        `/api/ninja-bundle?atlasUrl=${encodeURIComponent(aUrl)}&skeletonUrl=${encodeURIComponent(sUrl)}`
+      );
+      const contentType = resp.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        backendStatus = 'static';
+        return null;
+      }
+      backendStatus = 'available';
+      const data = (await resp.json()) as NinjaBundleResponse & { error?: string };
+      if (!resp.ok) {
+        throw new Error(data.error || 'Falha ao carregar pacote do ninja.');
+      }
+      return data;
+    };
+
+    try {
+      const primary = await tryBackend(atlasUrl, skeletonUrl);
+      if (primary) return primary;
+    } catch (err) {
+      if (backendStatus === 'available') {
+        const altAtlas = swapSpineFolderUrl(atlasUrl);
+        const altSkel = skeletonUrl ? swapSpineFolderUrl(skeletonUrl) || skeletonUrl : skeletonUrl;
+        if (altAtlas) {
+          try {
+            const altRes = await tryBackend(altAtlas, altSkel);
+            if (altRes) return altRes;
+          } catch {
+            // fall through to static packs / original error
+          }
+        }
+        // Also try bundled static effect packs before throwing (some impact spines live in bundled packs)
+        const bundled = await loadBundledStaticSpine(atlasUrl, options?.skipSkeleton);
+        if (bundled.atlasText) {
+          const pageFilenames = parseAtlasPageFilenames(bundled.atlasText);
+          const pageUrls: Record<string, string> = {};
+          for (const pageFile of pageFilenames) {
+            const resolved = new URL(pageFile, atlasUrl).toString();
+            pageUrls[pageFile] = `/api/proxy?url=${encodeURIComponent(resolved)}`;
+          }
+          return {
+            atlasText: bundled.atlasText,
+            skeleton: bundled.skeleton,
+            pageUrls,
+            idleFrameName: bundled.idleFrameName,
+          };
+        }
+        if (err instanceof Error && !err.message.includes('Failed to fetch')) {
+          throw err;
+        }
+      }
+      backendStatus = 'static';
+    }
+  }
+
+  // Static GitHub Pages mode: first try bundled compressed atlas & skeleton packs (zero rate limits!)
+  const bundled = await loadBundledStaticSpine(atlasUrl, options?.skipSkeleton);
+  let atlasText = bundled.atlasText;
+  let skeleton = bundled.skeleton;
+  const idleFrameName = bundled.idleFrameName;
+  const staticDiagReason = bundled.diagReason;
+  let effectiveAtlasUrl = atlasUrl;
+
   if (!atlasText) {
-    const atlasResp = await fetchTextViaRelays(atlasUrl, 7000);
+    let atlasResp = await fetchTextViaRelays(atlasUrl, 7000);
+    if (!atlasResp) {
+      const altAtlas = swapSpineFolderUrl(atlasUrl);
+      if (altAtlas) {
+        atlasResp = await fetchTextViaRelays(altAtlas, 7000);
+        if (atlasResp) effectiveAtlasUrl = altAtlas;
+      }
+    }
     if (!atlasResp) {
       const detail = staticDiagReason ? ` [${staticDiagReason}]` : '';
       throw new Error(
@@ -1004,21 +1144,19 @@ export async function fetchNinjaBundle(
     atlasText = await atlasResp.text();
   }
 
-  let skeleton: SpineSkeleton | null = null;
-  if (!options?.skipSkeleton) {
-    if (ninjaId && typeof skeletonChunkIdx === 'number') {
-      skeleton = await loadStaticSkeleton(ninjaId, skeletonChunkIdx);
-    } else if (ninjaId && typeof effectSkeletonChunkIdx === 'number') {
-      skeleton = await loadStaticEffectSkeleton(ninjaId, effectSkeletonChunkIdx);
+  if (!options?.skipSkeleton && !skeleton && skeletonUrl) {
+    let skelResp = await fetchTextViaRelays(skeletonUrl, 4500);
+    if (!skelResp) {
+      const altSkel = swapSpineFolderUrl(skeletonUrl);
+      if (altSkel) {
+        skelResp = await fetchTextViaRelays(altSkel, 4500);
+      }
     }
-    if (!skeleton && skeletonUrl) {
-      const skelResp = await fetchTextViaRelays(skeletonUrl, 4500);
-      if (skelResp) {
-        try {
-          skeleton = (await skelResp.json()) as SpineSkeleton;
-        } catch {
-          skeleton = null;
-        }
+    if (skelResp) {
+      try {
+        skeleton = (await skelResp.json()) as SpineSkeleton;
+      } catch {
+        skeleton = null;
       }
     }
   }
@@ -1027,7 +1165,7 @@ export async function fetchNinjaBundle(
   const pageUrls: Record<string, string> = {};
   const customProxy = getSavedCorsProxy();
   for (const pageFile of pageFilenames) {
-    const resolved = new URL(pageFile, atlasUrl).toString();
+    const resolved = new URL(pageFile, effectiveAtlasUrl).toString();
     pageUrls[pageFile] = customProxy
       ? buildCorsRelayUrl(resolved, customProxy)
       : buildWsrvImageUrl(resolved);
@@ -1147,16 +1285,53 @@ export function resolveMediaVideoUrl(
   mediaProfile: NinjaMediaProfile | null | undefined,
   atlasUrl: string
 ): string | null {
+  const origin = mediaProfile?.originBase || getOriginFromUrl(atlasUrl);
   const map = mediaProfile?.videoUrlMap;
+  let mappedUrl: string | null = null;
   if (map) {
-    if (map[videoRef.resolvedName]) return map[videoRef.resolvedName];
-    if (map[videoRef.source]) return map[videoRef.source];
-    const targetLow = (videoRef.resolvedName || videoRef.source || '').toLowerCase();
-    for (const [k, url] of Object.entries(map)) {
-      if (k.toLowerCase() === targetLow) return url;
+    if (map[videoRef.resolvedName]) mappedUrl = map[videoRef.resolvedName];
+    else if (map[videoRef.source]) mappedUrl = map[videoRef.source];
+    else {
+      const targetLow = (videoRef.resolvedName || videoRef.source || '').toLowerCase();
+      const sourceLow = (videoRef.source || '').toLowerCase();
+      for (const [k, url] of Object.entries(map)) {
+        const kLow = k.toLowerCase();
+        if (kLow === targetLow || (sourceLow && kLow === sourceLow)) {
+          mappedUrl = url;
+          break;
+        }
+      }
     }
   }
-  const origin = mediaProfile?.originBase || getOriginFromUrl(atlasUrl);
+
+  if (isOfflineBackupActive()) {
+    if (mappedUrl && hasOfflineEntry(mappedUrl)) return mappedUrl;
+    const rawNames = [
+      videoRef.resolvedName,
+      videoRef.source,
+      videoRef.source ? `${videoRef.source}_left` : '',
+      videoRef.resolvedName ? videoRef.resolvedName.replace(/_(left|right)$/i, '') : '',
+    ]
+      .map((s) => (s || '').trim().replace(/\.mp4$/i, ''))
+      .filter(Boolean);
+    const seen = new Set<string>();
+    for (const name of rawNames) {
+      const low = name.toLowerCase();
+      if (seen.has(low)) continue;
+      seen.add(low);
+      for (const rel of [
+        `acervo/video/hero/${name}.mp4`,
+        `acervo/video/recruit/${name}.mp4`,
+      ]) {
+        if (hasOfflineEntry(rel)) {
+          return `${origin}/${rel}`;
+        }
+      }
+    }
+  }
+
+  if (mappedUrl) return mappedUrl;
+
   const key = (videoRef.resolvedName || videoRef.source || '').trim().replace(/\.mp4$/i, '');
   if (!key) return null;
   return `${origin}/acervo/video/hero/${key}.mp4`;
@@ -1270,9 +1445,12 @@ export async function fetchNinjaMediaProfile(
 
     const fallbackUltimateAnim =
       availableAnims.find((a) => a === 'UniqueSkill') ||
+      availableAnims.find((a) => a === 'UniqueSkill1') ||
       availableAnims.find((a) => a === 'UniqueSkill2') ||
+      availableAnims.find((a) => a === 'UniqueSkill3') ||
       availableAnims.find((a) => a.toLowerCase() === 'uniqueskill') ||
-      availableAnims.find((a) => a === 'superUniqueSkill');
+      availableAnims.find((a) => a === 'superUniqueSkill') ||
+      availableAnims.find((a) => a.toLowerCase().includes('uniqueskill'));
 
     const attachVideoAnimTiming = (videosList: NinjaVideoClip[]): NinjaVideoClip[] =>
       videosList.map((v) => {
@@ -1308,7 +1486,7 @@ export async function fetchNinjaMediaProfile(
       const originBase = getOfflineOrigin() || getOriginFromUrl(ninja.atlasUrl);
       const sonsMap = getOfflineSonsMap();
       const stored = getOfflineMediaProfile(ninja.id);
-      const baseProfile: NinjaMediaProfile = stored
+      let baseProfile: NinjaMediaProfile = stored
         ? {
             ...stored,
             soundUrlMap: { ...(stored.soundUrlMap || {}) },
@@ -1318,10 +1496,22 @@ export async function fetchNinjaMediaProfile(
           }
         : buildFallbackMediaProfile(ninja, skeleton);
 
+      // Always enrich from the app's bundled local ninja-skills-pack.zip (icons, PT skill names,
+      // sounds map, voices, and ultimate/recruit MP4 clips that may be missing from older backups).
+      const skillsPack = await loadStaticNinjaSkillsPack();
+      const staticEntry =
+        skillsPack?.ninjas[ninja.id] || skillsPack?.ninjasLower.get(ninja.id.toLowerCase());
+      if (staticEntry || skillsPack) {
+        baseProfile = mergeStaticSkillsIntoProfile(baseProfile, staticEntry, skillsPack);
+      }
+
       // Enrich any skeleton @CMD sounds from offline sons.json or direct ZIP lookup
       for (const rawSound of soundNames) {
         const clean = rawSound.trim().replace(/\.mp3$/i, '');
-        if (!clean || baseProfile.soundUrlMap[clean]) continue;
+        if (!clean) continue;
+        if (baseProfile.soundUrlMap[clean] && hasOfflineEntry(baseProfile.soundUrlMap[clean])) {
+          continue;
+        }
         const mapped = sonsMap[clean];
         if (typeof mapped === 'string' && mapped) {
           baseProfile.soundUrlMap[clean] = `${originBase}/${mapped.replace(/^\/+/, '')}`;
@@ -1342,46 +1532,114 @@ export async function fetchNinjaMediaProfile(
 
       // Enrich any skeleton {PLAYVEDIO} clips if not already listed
       const seenVidKeys = new Set(baseProfile.videos.map((v) => v.key.toLowerCase()));
+      const seenVidUrls = new Set(baseProfile.videos.map((v) => v.url.toLowerCase()));
       for (const rawVid of videoNames) {
         const clean = rawVid.trim().replace(/\.mp4$/i, '');
         if (!clean || seenVidKeys.has(clean.toLowerCase())) continue;
+        const baseClean = clean.replace(/_(left|right)$/i, '');
         const candidates = [
           `acervo/video/hero/${clean}.mp4`,
           `acervo/video/hero/${clean}_left.mp4`,
+          baseClean !== clean ? `acervo/video/hero/${baseClean}.mp4` : '',
           `acervo/video/recruit/${clean}.mp4`,
-        ];
+        ].filter(Boolean);
         const found = candidates.find((c) => hasOfflineEntry(c));
         if (found) {
           const url = `${originBase}/${found}`;
           baseProfile.videoUrlMap[clean] = url;
-          seenVidKeys.add(clean.toLowerCase());
+          if (baseClean && !baseProfile.videoUrlMap[baseClean]) {
+            baseProfile.videoUrlMap[baseClean] = url;
+          }
+          if (!seenVidUrls.has(url.toLowerCase())) {
+            seenVidKeys.add(clean.toLowerCase());
+            seenVidUrls.add(url.toLowerCase());
+            baseProfile.videos.push({
+              key: clean,
+              label: `Vídeo Ultimate (${clean})`,
+              kind: found.includes('/recruit/') ? 'recruit' : 'ultimate',
+              url,
+            });
+          }
+        }
+      }
+
+      // Probe common hero/recruit MP4 filenames inside the mounted offline ZIP
+      const idVariants = Array.from(
+        new Set(
+          [
+            ninja.id,
+            ninja.code,
+            baseProfile.heroCode,
+            ninja.id.replace(/^vdfno_/i, ''),
+          ]
+            .map((s) => (s || '').trim())
+            .filter(Boolean)
+        )
+      );
+      for (const idVar of idVariants) {
+        const probeDefs: Array<{ rel: string; key: string; kind: 'ultimate' | 'recruit'; label: string }> = [
+          {
+            rel: `acervo/video/hero/${idVar}_texie.mp4`,
+            key: `${idVar}_texie`,
+            kind: 'ultimate',
+            label: `Ultimate (${idVar}_texie)`,
+          },
+          {
+            rel: `acervo/video/hero/${idVar}_aoyi.mp4`,
+            key: `${idVar}_aoyi`,
+            kind: 'ultimate',
+            label: `Ultimate (${idVar}_aoyi)`,
+          },
+          {
+            rel: `acervo/video/recruit/${idVar}_HeroVideo.mp4`,
+            key: `${idVar}_HeroVideo`,
+            kind: 'recruit',
+            label: `Recrutamento (${idVar})`,
+          },
+        ];
+        for (const p of probeDefs) {
+          if (seenVidKeys.has(p.key.toLowerCase())) continue;
+          if (!hasOfflineEntry(p.rel)) continue;
+          const url = `${originBase}/${p.rel}`;
+          if (seenVidUrls.has(url.toLowerCase())) continue;
+          seenVidKeys.add(p.key.toLowerCase());
+          seenVidUrls.add(url.toLowerCase());
+          baseProfile.videoUrlMap[p.key] = url;
           baseProfile.videos.push({
-            key: clean,
-            label: `Vídeo Ultimate (${clean})`,
-            kind: found.includes('/recruit/') ? 'recruit' : 'ultimate',
+            key: p.key,
+            label: p.label,
+            kind: p.kind,
             url,
           });
         }
       }
 
-      let finalOfflineProfile: NinjaMediaProfile = {
+      // Ensure every listed video URL matches the exact variant stored in the mounted ZIP
+      const normalizedVideos = baseProfile.videos.map((v) => {
+        if (hasOfflineEntry(v.url)) return v;
+        const cleanKey = v.key.trim().replace(/\.mp4$/i, '');
+        const baseKey = cleanKey.replace(/_(left|right)$/i, '');
+        const altCandidates = [
+          `acervo/video/hero/${cleanKey}.mp4`,
+          `acervo/video/hero/${cleanKey}_left.mp4`,
+          `acervo/video/hero/${baseKey}.mp4`,
+          `acervo/video/recruit/${cleanKey}.mp4`,
+        ];
+        const match = altCandidates.find((c) => hasOfflineEntry(c));
+        if (match) {
+          const resolvedUrl = `${originBase}/${match}`;
+          baseProfile.videoUrlMap[v.key] = resolvedUrl;
+          return { ...v, url: resolvedUrl };
+        }
+        return v;
+      });
+
+      const finalOfflineProfile: NinjaMediaProfile = {
         ...baseProfile,
         passiveAura: baseProfile.passiveAura ?? resolveFallbackPassiveAura(ninja),
-        videos: attachVideoAnimTiming(baseProfile.videos),
+        // Always attach animation timing AFTER merging ninja-skills-pack & offline ZIP probes
+        videos: attachVideoAnimTiming(normalizedVideos),
       };
-
-      // Enrich skill icons from bundled static skills pack if an older offline ZIP lacks iconUrl
-      const hasAnyOfflineIcon =
-        Object.values(finalOfflineProfile.skills || {}).some((s) => Boolean(s.iconUrl)) ||
-        (finalOfflineProfile.passives || []).some((p) => Boolean(p.iconUrl));
-      if (!hasAnyOfflineIcon) {
-        const skillsPack = await loadStaticNinjaSkillsPack();
-        const staticEntry =
-          skillsPack?.ninjas[ninja.id] || skillsPack?.ninjasLower.get(ninja.id.toLowerCase());
-        if (staticEntry) {
-          finalOfflineProfile = mergeStaticSkillsIntoProfile(finalOfflineProfile, staticEntry);
-        }
-      }
 
       return finalOfflineProfile;
     }

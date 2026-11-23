@@ -468,7 +468,8 @@ export function extractSpineEffectRefs(
 
         const layerMatch = body.match(/layer\s*=\s*["']([^"']+)["']/);
         const loopMatch = body.match(/loop\s*=\s*["']([^"']+)["']/);
-        const hasSelfTarget = /targets\s*=\s*\[[^\]]*["']self["'][^\]]*\]/.test(body);
+        const hasExplicitTargets = /targets\s*=\s*\[/i.test(body);
+        const hasSelfTarget = /targets\s*=\s*\[[^\]]*["']self["'][^\]]*\]/i.test(body);
 
         const spineId = spineMatch[1].trim();
         const effectAnim = sourceMatch[1].trim();
@@ -477,7 +478,14 @@ export function extractSpineEffectRefs(
           layerVal === 'rbg' || layerVal === 'bg' ? 'behind' : 'front';
         const loopVal = (loopMatch?.[1] || '').toLowerCase();
         const loop = loopVal === 'true' || loopVal === '1' || loopVal === 'loop';
-        const isSelfOrScreen = cmdType === 'DISPLAY' || hasSelfTarget;
+        const isGenericImpactSpine =
+          /^(?:noe_)?(?:f?dajitexiao\d*|dianliu|huoshouji|feng|erweibaodian|vdf_.*_hit)$/i.test(
+            spineId
+          );
+        const isSelfOrScreen =
+          cmdType === 'DISPLAY' ||
+          hasSelfTarget ||
+          (!hasExplicitTargets && !isGenericImpactSpine);
         const startTime = Math.max(0, ev.time || 0);
 
         const key = `${spineId}::${effectAnim}::${startTime.toFixed(4)}::${layer}`;

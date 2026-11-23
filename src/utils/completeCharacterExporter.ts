@@ -624,7 +624,10 @@ export async function fetchParsedEffectAsset(
   const task = (async (): Promise<ParsedEffectAsset | null> => {
     try {
       const data = await fetchNinjaBundle(atlasUrl, skeletonUrl);
-      if (!data.skeleton) return null;
+      if (!data.skeleton) {
+        cache?.delete(atlasUrl);
+        return null;
+      }
       throwIfAborted(signal);
 
       const pages = parseAtlas(data.atlasText);
@@ -637,6 +640,10 @@ export async function fetchParsedEffectAsset(
       throwIfAborted(signal);
 
       const regionCanvasMap = buildRegionSpriteMap(pages, pageImages);
+      if (regionCanvasMap.size === 0) {
+        cache?.delete(atlasUrl);
+        return null;
+      }
 
       return {
         spineId,
@@ -679,6 +686,14 @@ async function fetchBinaryAssetSafe(
   signal?: AbortSignal
 ): Promise<ArrayBuffer | null> {
   try {
+    throwIfAborted(signal);
+    if (isOfflineBackupActive()) {
+      const offlineBuf = await readOfflineEntryBytes(targetUrl);
+      if (offlineBuf && offlineBuf.byteLength > 0 && offlineBuf.byteLength <= MAX_MEDIA_FILE_BYTES) {
+        return offlineBuf;
+      }
+      if (isStrictOfflineMode()) return null;
+    }
     const fetchUrl = resolveAssetFetchUrl(targetUrl);
     if (!fetchUrl) return null;
     const resp = await fetch(fetchUrl, { signal: signal ?? AbortSignal.timeout(25_000) });

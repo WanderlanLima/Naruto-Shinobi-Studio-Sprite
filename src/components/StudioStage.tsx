@@ -79,11 +79,14 @@ import {
   getLatestExportCheckpoint,
   type ExportCheckpointJobMeta,
 } from '../utils/exportCheckpointStore';
+import { useOfflineZipState } from '../utils/offlineZipStore';
 import {
   fetchNinjaBundle,
   fetchNinjaMediaProfile,
   resolveAssetFetchUrl,
+  resolveAssetFetchUrlAsync,
   resolveMediaPlayUrl,
+  resolveMediaPlayUrlAsync,
   resolveMediaSoundUrl,
   resolveMediaVideoUrl,
 } from '../utils/remoteClient';
@@ -95,8 +98,9 @@ interface LoadedEffectBundle {
   regionCanvasMap: Map<string, SpriteRegionSource>;
 }
 
-const MAX_EFFECT_BUNDLE_CACHE = 24;
+const MAX_EFFECT_BUNDLE_CACHE = 32;
 const effectBundleCache = new Map<string, Promise<LoadedEffectBundle | null>>();
+let lastEffectCacheScope = '';
 
 async function loadEffectImageWithRetry(src: string): Promise<HTMLImageElement> {
   try {
@@ -110,8 +114,14 @@ async function loadEffectImageWithRetry(src: string): Promise<HTMLImageElement> 
 function loadEffectBundle(
   baseAtlasUrl: string,
   spineId: string,
-  explicitUrls?: { atlasUrl: string; skeletonUrl: string }
+  explicitUrls?: { atlasUrl: string; skeletonUrl: string },
+  cacheScope = 'net:0'
 ): Promise<LoadedEffectBundle | null> {
+  if (cacheScope !== lastEffectCacheScope) {
+    effectBundleCache.clear();
+    lastEffectCacheScope = cacheScope;
+  }
+
   let atlasUrl: string;
   let skeletonUrl: string;
   try {
@@ -121,18 +131,22 @@ function loadEffectBundle(
     return Promise.resolve(null);
   }
 
-  const cacheKey = atlasUrl;
+  const cacheKey = `${cacheScope}::${atlasUrl}`;
   const cached = effectBundleCache.get(cacheKey);
   if (cached) return cached;
 
   const promise = (async () => {
     try {
       const data = await fetchNinjaBundle(atlasUrl, skeletonUrl);
-      if (!data.skeleton) return null;
+      if (!data.skeleton) {
+        effectBundleCache.delete(cacheKey);
+        return null;
+      }
       const parsedPages = parseAtlas(data.atlasText);
       const loadedImgs: Record<string, HTMLImageElement> = {};
       await Promise.allSettled(
         Object.entries(data.pageUrls).map(async ([pageName, proxyUrl]) => {
+          if (!proxyUrl) return;
           loadedImgs[pageName] = await loadEffectImageWithRetry(proxyUrl);
         })
       );
@@ -226,7 +240,8 @@ function clampPlayerPan(x: number, y: number, zoomLevel: number): { x: number; y
   };
 }
 
-const STUDIO_PREFS_STORAGE_KEY = 'shinobi_studio_prefs_v1';
+const STUDIO_PREFS_STORAGE_KEY = 'shinobi_studio_prefs_v2';
+const LEGACY_STUDIO_PREFS_STORAGE_KEY = 'shinobi_studio_prefs_v1';
 
 interface SavedStudioPrefs {
   bgStyle: BgStyle;
@@ -251,12 +266,12 @@ interface SavedStudioPrefs {
 
 const DEFAULT_STUDIO_PREFS: SavedStudioPrefs = {
   bgStyle: 'checker',
-  effectMode: 'powers',
+  effectMode: 'all',
   gifBg: 'transparent',
   soundMuted: false,
   soundVolume: 0.85,
   enableVideoCutscene: true,
-  completeEffectScope: 'powers',
+  completeEffectScope: 'all',
   completeIncludeOriginals: true,
   completeIncludeEffects: true,
   completeIncludeAnimPngs: true,
@@ -272,7 +287,9 @@ const DEFAULT_STUDIO_PREFS: SavedStudioPrefs = {
 
 function loadStudioPrefs(): SavedStudioPrefs {
   try {
-    const raw = localStorage.getItem(STUDIO_PREFS_STORAGE_KEY);
+    const v2Raw = localStorage.getItem(STUDIO_PREFS_STORAGE_KEY);
+    const isMigratingFromV1 = !v2Raw;
+    const raw = v2Raw || localStorage.getItem(LEGACY_STUDIO_PREFS_STORAGE_KEY);
     if (!raw) return DEFAULT_STUDIO_PREFS;
     const p = JSON.parse(raw) as Partial<SavedStudioPrefs>;
     const validBg = ['checker', 'dark', 'light', 'chroma'] as const;
@@ -280,13 +297,26 @@ function loadStudioPrefs(): SavedStudioPrefs {
     const validEff = ['powers', 'all', 'base'] as const;
     const validFps = [24, 15, 12] as const;
     const validRes = [2048, 1024, 512] as const;
+    // When migrating from v1 (where the old default was 'powers'), upgrade to 'all'
+    // so particles and hit impacts play by default unless the user explicitly chose 'base'.
+    const parsedEffectMode = validEff.includes(p.effectMode as (typeof validEff)[number])
+      ? (p.effectMode as 'powers' | 'all' | 'base')
+      : DEFAULT_STUDIO_PREFS.effectMode;
+    const migratedEffectMode =
+      isMigratingFromV1 && parsedEffectMode === 'powers' ? 'all' : parsedEffectMode;
+    const parsedCompleteScope = validEff.includes(
+      p.completeEffectScope as (typeof validEff)[number]
+    )
+      ? (p.completeEffectScope as EffectIncludeScope)
+      : DEFAULT_STUDIO_PREFS.completeEffectScope;
+    const migratedCompleteScope =
+      isMigratingFromV1 && parsedCompleteScope === 'powers' ? 'all' : parsedCompleteScope;
+
     return {
       bgStyle: validBg.includes(p.bgStyle as (typeof validBg)[number])
         ? (p.bgStyle as BgStyle)
         : DEFAULT_STUDIO_PREFS.bgStyle,
-      effectMode: validEff.includes(p.effectMode as (typeof validEff)[number])
-        ? (p.effectMode as 'powers' | 'all' | 'base')
-        : DEFAULT_STUDIO_PREFS.effectMode,
+      effectMode: migratedEffectMode,
       gifBg: validGif.includes(p.gifBg as (typeof validGif)[number])
         ? (p.gifBg as SavedStudioPrefs['gifBg'])
         : DEFAULT_STUDIO_PREFS.gifBg,
@@ -299,9 +329,7 @@ function loadStudioPrefs(): SavedStudioPrefs {
         typeof p.enableVideoCutscene === 'boolean'
           ? p.enableVideoCutscene
           : DEFAULT_STUDIO_PREFS.enableVideoCutscene,
-      completeEffectScope: validEff.includes(p.completeEffectScope as (typeof validEff)[number])
-        ? (p.completeEffectScope as EffectIncludeScope)
-        : DEFAULT_STUDIO_PREFS.completeEffectScope,
+      completeEffectScope: migratedCompleteScope,
       completeIncludeOriginals:
         typeof p.completeIncludeOriginals === 'boolean'
           ? p.completeIncludeOriginals
@@ -355,6 +383,9 @@ export function StudioStage({
   onBackToCatalog,
   onLoadedFramesChange,
 }: StudioStageProps) {
+  const offlineZip = useOfflineZipState();
+  const offlineMediaScope = `${offlineZip.active ? 'zip' : 'net'}:${offlineZip.generation}`;
+
   const initialPrefsRef = useRef<SavedStudioPrefs | null>(null);
   if (!initialPrefsRef.current) {
     initialPrefsRef.current = loadStudioPrefs();
@@ -534,6 +565,8 @@ export function StudioStage({
   const prevAnimTimeRef = useRef(-1);
   const videoTriggeredCycleRef = useRef(false);
   const videoElemRef = useRef<HTMLVideoElement | null>(null);
+  const resolvedMediaUrlMapRef = useRef<Map<string, string>>(new Map());
+  const lastLoadedNinjaIdRef = useRef<string>('');
 
   const openDetachedPlayer = () => {
     if (!playerDetached) {
@@ -570,40 +603,46 @@ export function StudioStage({
 
   useEffect(() => {
     if (!ninjaKeyId) {
+      lastLoadedNinjaIdRef.current = '';
       onLoadedFramesChange(null);
       return;
     }
 
+    const isSameNinjaReload = lastLoadedNinjaIdRef.current === ninjaKeyId;
+    lastLoadedNinjaIdRef.current = ninjaKeyId;
+
     let cancelled = false;
-    window.scrollTo({ top: 0, behavior: 'auto' });
+    if (!isSameNinjaReload) {
+      window.scrollTo({ top: 0, behavior: 'auto' });
+      setSelectedRegion(null);
+      setCurrentTime(0);
+      setAutoFit(true);
+      setZoom(1);
+      setPan({ x: 0, y: 0 });
+      savedScrollYRef.current = null;
+      setDockHeight(0);
+      setPlayerDetached(false);
+      setTermuxExportResult(null);
+      setCopiedTermuxExportCmd(false);
+      // Never abort or dismiss an actively running export if catalog references refresh
+      if (!completeExportAbortRef.current) {
+        setShowCompleteExportModal(false);
+        setCompleteExportProgress(null);
+        setCompleteExportError(null);
+      }
+      setShowPassiveAura(true);
+      setPassiveAuraPhase('loop');
+      animTimeRef.current = 0;
+    }
     setLoading(true);
     setError(null);
-    setSelectedRegion(null);
-    setCurrentTime(0);
-    setAutoFit(true);
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
-    savedScrollYRef.current = null;
-    setDockHeight(0);
-    setPlayerDetached(false);
-    setTermuxExportResult(null);
-    setCopiedTermuxExportCmd(false);
-    // Never abort or dismiss an actively running export if catalog references refresh
-    if (!completeExportAbortRef.current) {
-      setShowCompleteExportModal(false);
-      setCompleteExportProgress(null);
-      setCompleteExportError(null);
-    }
     setCompositeLayers([]);
     setMediaProfile(null);
     setPassiveAuraBundle(null);
-    setShowPassiveAura(true);
-    setPassiveAuraPhase('loop');
     setActiveVideoOverlay(null);
     setVideoAutoplayMuted(false);
     setPlayingVoiceKey(null);
     audioCuePlayer.stopAll();
-    animTimeRef.current = 0;
     prevAnimTimeRef.current = -1;
     videoTriggeredCycleRef.current = false;
 
@@ -654,14 +693,16 @@ export function StudioStage({
         setSkeleton(data.skeleton);
         setFrames(sliced);
         setRegionCanvasMap(canvasMap);
-        if (defaultAnim) {
-          setSelectedAnim(defaultAnim);
-          setStageMode('player');
-          setIsPlaying(true);
-          setCurrentTime(0);
-          animTimeRef.current = 0;
-        } else {
-          setStageMode('frames');
+        if (!isSameNinjaReload) {
+          if (defaultAnim) {
+            setSelectedAnim(defaultAnim);
+            setStageMode('player');
+            setIsPlaying(true);
+            setCurrentTime(0);
+            animTimeRef.current = 0;
+          } else {
+            setStageMode('frames');
+          }
         }
 
         onLoadedFramesChange({
@@ -684,7 +725,7 @@ export function StudioStage({
     return () => {
       cancelled = true;
     };
-  }, [ninjaKeyId, ninjaKeyAtlasUrl, ninjaKeySkeletonUrl, onLoadedFramesChange]);
+  }, [ninjaKeyId, ninjaKeyAtlasUrl, ninjaKeySkeletonUrl, offlineMediaScope, onLoadedFramesChange]);
 
   const animNames = useMemo(() => {
     const raw = Object.keys(skeleton?.animations || {});
@@ -767,7 +808,7 @@ export function StudioStage({
     return () => {
       cancelled = true;
     };
-  }, [ninja, skeleton]);
+  }, [ninja, skeleton, offlineMediaScope]);
 
   // Load passive idle aura Spine bundle (e.g., Sasuke Susano'o skeletal ribcage noe_ZUOZHUXZbati)
   useEffect(() => {
@@ -779,10 +820,15 @@ export function StudioStage({
     }
     let cancelled = false;
     setLoadingPassiveAura(true);
-    void loadEffectBundle(ninja.atlasUrl, aura.id, {
-      atlasUrl: aura.atlasUrl,
-      skeletonUrl: aura.skeletonUrl,
-    })
+    void loadEffectBundle(
+      ninja.atlasUrl,
+      aura.id,
+      {
+        atlasUrl: aura.atlasUrl,
+        skeletonUrl: aura.skeletonUrl,
+      },
+      offlineMediaScope
+    )
       .then((bundle) => {
         if (!cancelled) setPassiveAuraBundle(bundle);
       })
@@ -792,7 +838,7 @@ export function StudioStage({
     return () => {
       cancelled = true;
     };
-  }, [ninja, mediaProfile]);
+  }, [ninja, mediaProfile, offlineMediaScope]);
 
   // Automatically show passive aura when on idle (user can also toggle on/off for any animation)
   useEffect(() => {
@@ -830,12 +876,19 @@ export function StudioStage({
       const refs = [...extractSpineVideoRefs(skeleton, animName)];
       const seenKeys = new Set(refs.map((r) => r.resolvedName.toLowerCase()));
       const eff = resolveEffectiveAnimationName(skeleton, animName);
+      const animLow = animName.toLowerCase();
+      const effLow = eff.toLowerCase();
+      const isUltimateAnim =
+        animLow.includes('uniqueskill') ||
+        effLow.includes('uniqueskill') ||
+        animLow === 'superuniqueskill' ||
+        effLow === 'superuniqueskill';
 
       for (const vid of ultimateVideos) {
-        if (!vid.animName) continue;
-        const vidAnimLow = vid.animName.toLowerCase();
-        const matchesAnim =
-          vidAnimLow === animName.toLowerCase() || vidAnimLow === eff.toLowerCase();
+        const vidAnimLow = vid.animName?.toLowerCase();
+        const matchesAnim = vidAnimLow
+          ? vidAnimLow === animLow || vidAnimLow === effLow
+          : isUltimateAnim;
         if (!matchesAnim) continue;
         if (seenKeys.has(vid.key.toLowerCase())) continue;
         seenKeys.add(vid.key.toLowerCase());
@@ -946,7 +999,9 @@ export function StudioStage({
 
     const uniqueSpineIds = Array.from(new Set(activeRefs.map((r) => r.spineId)));
     Promise.all(
-      uniqueSpineIds.map(async (id) => [id, await loadEffectBundle(ninja.atlasUrl, id)] as const)
+      uniqueSpineIds.map(
+        async (id) => [id, await loadEffectBundle(ninja.atlasUrl, id, undefined, offlineMediaScope)] as const
+      )
     )
       .then((entries) => {
         if (cancelled) return;
@@ -990,18 +1045,60 @@ export function StudioStage({
     return () => {
       cancelled = true;
     };
-  }, [ninja, skeleton, selectedAnim, effectMode, rawEffectRefs]);
+  }, [ninja, skeleton, selectedAnim, effectMode, rawEffectRefs, offlineMediaScope]);
 
-  // Preload audio cues for the currently selected animation
+  // Clear cached resolved media Blob URLs whenever offline source / generation changes
   useEffect(() => {
-    if (!ninja || activeAudioRefs.length === 0) return;
-    const urls = activeAudioRefs
-      .map((ref) => resolveMediaSoundUrl(ref.soundName, mediaProfile, ninja.atlasUrl))
-      .filter((u): u is string => Boolean(u))
-      .map((u) => resolveMediaPlayUrl(u))
-      .filter((u): u is string => Boolean(u));
-    audioCuePlayer.preloadAudioUrls(urls);
-  }, [ninja, activeAudioRefs, mediaProfile]);
+    resolvedMediaUrlMapRef.current.clear();
+  }, [offlineMediaScope]);
+
+  // Pre-warm playable audio & video URLs asynchronously (essential for Offline ZIP DEFLATE/unverified entries)
+  useEffect(() => {
+    if (!ninja) return;
+    let cancelled = false;
+
+    const rawAudioUrls = Array.from(
+      new Set(
+        activeAudioRefs
+          .map((ref) => resolveMediaSoundUrl(ref.soundName, mediaProfile, ninja.atlasUrl))
+          .filter((u): u is string => Boolean(u))
+      )
+    );
+    const rawVideoUrls = Array.from(
+      new Set([
+        ...activeVideoRefs
+          .map((ref) => resolveMediaVideoUrl(ref, mediaProfile, ninja.atlasUrl))
+          .filter((u): u is string => Boolean(u)),
+        ...(mediaProfile?.videos || []).map((v) => v.url).filter(Boolean),
+      ])
+    );
+
+    if (rawAudioUrls.length === 0 && rawVideoUrls.length === 0) return;
+
+    void (async () => {
+      const resolvedAudioPlayUrls: string[] = [];
+      await Promise.all([
+        ...rawAudioUrls.map(async (rawUrl) => {
+          const playUrl = await resolveMediaPlayUrlAsync(rawUrl);
+          if (cancelled || !playUrl) return;
+          resolvedMediaUrlMapRef.current.set(rawUrl, playUrl);
+          resolvedAudioPlayUrls.push(playUrl);
+        }),
+        ...rawVideoUrls.map(async (rawUrl) => {
+          const playUrl = await resolveMediaPlayUrlAsync(rawUrl);
+          if (cancelled || !playUrl) return;
+          resolvedMediaUrlMapRef.current.set(rawUrl, playUrl);
+        }),
+      ]);
+      if (!cancelled && resolvedAudioPlayUrls.length > 0) {
+        audioCuePlayer.preloadAudioUrls(resolvedAudioPlayUrls);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ninja, activeAudioRefs, activeVideoRefs, mediaProfile, offlineMediaScope]);
 
   const startVideoAutoplay = useCallback(
     (video: HTMLVideoElement | null) => {
@@ -1253,15 +1350,18 @@ export function StudioStage({
       return;
     }
 
+    let cancelledLoop = false;
+
     const resolveSoundPlayUrl = (soundName: string) => {
       if (!ninja) return null;
       const raw = resolveMediaSoundUrl(soundName, mediaProfile, ninja.atlasUrl);
       if (!raw) return null;
-      const resolved = resolveMediaPlayUrl(raw);
+      const resolved = resolvedMediaUrlMapRef.current.get(raw) || resolveMediaPlayUrl(raw);
       return resolved || null;
     };
 
     const tick = (now: number) => {
+      if (cancelledLoop) return;
       const dt = Math.min(0.1, (now - lastTs) / 1000);
       lastTs = now;
       const prev = prevAnimTimeRef.current;
@@ -1285,7 +1385,7 @@ export function StudioStage({
         );
       }
 
-      // Check synchronized ultimate MP4 cutscene event ({PLAYVEDIO:...})
+      // Check synchronized ultimate MP4 cutscene event ({PLAYVEDIO:...} or hero ultimate video)
       if (
         enableVideoCutscene &&
         activeVideoRefs.length > 0 &&
@@ -1293,25 +1393,45 @@ export function StudioStage({
         ninja
       ) {
         const triggerRef = activeVideoRefs.find((vr) =>
-          prev < 0 ? vr.time <= next : !loopWrapped ? vr.time > prev && vr.time <= next : vr.time <= next
+          prev < 0
+            ? vr.time <= next
+            : !loopWrapped
+            ? (vr.time > prev && vr.time <= next) || (next >= vr.time && next - vr.time < 0.6)
+            : vr.time <= next
         );
         if (triggerRef) {
           const rawVideoUrl = resolveMediaVideoUrl(triggerRef, mediaProfile, ninja.atlasUrl);
-          const playUrl = rawVideoUrl ? resolveMediaPlayUrl(rawVideoUrl) : '';
-          if (rawVideoUrl && playUrl) {
+          if (rawVideoUrl) {
+            const cachedPlayUrl =
+              resolvedMediaUrlMapRef.current.get(rawVideoUrl) || resolveMediaPlayUrl(rawVideoUrl);
+            if (cachedPlayUrl) {
+              videoTriggeredCycleRef.current = true;
+              animTimeRef.current = next;
+              prevAnimTimeRef.current = next;
+              setCurrentTime(next);
+              drawCurrent(next);
+              setActiveVideoOverlay({
+                playUrl: cachedPlayUrl,
+                rawUrl: rawVideoUrl,
+                label: `Ultimate MP4 · ${triggerRef.resolvedName}`,
+                key: triggerRef.resolvedName,
+                resumePlaying: true,
+              });
+              return;
+            }
+            // Offline ZIP MP4 still decompressing / verifying offset: resolve asynchronously and trigger
             videoTriggeredCycleRef.current = true;
-            animTimeRef.current = next;
-            prevAnimTimeRef.current = next;
-            setCurrentTime(next);
-            drawCurrent(next);
-            setActiveVideoOverlay({
-              playUrl,
-              rawUrl: rawVideoUrl,
-              label: `Ultimate MP4 · ${triggerRef.resolvedName}`,
-              key: triggerRef.resolvedName,
-              resumePlaying: true,
+            void resolveMediaPlayUrlAsync(rawVideoUrl).then((asyncPlayUrl) => {
+              if (cancelledLoop || !asyncPlayUrl) return;
+              resolvedMediaUrlMapRef.current.set(rawVideoUrl, asyncPlayUrl);
+              setActiveVideoOverlay({
+                playUrl: asyncPlayUrl,
+                rawUrl: rawVideoUrl,
+                label: `Ultimate MP4 · ${triggerRef.resolvedName}`,
+                key: triggerRef.resolvedName,
+                resumePlaying: true,
+              });
             });
-            return;
           }
         }
       }
@@ -1324,7 +1444,10 @@ export function StudioStage({
     };
 
     rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
+    return () => {
+      cancelledLoop = true;
+      cancelAnimationFrame(rafId);
+    };
   }, [
     stageMode,
     skeleton,
@@ -1348,6 +1471,7 @@ export function StudioStage({
     mediaProfile,
     ninja,
     playerDetached,
+    offlineMediaScope,
   ]);
 
   // Redraw when manually scrubbing while paused or if mobile GPU restores canvas context
@@ -1533,7 +1657,9 @@ export function StudioStage({
         const rawUrl = resolveMediaVideoUrl(vRef, mediaProfile, ninja.atlasUrl);
         if (!rawUrl) continue;
         try {
-          const resp = await fetch(resolveAssetFetchUrl(rawUrl));
+          const fetchUrl = await resolveAssetFetchUrlAsync(rawUrl);
+          if (!fetchUrl) continue;
+          const resp = await fetch(fetchUrl);
           if (resp.ok) {
             const buf = new Uint8Array(await resp.arrayBuffer());
             if (buf.byteLength > 0) {
@@ -1557,7 +1683,9 @@ export function StudioStage({
         const rawUrl = resolveMediaSoundUrl(clean, mediaProfile, ninja.atlasUrl);
         if (!rawUrl) continue;
         try {
-          const resp = await fetch(resolveAssetFetchUrl(rawUrl));
+          const fetchUrl = await resolveAssetFetchUrlAsync(rawUrl);
+          if (!fetchUrl) continue;
+          const resp = await fetch(fetchUrl);
           if (resp.ok) {
             const buf = new Uint8Array(await resp.arrayBuffer());
             if (buf.byteLength > 0) {
@@ -1576,7 +1704,7 @@ export function StudioStage({
       const animSkillMeta = getAnimDisplayMeta(selectedAnim);
       if (animSkillMeta.iconUrl) {
         try {
-          const iconFetchUrl = resolveAssetFetchUrl(animSkillMeta.iconUrl);
+          const iconFetchUrl = await resolveAssetFetchUrlAsync(animSkillMeta.iconUrl);
           if (iconFetchUrl) {
             const resp = await fetch(iconFetchUrl);
             if (resp.ok) {
@@ -1769,7 +1897,7 @@ export function StudioStage({
 
   const handleDownloadRemoteMedia = async (rawUrl: string, filename: string) => {
     try {
-      const fetchUrl = resolveAssetFetchUrl(rawUrl);
+      const fetchUrl = await resolveAssetFetchUrlAsync(rawUrl);
       if (fetchUrl) {
         const resp = await fetch(fetchUrl);
         if (resp.ok) {
@@ -1786,8 +1914,9 @@ export function StudioStage({
 
     // Direct anchor download fallback (works in static GitHub Pages mode even if CORS relay blocks large MP4/MP3)
     try {
+      const playUrl = await resolveMediaPlayUrlAsync(rawUrl);
       const a = document.createElement('a');
-      a.href = resolveMediaPlayUrl(rawUrl) || rawUrl;
+      a.href = playUrl || rawUrl;
       a.download = filename;
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
@@ -1900,7 +2029,7 @@ export function StudioStage({
     }
   };
 
-  const handleToggleVoicePreview = (key: string, rawUrl: string) => {
+  const handleToggleVoicePreview = async (key: string, rawUrl: string) => {
     audioCuePlayer.unlock();
     if (playingVoiceKey === key) {
       audioCuePlayer.stopAll();
@@ -1908,11 +2037,13 @@ export function StudioStage({
       return;
     }
     audioCuePlayer.stopAll();
-    const playUrl = resolveMediaPlayUrl(rawUrl);
+    const playUrl =
+      resolvedMediaUrlMapRef.current.get(rawUrl) || (await resolveMediaPlayUrlAsync(rawUrl));
     if (!playUrl) {
       setPlayingVoiceKey(null);
       return;
     }
+    resolvedMediaUrlMapRef.current.set(rawUrl, playUrl);
     setPlayingVoiceKey(key);
     const audio = audioCuePlayer.playOneShot(playUrl, soundVolume, false, () => {
       setPlayingVoiceKey((prev) => (prev === key ? null : prev));
@@ -2163,7 +2294,8 @@ export function StudioStage({
                                 type="button"
                                 onClick={() => setEffectMode('powers')}
                                 className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                                  effectMode === 'powers'
+                                  effectMode === 'powers' ||
+                                  (!hasImpactEffects && effectMode === 'all')
                                     ? 'bg-orange-600 text-white'
                                     : 'text-slate-400 hover:text-slate-100'
                                 }`}
@@ -2259,15 +2391,20 @@ export function StudioStage({
                                   first &&
                                   resolveMediaVideoUrl(first, mediaProfile, ninja.atlasUrl);
                                 if (!rawUrl || !first) return;
-                                const playUrl = resolveMediaPlayUrl(rawUrl);
-                                if (!playUrl) return;
-                                setActiveVideoOverlay({
-                                  playUrl,
-                                  rawUrl,
-                                  label: `Ultimate · ${first.resolvedName}`,
-                                  key: first.resolvedName,
-                                  resumePlaying: isPlaying,
-                                });
+                                void (async () => {
+                                  const playUrl =
+                                    resolvedMediaUrlMapRef.current.get(rawUrl) ||
+                                    (await resolveMediaPlayUrlAsync(rawUrl));
+                                  if (!playUrl) return;
+                                  resolvedMediaUrlMapRef.current.set(rawUrl, playUrl);
+                                  setActiveVideoOverlay({
+                                    playUrl,
+                                    rawUrl,
+                                    label: `Ultimate · ${first.resolvedName}`,
+                                    key: first.resolvedName,
+                                    resumePlaying: isPlaying,
+                                  });
+                                })();
                               }}
                               className="rounded-md px-2 py-1 text-[11px] font-medium text-slate-300 hover:bg-white/[0.06] hover:text-white whitespace-nowrap cursor-pointer"
                             >
@@ -3270,17 +3407,22 @@ export function StudioStage({
                                   type="button"
                                   onClick={() => {
                                     audioCuePlayer.unlock();
-                                    const playUrl = resolveMediaPlayUrl(vid.url);
-                                    if (!playUrl) return;
-                                    setStageMode('player');
-                                    setActiveVideoOverlay({
-                                      playUrl,
-                                      rawUrl: vid.url,
-                                      label: `${vid.label} · ${vid.key}`,
-                                      key: vid.key,
-                                      resumePlaying: isPlaying,
-                                    });
-                                    openDetachedPlayer();
+                                    void (async () => {
+                                      const playUrl =
+                                        resolvedMediaUrlMapRef.current.get(vid.url) ||
+                                        (await resolveMediaPlayUrlAsync(vid.url));
+                                      if (!playUrl) return;
+                                      resolvedMediaUrlMapRef.current.set(vid.url, playUrl);
+                                      setStageMode('player');
+                                      setActiveVideoOverlay({
+                                        playUrl,
+                                        rawUrl: vid.url,
+                                        label: `${vid.label} · ${vid.key}`,
+                                        key: vid.key,
+                                        resumePlaying: isPlaying,
+                                      });
+                                      openDetachedPlayer();
+                                    })();
                                   }}
                                   aria-label={`Assistir ${vid.label}`}
                                   className="rounded-md border border-white/10 bg-[#090B10] p-1.5 text-slate-200 hover:border-orange-500/60 hover:text-white cursor-pointer"
