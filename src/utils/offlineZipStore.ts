@@ -34,6 +34,15 @@ export interface SavedOfflineArchiveMeta {
   savedAt: number;
 }
 
+export interface OfflineOpfsSyncState {
+  active: boolean;
+  percent: number;
+  copiedBytes: number;
+  totalBytes: number;
+  storedInOpfs: boolean;
+  error: string | null;
+}
+
 export interface OfflineZipSnapshot {
   sourceMode: DataSourceMode;
   active: boolean;
@@ -46,6 +55,7 @@ export interface OfflineZipSnapshot {
   canOneClickReauthorize: boolean;
   needsReconnect: boolean;
   restoring: boolean;
+  opfsSync: OfflineOpfsSyncState;
   hasCatalog: boolean;
   catalog: ExtractResponse | null;
   stats: OfflineCoverageStats;
@@ -352,19 +362,23 @@ async function readEntryBlobAsync(entry: ZipEntryRef): Promise<Blob> {
   throw new Error(`Método de compressão ZIP não suportado (${entry.compressionMethod}) em "${entry.path}".`);
 }
 
-// ---------- Persistence (localStorage + IndexedDB handles/blobs) ----------
+// ---------- Persistence (localStorage + IndexedDB + OPFS zero-click storage) ----------
 
 const SOURCE_PREFS_STORAGE_KEY = 'shinobi_offline_source_prefs_v1';
 const OFFLINE_IDB_NAME = 'shinobi_offline_source_db_v1';
 const OFFLINE_IDB_STORE = 'persisted_source';
 const OFFLINE_IDB_KEY = 'active';
 const OFFLINE_IDB_CATALOG_KEY = 'cached_catalog';
-const MAX_IDB_INLINE_FILE_BYTES = 250 * 1024 * 1024; // 250 MB safe limit for Android/Desktop blob cloning
+const OFFLINE_IDB_PREFS_KEY = 'prefs';
+const OPFS_BACKUP_DIR_NAME = 'shinobi_offline_zips';
+const OPFS_COPY_CHUNK_BYTES = 4 * 1024 * 1024; // 4 MB streaming chunks (low RAM on Android)
+const MAX_IDB_INLINE_FILE_BYTES = 512 * 1024 * 1024; // 512 MB fallback when OPFS is unavailable
 
 interface PersistedSourcePrefs {
   sourceMode: DataSourceMode;
   strictOffline: boolean;
   savedArchives: SavedOfflineArchiveMeta[];
+  explicitOnline?: boolean;
 }
 
 interface HandlePermissionApi {
@@ -374,7 +388,20 @@ interface HandlePermissionApi {
   requestPermission?: (desc?: { mode?: 'read' | 'readwrite' }) => Promise<'granted' | 'denied' | 'prompt'>;
 }
 
+interface PersistedOpfsEntry {
+  opfsName: string;
+  originalName: string;
+  fileSize: number;
+  lastModified: number;
+}
+
 type PersistedIdbRecord =
+  | {
+      kind: 'opfs';
+      entries: PersistedOpfsEntry[];
+      fallbackHandles?: HandlePermissionApi[];
+      savedAt: number;
+    }
   | { kind: 'handles'; handles: HandlePermissionApi[]; savedAt: number }
   | { kind: 'files'; files: File[]; savedAt: number };
 
@@ -398,16 +425,28 @@ function loadPersistedPrefs(): PersistedSourcePrefs {
               Number.isFinite(a.fileSize)
           )
         : [];
+      const explicitOnline = parsed.explicitOnline === true;
+      const sourceMode: DataSourceMode =
+        parsed.sourceMode === 'offline'
+          ? 'offline'
+          : parsed.sourceMode === 'online'
+          ? explicitOnline || savedArchives.length === 0
+            ? 'online'
+            : 'offline'
+          : savedArchives.length > 0
+          ? 'offline'
+          : 'online';
       return {
-        sourceMode: parsed.sourceMode === 'offline' ? 'offline' : 'online',
+        sourceMode,
         strictOffline: typeof parsed.strictOffline === 'boolean' ? parsed.strictOffline : true,
         savedArchives,
+        explicitOnline,
       };
     }
   } catch {
     // ignore storage errors
   }
-  return { sourceMode: 'online', strictOffline: true, savedArchives: [] };
+  return { sourceMode: 'online', strictOffline: true, savedArchives: [], explicitOnline: false };
 }
 
 function savePersistedPrefs(prefs: PersistedSourcePrefs) {
@@ -416,6 +455,7 @@ function savePersistedPrefs(prefs: PersistedSourcePrefs) {
   } catch {
     // ignore quota/private-mode errors
   }
+  void writePersistedPrefsIdb(prefs);
 }
 
 function openOfflineSourceDb(): Promise<IDBDatabase | null> {
@@ -543,6 +583,107 @@ async function writePersistedIdbRecord(record: PersistedIdbRecord | null): Promi
   });
 }
 
+async function readPersistedPrefsIdb(): Promise<PersistedSourcePrefs | null> {
+  const db = await openOfflineSourceDb();
+  if (!db) return null;
+  return await new Promise((resolve) => {
+    try {
+      const tx = db.transaction(OFFLINE_IDB_STORE, 'readonly');
+      const req = tx.objectStore(OFFLINE_IDB_STORE).get(OFFLINE_IDB_PREFS_KEY);
+      req.onsuccess = () => {
+        db.close();
+        resolve((req.result as PersistedSourcePrefs | undefined) || null);
+      };
+      req.onerror = () => {
+        db.close();
+        resolve(null);
+      };
+    } catch {
+      db.close();
+      resolve(null);
+    }
+  });
+}
+
+async function writePersistedPrefsIdb(prefs: PersistedSourcePrefs): Promise<boolean> {
+  const db = await openOfflineSourceDb();
+  if (!db) return false;
+  return await new Promise((resolve) => {
+    try {
+      const tx = db.transaction(OFFLINE_IDB_STORE, 'readwrite');
+      tx.objectStore(OFFLINE_IDB_STORE).put(prefs, OFFLINE_IDB_PREFS_KEY);
+      tx.oncomplete = () => {
+        db.close();
+        resolve(true);
+      };
+      tx.onerror = () => {
+        db.close();
+        resolve(false);
+      };
+      tx.onabort = () => {
+        db.close();
+        resolve(false);
+      };
+    } catch {
+      db.close();
+      resolve(false);
+    }
+  });
+}
+
+// ---------- OPFS (Origin Private File System) Helpers ----------
+
+interface OpfsWritableStreamLike {
+  write: (data: ArrayBuffer | Uint8Array | Blob) => Promise<void>;
+  close: () => Promise<void>;
+  abort?: () => Promise<void>;
+}
+
+interface OpfsFileHandleLike {
+  getFile: () => Promise<File>;
+  createWritable?: () => Promise<OpfsWritableStreamLike>;
+}
+
+interface OpfsDirectoryHandleLike {
+  getDirectoryHandle: (name: string, opts?: { create?: boolean }) => Promise<OpfsDirectoryHandleLike>;
+  getFileHandle: (name: string, opts?: { create?: boolean }) => Promise<OpfsFileHandleLike>;
+  removeEntry: (name: string, opts?: { recursive?: boolean }) => Promise<void>;
+  keys?: () => AsyncIterable<string>;
+}
+
+async function getOpfsBackupDir(create: boolean): Promise<OpfsDirectoryHandleLike | null> {
+  if (typeof navigator === 'undefined') return null;
+  const storage = navigator.storage as unknown as {
+    getDirectory?: () => Promise<OpfsDirectoryHandleLike>;
+  };
+  if (!storage || typeof storage.getDirectory !== 'function') return null;
+  try {
+    const root = await storage.getDirectory();
+    return await root.getDirectoryHandle(OPFS_BACKUP_DIR_NAME, { create });
+  } catch {
+    return null;
+  }
+}
+
+async function clearOpfsBackupDir(): Promise<void> {
+  if (typeof navigator === 'undefined') return;
+  const storage = navigator.storage as unknown as {
+    getDirectory?: () => Promise<OpfsDirectoryHandleLike>;
+  };
+  if (!storage || typeof storage.getDirectory !== 'function') return;
+  try {
+    const root = await storage.getDirectory();
+    await root.removeEntry(OPFS_BACKUP_DIR_NAME, { recursive: true });
+  } catch {
+    // ignore if directory does not exist
+  }
+}
+
+function makeSafeOpfsFileName(index: number, originalName: string): string {
+  const cleaned = originalName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80) || 'backup.zip';
+  return `slot_${index}_${cleaned}`;
+}
+
 // ---------- Module Singleton State ----------
 
 const initialPrefs = loadPersistedPrefs();
@@ -559,12 +700,24 @@ let mountedHandles: HandlePermissionApi[] = [];
 let persistedHandlesAwaitingPermission: HandlePermissionApi[] = [];
 let savedArchivesMeta: SavedOfflineArchiveMeta[] = initialPrefs.savedArchives;
 let currentSourceMode: DataSourceMode = initialPrefs.sourceMode;
+let explicitOnlineChoice: boolean = Boolean(initialPrefs.explicitOnline);
 let mountedCatalog: ExtractResponse | null = null;
 let cachedOfflineCatalog: ExtractResponse | null = null;
 let mountedOrigin = 'https://naruto.jotagame.com';
 let strictOfflineMode = initialPrefs.strictOffline;
-let restoringPersisted = false;
-let initStarted = false;
+// Start restoringPersisted=true when offline preference or saved archives exist to avoid flashing "Reconectar" during startup auto-mount
+let restoringPersisted =
+  initialPrefs.sourceMode === 'offline' || initialPrefs.savedArchives.length > 0;
+let initPromise: Promise<void> | null = null;
+let opfsSyncToken = 0;
+let opfsSyncState: OfflineOpfsSyncState = {
+  active: false,
+  percent: 0,
+  copiedBytes: 0,
+  totalBytes: 0,
+  storedInOpfs: false,
+  error: null,
+};
 let stateGeneration = 0;
 let lastStoreError: string | null = null;
 const listeners = new Set<() => void>();
@@ -574,6 +727,7 @@ function syncPrefsToStorage() {
     sourceMode: currentSourceMode,
     strictOffline: strictOfflineMode,
     savedArchives: savedArchivesMeta,
+    explicitOnline: explicitOnlineChoice,
   });
 }
 
@@ -673,6 +827,7 @@ function buildSnapshot(): OfflineZipSnapshot {
     canOneClickReauthorize: canReauth,
     needsReconnect,
     restoring: restoringPersisted,
+    opfsSync: { ...opfsSyncState },
     hasCatalog: Boolean(effectiveCatalog),
     catalog: effectiveCatalog,
     stats: computeCoverageStats(),
@@ -717,8 +872,10 @@ export function setStrictOfflineMode(enabled: boolean) {
 }
 
 export function setPreferredSourceMode(mode: DataSourceMode) {
-  if (currentSourceMode === mode) return;
+  const nextExplicitOnline = mode === 'online';
+  if (currentSourceMode === mode && explicitOnlineChoice === nextExplicitOnline) return;
   currentSourceMode = mode;
+  explicitOnlineChoice = nextExplicitOnline;
   syncPrefsToStorage();
   emitChange();
 }
@@ -1241,6 +1398,7 @@ export async function mountBackupZipFiles(
 
   if (options?.activateOffline !== false) {
     currentSourceMode = 'offline';
+    explicitOnlineChoice = false;
   }
 
   if (mountedCatalog) {
@@ -1266,30 +1424,243 @@ export async function mountBackupZipFiles(
       });
     }
 
-    if (mountedHandles.length > 0 && mountedHandles.length === mountedArchives.length) {
-      // Zero-copy persistent handle reference (works for 7 GB+ ZIPs on Chrome/Edge!)
+    // Persist immediate fallback right away (handles or <= 512MB IDB files)
+    const fallbackHandles =
+      mountedHandles.length > 0 && mountedHandles.length === mountedArchives.length
+        ? [...mountedHandles]
+        : undefined;
+    const filesSnapshot = [...mountedRawFiles];
+    const totalBytes = filesSnapshot.reduce((acc, f) => acc + f.size, 0);
+
+    if (fallbackHandles) {
       void writePersistedIdbRecord({
         kind: 'handles',
-        handles: mountedHandles,
+        handles: fallbackHandles,
+        savedAt: now,
+      });
+    } else if (totalBytes > 0 && totalBytes <= MAX_IDB_INLINE_FILE_BYTES) {
+      void writePersistedIdbRecord({
+        kind: 'files',
+        files: filesSnapshot,
         savedAt: now,
       });
     } else {
-      const totalBytes = mountedRawFiles.reduce((acc, f) => acc + f.size, 0);
-      if (totalBytes > 0 && totalBytes <= MAX_IDB_INLINE_FILE_BYTES) {
-        void writePersistedIdbRecord({
-          kind: 'files',
-          files: mountedRawFiles,
-          savedAt: now,
-        });
-      } else {
-        // Avoid cloning multi-GB files into browser quota on Android; keep metadata + catalog + preference saved
-        void writePersistedIdbRecord(null);
-      }
+      void writePersistedIdbRecord(null);
     }
+
+    // Stream a permanent zero-permission copy into OPFS in the background so page reloads/reopens never need a click!
+    void persistFilesToOpfsInBackground(filesSnapshot, fallbackHandles);
   }
 
   emitChange();
   return cachedSnapshot;
+}
+
+async function persistFilesToOpfsInBackground(
+  files: File[],
+  fallbackHandles?: HandlePermissionApi[]
+): Promise<void> {
+  if (files.length === 0) return;
+  const myToken = ++opfsSyncToken;
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+
+  // Request persistent storage so Android/Chrome won't evict the offline backup
+  try {
+    if (typeof navigator !== 'undefined' && navigator.storage?.persist) {
+      await navigator.storage.persist();
+    }
+  } catch {
+    // ignore
+  }
+
+  const dir = await getOpfsBackupDir(true);
+  if (!dir || myToken !== opfsSyncToken) return;
+
+  // Verify createWritable support (Chrome Desktop & Android, Edge, Firefox)
+  try {
+    const probeHandle = await dir.getFileHandle('.probe', { create: true });
+    const supported = typeof probeHandle.createWritable === 'function';
+    try {
+      await dir.removeEntry('.probe');
+    } catch {
+      // ignore
+    }
+    if (!supported) return;
+  } catch {
+    return;
+  }
+
+  // Check storage quota before copying multi-GB files
+  try {
+    if (typeof navigator !== 'undefined' && navigator.storage?.estimate) {
+      const est = await navigator.storage.estimate();
+      if (typeof est.quota === 'number' && typeof est.usage === 'number') {
+        const available = est.quota - est.usage;
+        // Leave a 100 MB safety cushion (accounting for replacing any previous OPFS backup)
+        const existingOpfsBytes = await estimateOpfsBackupBytes(dir);
+        if (available + existingOpfsBytes < totalBytes + 100 * 1024 * 1024) {
+          opfsSyncState = {
+            active: false,
+            percent: 0,
+            copiedBytes: 0,
+            totalBytes,
+            storedInOpfs: false,
+            error: 'Espaço do navegador insuficiente para cópia permanente automática.',
+          };
+          emitChange();
+          return;
+        }
+      }
+    }
+  } catch {
+    // continue and let write catch QuotaExceededError if needed
+  }
+
+  opfsSyncState = {
+    active: true,
+    percent: 0,
+    copiedBytes: 0,
+    totalBytes,
+    storedInOpfs: false,
+    error: null,
+  };
+  emitChange();
+
+  try {
+    // Clean stale files in OPFS backup folder first to reclaim space
+    if (typeof dir.keys === 'function') {
+      const existingNames: string[] = [];
+      for await (const key of dir.keys()) {
+        existingNames.push(key);
+      }
+      for (const name of existingNames) {
+        if (myToken !== opfsSyncToken) return;
+        try {
+          await dir.removeEntry(name, { recursive: true });
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    const entries: PersistedOpfsEntry[] = [];
+    let copiedBytes = 0;
+    let lastEmitAt = 0;
+
+    for (let i = 0; i < files.length; i++) {
+      if (myToken !== opfsSyncToken) return;
+      const file = files[i];
+      const opfsName = makeSafeOpfsFileName(i, file.name);
+      const fh = await dir.getFileHandle(opfsName, { create: true });
+      const writable = await fh.createWritable!();
+      try {
+        let offset = 0;
+        while (offset < file.size) {
+          if (myToken !== opfsSyncToken) {
+            try {
+              await writable.abort?.();
+            } catch {
+              // ignore
+            }
+            return;
+          }
+          const end = Math.min(file.size, offset + OPFS_COPY_CHUNK_BYTES);
+          const chunk = await file.slice(offset, end).arrayBuffer();
+          await writable.write(chunk);
+          offset = end;
+          copiedBytes += chunk.byteLength;
+          const now = Date.now();
+          if (now - lastEmitAt >= 200 || copiedBytes >= totalBytes) {
+            lastEmitAt = now;
+            opfsSyncState = {
+              active: true,
+              percent: totalBytes > 0 ? Math.min(99, Math.round((copiedBytes / totalBytes) * 100)) : 99,
+              copiedBytes,
+              totalBytes,
+              storedInOpfs: false,
+              error: null,
+            };
+            emitChange();
+          }
+        }
+        await writable.close();
+      } catch (writeErr) {
+        try {
+          await writable.abort?.();
+        } catch {
+          // ignore
+        }
+        throw writeErr;
+      }
+
+      const verified = await fh.getFile();
+      if (verified.size !== file.size) {
+        throw new Error('Verificação de integridade da cópia offline falhou.');
+      }
+
+      entries.push({
+        opfsName,
+        originalName: file.name,
+        fileSize: file.size,
+        lastModified: file.lastModified,
+      });
+    }
+
+    if (myToken !== opfsSyncToken) return;
+
+    await writePersistedIdbRecord({
+      kind: 'opfs',
+      entries,
+      fallbackHandles,
+      savedAt: Date.now(),
+    });
+
+    opfsSyncState = {
+      active: false,
+      percent: 100,
+      copiedBytes: totalBytes,
+      totalBytes,
+      storedInOpfs: true,
+      error: null,
+    };
+    emitChange();
+  } catch (err) {
+    if (myToken !== opfsSyncToken) return;
+    await clearOpfsBackupDir();
+    const isQuota =
+      err instanceof DOMException &&
+      (err.name === 'QuotaExceededError' || err.name === 'NS_ERROR_DOM_QUOTA_REACHED');
+    opfsSyncState = {
+      active: false,
+      percent: 0,
+      copiedBytes: 0,
+      totalBytes,
+      storedInOpfs: false,
+      error: isQuota
+        ? 'Sem espaço suficiente no armazenamento do navegador para cópia permanente.'
+        : null,
+    };
+    emitChange();
+  }
+}
+
+async function estimateOpfsBackupBytes(dir: OpfsDirectoryHandleLike): Promise<number> {
+  let sum = 0;
+  if (typeof dir.keys !== 'function') return 0;
+  try {
+    for await (const key of dir.keys()) {
+      try {
+        const fh = await dir.getFileHandle(key);
+        const f = await fh.getFile();
+        sum += f.size;
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return sum;
 }
 
 export async function pickAndMountOfflineZipFiles(options?: {
@@ -1413,74 +1784,163 @@ export async function reauthorizeSavedOfflineHandles(): Promise<boolean> {
   }
 }
 
-export async function initPersistedOfflineSource(): Promise<void> {
-  if (initStarted) return;
-  initStarted = true;
+export function initPersistedOfflineSource(): Promise<void> {
+  if (initPromise) return initPromise;
+  initPromise = runInitPersistedOfflineSource();
+  return initPromise;
+}
 
-  // Hydrate cached offline catalog immediately so Offline Mode stays populated on reload
-  const cachedCat = await readPersistedCatalogCache();
-  if (cachedCat?.catalog && Array.isArray(cachedCat.catalog.ninjas)) {
-    cachedOfflineCatalog = cachedCat.catalog;
-    if (cachedCat.origin) {
-      mountedOrigin = cachedCat.origin;
-    }
-    emitChange();
-  }
-
-  const record = await readPersistedIdbRecord();
-  if (!record) return;
-
+async function runInitPersistedOfflineSource(): Promise<void> {
   restoringPersisted = true;
   emitChange();
 
   try {
+    // 1. Reconcile preferences from IndexedDB in case localStorage was cleared or defaulted
+    const idbPrefs = await readPersistedPrefsIdb();
+    if (idbPrefs) {
+      if (savedArchivesMeta.length === 0 && Array.isArray(idbPrefs.savedArchives) && idbPrefs.savedArchives.length > 0) {
+        savedArchivesMeta = idbPrefs.savedArchives;
+      }
+      if (idbPrefs.sourceMode === 'offline' && !explicitOnlineChoice) {
+        currentSourceMode = 'offline';
+      }
+      if (typeof idbPrefs.strictOffline === 'boolean') {
+        strictOfflineMode = idbPrefs.strictOffline;
+      }
+    }
+
+    // 2. Hydrate cached offline catalog immediately so Offline Mode stays populated on reload
+    const cachedCat = await readPersistedCatalogCache();
+    if (cachedCat?.catalog && Array.isArray(cachedCat.catalog.ninjas)) {
+      cachedOfflineCatalog = cachedCat.catalog;
+      if (cachedCat.origin) {
+        mountedOrigin = cachedCat.origin;
+      }
+      emitChange();
+    }
+
+    const record = await readPersistedIdbRecord();
+    if (!record) return;
+
+    // If a persisted offline archive exists and user didn't explicitly switch to online, prefer offline!
+    if (!explicitOnlineChoice && currentSourceMode !== 'offline') {
+      currentSourceMode = 'offline';
+      syncPrefsToStorage();
+    }
+
+    // 3. Best path: OPFS permanent storage (ZERO clicks, ZERO permission prompts on every reload!)
+    if (record.kind === 'opfs' && Array.isArray(record.entries) && record.entries.length > 0) {
+      try {
+        const dir = await getOpfsBackupDir(false);
+        if (dir) {
+          const files: File[] = [];
+          let valid = true;
+          for (const entry of record.entries) {
+            const fh = await dir.getFileHandle(entry.opfsName);
+            const rawFile = await fh.getFile();
+            if (rawFile.size <= 0 || (entry.fileSize > 0 && rawFile.size !== entry.fileSize)) {
+              valid = false;
+              break;
+            }
+            // Preserve original filename metadata while keeping zero-copy disk-backed File slice!
+            const namedFile =
+              rawFile.name === entry.originalName
+                ? rawFile
+                : new File([rawFile], entry.originalName, {
+                    type: rawFile.type || 'application/zip',
+                    lastModified: entry.lastModified || rawFile.lastModified,
+                  });
+            files.push(namedFile);
+          }
+
+          if (valid && files.length === record.entries.length) {
+            const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+            opfsSyncState = {
+              active: false,
+              percent: 100,
+              copiedBytes: totalBytes,
+              totalBytes,
+              storedInOpfs: true,
+              error: null,
+            };
+            await mountBackupZipFiles(files, {
+              handles: record.fallbackHandles,
+              activateOffline: currentSourceMode === 'offline',
+              skipPersist: true,
+            });
+            return;
+          }
+        }
+      } catch {
+        // OPFS copy missing or evicted -> fall back to handles if available
+      }
+
+      if (record.fallbackHandles && record.fallbackHandles.length > 0) {
+        await tryRestoreFromHandles(record.fallbackHandles);
+        return;
+      }
+      return;
+    }
+
+    // 4. Direct IndexedDB files fallback (also ZERO clicks!)
     if (record.kind === 'files' && Array.isArray(record.files) && record.files.length > 0) {
       await mountBackupZipFiles(record.files, {
         activateOffline: currentSourceMode === 'offline',
         skipPersist: true,
       });
+      // Upgrade silently to OPFS in background for even lower overhead
+      void persistFilesToOpfsInBackground(record.files);
       return;
     }
 
+    // 5. Legacy FileSystemFileHandle record -> auto-mount if granted (and upgrade to OPFS!), else await 1-click reauth
     if (record.kind === 'handles' && Array.isArray(record.handles) && record.handles.length > 0) {
-      let allGranted = true;
-      for (const h of record.handles) {
-        if (typeof h.queryPermission === 'function') {
-          const perm = await h.queryPermission({ mode: 'read' });
-          if (perm !== 'granted') {
-            allGranted = false;
-            break;
-          }
-        }
-      }
-
-      if (allGranted) {
-        const files: File[] = [];
-        for (const h of record.handles) {
-          files.push(await h.getFile());
-        }
-        await mountBackupZipFiles(files, {
-          handles: record.handles,
-          activateOffline: currentSourceMode === 'offline',
-          skipPersist: true,
-        });
-      } else {
-        persistedHandlesAwaitingPermission = record.handles;
-      }
+      await tryRestoreFromHandles(record.handles);
     }
   } catch {
-    // Saved file may have been moved/deleted; keep metadata so user can reconnect cleanly
-    if (record.kind === 'handles') {
-      persistedHandlesAwaitingPermission = [];
-      void writePersistedIdbRecord(null);
-    }
+    // Keep metadata so user can reconnect cleanly if anything fails
   } finally {
     restoringPersisted = false;
     emitChange();
   }
 }
 
+async function tryRestoreFromHandles(handles: HandlePermissionApi[]): Promise<void> {
+  try {
+    let allGranted = true;
+    for (const h of handles) {
+      if (typeof h.queryPermission === 'function') {
+        const perm = await h.queryPermission({ mode: 'read' });
+        if (perm !== 'granted') {
+          allGranted = false;
+          break;
+        }
+      }
+    }
+
+    if (allGranted) {
+      const files: File[] = [];
+      for (const h of handles) {
+        files.push(await h.getFile());
+      }
+      await mountBackupZipFiles(files, {
+        handles,
+        activateOffline: currentSourceMode === 'offline',
+        skipPersist: true,
+      });
+      // Immediately create a permanent OPFS copy so future reloads never prompt again!
+      void persistFilesToOpfsInBackground(files, handles);
+    } else {
+      persistedHandlesAwaitingPermission = handles;
+    }
+  } catch {
+    persistedHandlesAwaitingPermission = [];
+    void writePersistedIdbRecord(null);
+  }
+}
+
 export function unmountBackupZip(options?: { keepPreference?: boolean }): void {
+  opfsSyncToken++;
   revokeAllBlobUrls();
   exactEntryMap = new Map();
   lowerEntryMap = new Map();
@@ -1494,14 +1954,24 @@ export function unmountBackupZip(options?: { keepPreference?: boolean }): void {
   mountedCatalog = null;
   mountedOrigin = 'https://naruto.jotagame.com';
   lastStoreError = null;
+  opfsSyncState = {
+    active: false,
+    percent: 0,
+    copiedBytes: 0,
+    totalBytes: 0,
+    storedInOpfs: false,
+    error: null,
+  };
 
   if (!options?.keepPreference) {
     cachedOfflineCatalog = null;
     currentSourceMode = 'online';
+    explicitOnlineChoice = true;
     savedArchivesMeta = [];
     syncPrefsToStorage();
     void writePersistedIdbRecord(null);
     void writePersistedCatalogCache(null);
+    void clearOpfsBackupDir();
   }
 
   emitChange();

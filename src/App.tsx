@@ -251,14 +251,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void initPersistedOfflineSource();
-    // Respect user's persisted sourceMode: never silently fetch the live game site when Offline Mode is saved
-    if (getOfflineZipSnapshot().sourceMode === 'online') {
-      void runExtraction(loadSavedGameUrl());
-    }
+    let cancelled = false;
+    void (async () => {
+      await initPersistedOfflineSource();
+      if (cancelled) return;
+      // Respect user's persisted sourceMode (localStorage + IndexedDB + OPFS): never silently fetch the live game site when Offline Mode is saved
+      if (getOfflineZipSnapshot().sourceMode === 'online') {
+        void runExtraction(loadSavedGameUrl());
+      }
+    })();
     void getLatestExportCheckpoint().then((cp) => {
-      if (cp) setSavedCheckpoint(cp);
+      if (!cancelled && cp) setSavedCheckpoint(cp);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [runExtraction]);
 
   useEffect(() => {
@@ -462,6 +469,8 @@ export default function App() {
 
   const sourceLabel = offlineZip.active
     ? `Backup local (${offlineZip.archives.length} ${offlineZip.archives.length === 1 ? 'arquivo' : 'arquivos'})`
+    : offlineZip.restoring
+    ? 'Restaurando backup offline...'
     : isOfflineMode
     ? 'Modo offline (aguardando .ZIP)'
     : activeCatalog?.resolvedGameUrl
@@ -499,6 +508,15 @@ export default function App() {
       <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-5 sm:px-6 sm:py-6">
         {activeTab === 'ninjas' && (
           <div className="space-y-5">
+            {offlineZip.restoring && !offlineZip.active && (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-500/25 bg-emerald-950/20 px-4 py-2.5 text-xs text-emerald-200">
+                <div className="flex items-center gap-2 min-w-0">
+                  <WifiOff className="h-3.5 w-3.5 text-emerald-400 shrink-0 animate-pulse" aria-hidden="true" />
+                  <span className="truncate">Restaurando backup offline salvo automaticamente...</span>
+                </div>
+              </div>
+            )}
+
             {offlineZip.active && (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-500/25 bg-emerald-950/20 px-4 py-2.5 text-xs text-emerald-200">
                 <div className="flex items-center gap-2 min-w-0">
@@ -506,6 +524,13 @@ export default function App() {
                   <span className="truncate">
                     Modo offline ativo · {offlineZip.archives.length}{' '}
                     {offlineZip.archives.length === 1 ? 'arquivo carregado' : 'arquivos carregados'}
+                    {offlineZip.opfsSync.active
+                      ? ` · Salvando cópia automática (${offlineZip.opfsSync.percent}%)...`
+                      : offlineZip.opfsSync.storedInOpfs
+                      ? ' · Reabertura automática ativa'
+                      : offlineZip.opfsSync.error
+                      ? ` · ${offlineZip.opfsSync.error}`
+                      : ''}
                   </span>
                 </div>
                 <div className="flex flex-wrap items-center gap-3 shrink-0">
@@ -547,7 +572,7 @@ export default function App() {
                     {quickMounting
                       ? 'Conectando...'
                       : offlineZip.canOneClickReauthorize
-                      ? 'Reativar offline (1 clique)'
+                      ? 'Reativar e salvar automático'
                       : 'Reconectar .ZIP offline'}
                   </button>
                   <button
@@ -804,10 +829,10 @@ export default function App() {
                     </button>
                     <button
                       type="button"
-                      disabled={quickMounting}
+                      disabled={quickMounting || offlineZip.restoring}
                       onClick={() => void handleActivateOfflineSource()}
                       className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                        offlineZip.active
+                        offlineZip.active || offlineZip.restoring
                           ? 'bg-emerald-600 text-white'
                           : isOfflineMode
                           ? 'bg-amber-600 text-white'
@@ -818,6 +843,8 @@ export default function App() {
                       <span>
                         {quickMounting
                           ? 'Abrindo...'
+                          : offlineZip.restoring
+                          ? 'Restaurando...'
                           : offlineZip.active
                           ? 'Arquivo offline'
                           : isOfflineMode
