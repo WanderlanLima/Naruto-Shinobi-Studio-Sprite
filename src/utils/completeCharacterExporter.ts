@@ -28,7 +28,22 @@ import {
   writeQuantizedGifFrame,
 } from './atlasParser';
 import { CHASE_SYSTEM_LEGEND } from './combatMechanicsParser';
+import {
+  buildExportJobId,
+  buildExportOptionsFingerprint,
+  clearExportCheckpoint,
+  getExportCheckpointByJobId,
+  loadExportCheckpointFiles,
+  saveExportCheckpointBatch,
+  type ExportCheckpointJobMeta,
+} from './exportCheckpointStore';
 import { exportWorkerPool, type QuantizedGifFrameResult } from './exportWorkerPool';
+import {
+  isOfflineBackupActive,
+  isStrictOfflineMode,
+  listOfflineEntryPathsByPredicate,
+  readOfflineEntryBytes,
+} from './offlineZipStore';
 import {
   fetchNinjaBundle,
   resolveAssetFetchUrl,
@@ -48,11 +63,14 @@ export interface CompleteExportOptions {
   includePassiveAura?: boolean;
   includeVideosAndAudio?: boolean;
   includeSkillIcons?: boolean;
+  includeCharacterArtworks?: boolean;
   mediaProfile?: NinjaMediaProfile | null;
   gifBg: 'transparent' | 'dark' | 'light' | 'chroma';
   fps?: number;
   maxResolution?: number;
   folderPrefix?: string;
+  enableCheckpoint?: boolean;
+  resumeFromCheckpoint?: boolean;
   signal?: AbortSignal;
   effectCache?: Map<string, Promise<ParsedEffectAsset | null>>;
   onProgress?: (info: {
@@ -110,6 +128,148 @@ function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) {
     throw new DOMException('Exportação cancelada.', 'AbortError');
   }
+}
+
+/**
+ * Non-throttled macrotask yield using MessageChannel (avoids Chrome's 1000ms background setTimeout clamp).
+ */
+function yieldWithoutBackgroundThrottle(): Promise<void> {
+  if (typeof MessageChannel !== 'undefined') {
+    return new Promise((resolve) => {
+      const ch = new MessageChannel();
+      ch.port1.onmessage = () => {
+        ch.port1.onmessage = null;
+        ch.port1.close();
+        ch.port2.close();
+        resolve();
+      };
+      ch.port2.postMessage(0);
+    });
+  }
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function waitUntilDocumentVisible(signal?: AbortSignal): Promise<void> {
+  if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        cleanup();
+        resolve();
+      }
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException('Exportação cancelada.', 'AbortError'));
+    };
+    const cleanup = () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function encodeCanvasToPngResilient(
+  canvas: HTMLCanvasElement,
+  rerenderIfLost?: () => void,
+  signal?: AbortSignal
+): Promise<Blob | null> {
+  try {
+    const blob = await exportWorkerPool.encodeCanvasToPng(canvas);
+    if (blob && blob.size > 0) return blob;
+  } catch {
+    // GPU surface may have been evicted while Android app was in background
+  }
+  throwIfAborted(signal);
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+    await waitUntilDocumentVisible(signal);
+  }
+  rerenderIfLost?.();
+  try {
+    const retryBlob = await exportWorkerPool.encodeCanvasToPng(canvas);
+    if (retryBlob && retryBlob.size > 0) return retryBlob;
+  } catch {
+    // fallback to synchronous canvas.toBlob
+  }
+  return await canvasToPngBlob(canvas);
+}
+
+interface WakeLockSentinelLike {
+  released?: boolean;
+  release: () => Promise<void>;
+}
+
+async function runWithExportKeepAlive<T>(
+  signal: AbortSignal | undefined,
+  task: () => Promise<T>
+): Promise<T> {
+  let wakeLock: WakeLockSentinelLike | null = null;
+  const nav =
+    typeof navigator !== 'undefined'
+      ? (navigator as unknown as {
+          wakeLock?: { request: (type: 'screen') => Promise<WakeLockSentinelLike> };
+          locks?: {
+            request: <R>(name: string, cb: () => Promise<R>) => Promise<R>;
+          };
+        })
+      : null;
+
+  const acquireWakeLock = async () => {
+    if (!nav?.wakeLock) return;
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    try {
+      wakeLock = await nav.wakeLock.request('screen');
+    } catch {
+      // Wake Lock optional on unsupported browsers
+    }
+  };
+
+  const onVisibilityChange = () => {
+    if (
+      typeof document !== 'undefined' &&
+      document.visibilityState === 'visible' &&
+      (!wakeLock || wakeLock.released) &&
+      !signal?.aborted
+    ) {
+      void acquireWakeLock();
+    }
+  };
+
+  await acquireWakeLock();
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onVisibilityChange);
+  }
+
+  const runCore = async () => {
+    try {
+      return await task();
+    } finally {
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+      }
+      if (wakeLock && !wakeLock.released) {
+        try {
+          await wakeLock.release();
+        } catch {
+          // ignore release errors
+        }
+      }
+    }
+  };
+
+  // Web Locks API signals Chromium/Android not to freeze or discard the tab while exporting
+  if (nav?.locks && typeof nav.locks.request === 'function') {
+    try {
+      return await nav.locks.request('shinobi-character-export-lock', runCore);
+    } catch {
+      // Fall through if Web Locks is unavailable in iframe context
+    }
+  }
+  return await runCore();
 }
 
 export function sanitizePathSegment(name: string): string {
@@ -695,6 +855,331 @@ export async function collectCharacterSkillIconFiles(
   return files;
 }
 
+function detectVerifiedImageExt(buf: ArrayBuffer): 'png' | 'webp' | 'jpg' | null {
+  const bytes = new Uint8Array(buf, 0, Math.min(12, buf.byteLength));
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    return 'png';
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return 'webp';
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'jpg';
+  }
+  return null;
+}
+
+async function normalizeArtworkToPng(
+  buf: ArrayBuffer,
+  detectedExt: 'png' | 'webp' | 'jpg'
+): Promise<{ data: ArrayBuffer | Blob; ext: string }> {
+  if (detectedExt === 'png') {
+    return { data: buf, ext: 'png' };
+  }
+  try {
+    const mime = detectedExt === 'webp' ? 'image/webp' : 'image/jpeg';
+    const srcBlob = new Blob([buf], { type: mime });
+    if (typeof createImageBitmap === 'function') {
+      const bmp = await createImageBitmap(srcBlob);
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = bmp.width;
+        canvas.height = bmp.height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(bmp, 0, 0);
+          const pngBlob = await exportWorkerPool.encodeCanvasToPng(canvas);
+          if (pngBlob) {
+            return { data: pngBlob, ext: 'png' };
+          }
+        }
+      } finally {
+        bmp.close();
+      }
+    }
+  } catch {
+    // Fallback to original verified format if decoding fails
+  }
+  return { data: buf, ext: detectedExt };
+}
+
+function getCandidateHeroCodes(
+  ninja: NinjaEntry,
+  mediaProfile?: NinjaMediaProfile | null
+): string[] {
+  const codes: string[] = [];
+  const pushCode = (raw?: string | null) => {
+    const clean = (raw || '').trim();
+    if (/^\d{3,}$/.test(clean) && !codes.includes(clean)) {
+      codes.push(clean);
+    }
+  };
+  pushCode(mediaProfile?.heroCode);
+  pushCode(ninja.code);
+  const idDigits = ninja.id.match(/(\d{3,})$/)?.[1];
+  pushCode(idDigits);
+  return codes;
+}
+
+function mapArtworkFileToFriendlyRelBase(fileName: string, heroCode: string): string {
+  const stem = fileName.replace(/\.(png|webp|jpe?g)$/i, '');
+  const low = stem.toLowerCase();
+  if (low.startsWith('largepic_')) return `artes/01_arte_completa_${heroCode}`;
+  if (low.startsWith('halfpic_')) return `artes/02_meio_corpo_${heroCode}`;
+  if (low.startsWith('middlepic_')) return `artes/03_retrato_medio_${heroCode}`;
+  if (low.startsWith('showpic_')) return `artes/04_vitrine_${heroCode}`;
+  if (low.startsWith('rewardpic_')) return `artes/05_recrutamento_${heroCode}`;
+  if (low.startsWith('stagepic_')) return `artes/06_palco_${heroCode}`;
+  if (low.startsWith('atlaspic_')) return `artes/07_album_${heroCode}`;
+  if (low.startsWith('smallpic_')) return `artes/08_avatar_${heroCode}`;
+  if (low.startsWith('closeuppic_')) return `artes/09_closeup_ultimate_${heroCode}`;
+  if (low.startsWith('namepic_')) return `artes/10_nome_pt_${heroCode}`;
+  if (low.startsWith('newnamepic_')) return `artes/11_nome_novo_${heroCode}`;
+  if (low.startsWith('skillnamepic_')) return `artes/12_nome_esoterica_${heroCode}`;
+  const emoteMatch = low.match(/^emotepic(\d+)_/);
+  if (emoteMatch) return `artes/13_expressao_${emoteMatch[1]}_${heroCode}`;
+  if (low.startsWith('vipshow_')) return `artes/14_vip_show_${heroCode}`;
+  if (low.startsWith('longpic_')) return `artes/15_banner_longo_${heroCode}`;
+  if (low.startsWith('bg_') || low.endsWith('_bg')) return `artes/16_fundo_${heroCode}`;
+  return `artes/${sanitizePathSegment(stem)}`;
+}
+
+interface ArtworkCandidateSlot {
+  relBase: string;
+  candidateRelPaths: string[];
+}
+
+function buildOfficialArtworkSlots(heroCode: string): ArtworkCandidateSlot[] {
+  return [
+    {
+      relBase: `artes/01_arte_completa_${heroCode}`,
+      candidateRelPaths: [`acervo/asset/heros/${heroCode}/largepic_${heroCode}.png`],
+    },
+    {
+      relBase: `artes/02_meio_corpo_${heroCode}`,
+      candidateRelPaths: [`acervo/asset/heros/${heroCode}/halfpic_${heroCode}.png`],
+    },
+    {
+      relBase: `artes/03_retrato_medio_${heroCode}`,
+      candidateRelPaths: [`acervo/asset/heros/${heroCode}/middlepic_${heroCode}.png`],
+    },
+    {
+      relBase: `artes/04_vitrine_${heroCode}`,
+      candidateRelPaths: [`acervo/asset/heros/${heroCode}/showpic_${heroCode}.png`],
+    },
+    {
+      relBase: `artes/05_recrutamento_${heroCode}`,
+      candidateRelPaths: [`acervo/asset/heros/${heroCode}/rewardpic_${heroCode}.png`],
+    },
+    {
+      relBase: `artes/06_palco_${heroCode}`,
+      candidateRelPaths: [`acervo/asset/heros/${heroCode}/Stagepic_${heroCode}.png`],
+    },
+    {
+      relBase: `artes/07_album_${heroCode}`,
+      candidateRelPaths: [`acervo/asset/heros/${heroCode}/Atlaspic_${heroCode}.png`],
+    },
+    {
+      relBase: `artes/08_avatar_${heroCode}`,
+      candidateRelPaths: [
+        `acervo/asset/items/smallpic_${heroCode}.png`,
+        `acervo/asset/heros/${heroCode}/smallpic_${heroCode}.png`,
+      ],
+    },
+    {
+      relBase: `artes/09_closeup_ultimate_${heroCode}`,
+      candidateRelPaths: [`acervo/asset/heros/${heroCode}/Closeuppic_${heroCode}.png`],
+    },
+    {
+      relBase: `artes/10_nome_pt_${heroCode}`,
+      candidateRelPaths: [
+        `acervo/language/pt/asset/heros/${heroCode}/namepic_${heroCode}.png`,
+        `acervo/language/pt/asset/heros/${heroCode}/namepic_${heroCode}.webp`,
+        `acervo/asset/heros/${heroCode}/namepic_${heroCode}.png`,
+      ],
+    },
+    {
+      relBase: `artes/11_nome_novo_${heroCode}`,
+      candidateRelPaths: [
+        `acervo/language/pt/asset/heros/Newname/newnamepic_${heroCode}.png`,
+        `acervo/language/pt/asset/heros/Newname/newnamepic_${heroCode}.webp`,
+      ],
+    },
+    {
+      relBase: `artes/12_nome_esoterica_${heroCode}`,
+      candidateRelPaths: [
+        `acervo/language/pt/asset/heros/${heroCode}/skillnamepic_${heroCode}.png`,
+        `acervo/asset/heros/${heroCode}/skillnamepic_${heroCode}.png`,
+      ],
+    },
+    {
+      relBase: `artes/13_expressao_1_${heroCode}`,
+      candidateRelPaths: [`acervo/asset/heros/${heroCode}/emotepic1_${heroCode}.png`],
+    },
+    {
+      relBase: `artes/13_expressao_2_${heroCode}`,
+      candidateRelPaths: [`acervo/asset/heros/${heroCode}/emotepic2_${heroCode}.png`],
+    },
+    {
+      relBase: `artes/13_expressao_3_${heroCode}`,
+      candidateRelPaths: [`acervo/asset/heros/${heroCode}/emotepic3_${heroCode}.png`],
+    },
+    {
+      relBase: `artes/16_fundo_${heroCode}`,
+      candidateRelPaths: [
+        `acervo/asset/ui/herobg/${heroCode}_bg.png`,
+        `acervo/asset/heros/${heroCode}/bg_${heroCode}.png`,
+      ],
+    },
+  ];
+}
+
+export async function collectCharacterArtworkFiles(params: {
+  ninja: NinjaEntry;
+  mediaProfile?: NinjaMediaProfile | null;
+  folderPrefix?: string;
+  signal?: AbortSignal;
+}): Promise<CollectedCharacterFile[]> {
+  throwIfAborted(params.signal);
+  if (params.ninja.kind === 'effect') return [];
+
+  const codes = getCandidateHeroCodes(params.ninja, params.mediaProfile);
+  if (codes.length === 0) return [];
+
+  const prefix = params.folderPrefix ? `${params.folderPrefix.replace(/\/+$/, '')}/` : '';
+  const files: CollectedCharacterFile[] = [];
+  const usedRelBases = new Set<string>();
+
+  const origin = (() => {
+    if (params.mediaProfile?.originBase && /^https?:\/\//i.test(params.mediaProfile.originBase)) {
+      return params.mediaProfile.originBase.replace(/\/+$/, '');
+    }
+    try {
+      return new URL(params.ninja.atlasUrl).origin;
+    } catch {
+      return 'https://naruto.jotagame.com';
+    }
+  })();
+
+  // Fast path 1: Enumerate all official hero artwork entries directly from loaded offline ZIP (e.g. 13 GB full game backup)
+  if (isOfflineBackupActive()) {
+    for (const code of codes) {
+      throwIfAborted(params.signal);
+      const lowCode = code.toLowerCase();
+      const matchedPaths = listOfflineEntryPathsByPredicate((low) => {
+        if (!/\.(png|webp|jpe?g)$/i.test(low)) return false;
+        if (low.includes(`/asset/heros/${lowCode}/`)) return true;
+        if (low.endsWith(`/items/smallpic_${lowCode}.png`) || low.endsWith(`/items/smallpic_${lowCode}.webp`)) return true;
+        if (low.includes(`/heros/newname/`) && low.includes(`_${lowCode}.`)) return true;
+        if (low.includes(`/ui/herobg/${lowCode}_bg.`)) return true;
+        return false;
+      });
+
+      if (matchedPaths.length === 0) continue;
+
+      // Group by logical output slot and always prefer lossless .png over .webp (and PT localized over generic)
+      const bestPathBySlot = new Map<string, { path: string; score: number }>();
+      for (const p of matchedPaths) {
+        const fileName = p.split('/').pop() || '';
+        const relBase = mapArtworkFileToFriendlyRelBase(fileName, code);
+        const low = p.toLowerCase();
+        let score = 0;
+        if (low.endsWith('.png')) score += 10;
+        if (low.includes('/language/pt/')) score += 4;
+        if (low.includes('/items/smallpic_')) score += 2;
+        const prev = bestPathBySlot.get(relBase);
+        if (!prev || score > prev.score) {
+          bestPathBySlot.set(relBase, { path: p, score });
+        }
+      }
+
+      const entriesToRead = Array.from(bestPathBySlot.entries());
+      for (let i = 0; i < entriesToRead.length; i += 8) {
+        throwIfAborted(params.signal);
+        const batch = entriesToRead.slice(i, i + 8);
+        const results = await Promise.all(
+          batch.map(async ([relBase, info]) => {
+            const buf = await readOfflineEntryBytes(info.path);
+            if (!buf) return null;
+            const ext = detectVerifiedImageExt(buf);
+            if (!ext) return null;
+            const normalized = await normalizeArtworkToPng(buf, ext);
+            return { relBase, ...normalized };
+          })
+        );
+        for (const item of results) {
+          if (!item || usedRelBases.has(item.relBase)) continue;
+          usedRelBases.add(item.relBase);
+          files.push({ path: `${prefix}${item.relBase}.${item.ext}`, data: item.data });
+        }
+      }
+
+      if (files.length > 0) {
+        return files;
+      }
+    }
+
+    if (isStrictOfflineMode()) {
+      return files;
+    }
+  }
+
+  // Path 2: Online (or non-strict fallback) — probe official PNG artwork URLs in parallel batches
+  for (const code of codes) {
+    throwIfAborted(params.signal);
+    const slots = buildOfficialArtworkSlots(code);
+    let foundForCode = 0;
+
+    for (let i = 0; i < slots.length; i += 8) {
+      throwIfAborted(params.signal);
+      const batch = slots.slice(i, i + 8);
+      const results = await Promise.all(
+        batch.map(async (slot) => {
+          for (const relPath of slot.candidateRelPaths) {
+            const url = `${origin}/${relPath}`;
+            const buf = await fetchBinaryAssetSafe(url, params.signal);
+            if (!buf) continue;
+            const ext = detectVerifiedImageExt(buf);
+            if (!ext) continue;
+            const normalized = await normalizeArtworkToPng(buf, ext);
+            return { relBase: slot.relBase, ...normalized };
+          }
+          return null;
+        })
+      );
+
+      for (const item of results) {
+        if (!item || usedRelBases.has(item.relBase)) continue;
+        usedRelBases.add(item.relBase);
+        foundForCode++;
+        files.push({ path: `${prefix}${item.relBase}.${item.ext}`, data: item.data });
+      }
+    }
+
+    if (foundForCode > 0) {
+      break;
+    }
+  }
+
+  return files;
+}
+
 export async function collectCharacterMediaFiles(params: {
   ninja: NinjaEntry;
   skeleton: SpineSkeleton | null;
@@ -702,6 +1187,7 @@ export async function collectCharacterMediaFiles(params: {
   includePassiveAura?: boolean;
   includeVideosAndAudio?: boolean;
   includeSkillIcons?: boolean;
+  includeCharacterArtworks?: boolean;
   sliceAuraFrames?: boolean;
   folderPrefix?: string;
   signal?: AbortSignal;
@@ -863,6 +1349,18 @@ export async function collectCharacterMediaFiles(params: {
     }
   }
 
+  // 4. Official Standalone Character Artworks (PNG portraits, splash art, avatar, expressions, name art)
+  if (params.includeCharacterArtworks !== false) {
+    const artworkFiles = await collectCharacterArtworkFiles({
+      ninja: params.ninja,
+      mediaProfile,
+      signal: params.signal,
+    });
+    for (const art of artworkFiles) {
+      push(art.path, art.data);
+    }
+  }
+
   return { files, passiveAuraAsset };
 }
 
@@ -884,10 +1382,66 @@ export async function collectCharacterCompleteFiles(
     files.push({ path: fullPath, data });
   };
 
+  const plan = collectCharacterEffectPlan(baseData.skeleton, options.effectScope);
+  const useCheckpoint = options.enableCheckpoint === true;
+  const optionsFingerprint = useCheckpoint ? buildExportOptionsFingerprint(options) : '';
+  const checkpointJobId = useCheckpoint
+    ? buildExportJobId(baseData.ninja.id, optionsFingerprint)
+    : '';
+
+  let checkpointMeta: ExportCheckpointJobMeta | null = null;
+  let completedAnimSet = new Set<string>();
+
+  if (useCheckpoint) {
+    if (options.resumeFromCheckpoint === false) {
+      await clearExportCheckpoint(checkpointJobId);
+    } else {
+      const existing = await getExportCheckpointByJobId(checkpointJobId);
+      if (existing) {
+        const restoredFiles = await loadExportCheckpointFiles(checkpointJobId);
+        if (restoredFiles.length > 0) {
+          for (const rf of restoredFiles) {
+            if (!usedPaths.has(rf.path)) {
+              usedPaths.add(rf.path);
+              files.push({ path: rf.path, data: rf.data });
+            }
+          }
+          checkpointMeta = existing;
+          completedAnimSet = new Set(existing.completedAnims || []);
+        }
+      }
+    }
+    if (!checkpointMeta) {
+      checkpointMeta = {
+        jobId: checkpointJobId,
+        ninjaId: baseData.ninja.id,
+        ninjaName: options.mediaProfile?.displayName || baseData.ninja.name || baseData.ninja.id,
+        optionsFingerprint,
+        totalAnims: plan.animNames.length,
+        completedBase: false,
+        completedEffects: false,
+        completedMedia: false,
+        completedAnims: [],
+        fileCount: files.length,
+        updatedAt: Date.now(),
+      };
+    }
+  }
+
+  let lastFlushedFileIdx = files.length;
+  const flushCheckpointProgress = async () => {
+    if (!useCheckpoint || !checkpointMeta) return;
+    const newBatch = files.slice(lastFlushedFileIdx);
+    lastFlushedFileIdx = files.length;
+    checkpointMeta.fileCount = files.length;
+    checkpointMeta.completedAnims = Array.from(completedAnimSet);
+    await saveExportCheckpointBatch(checkpointMeta, newBatch);
+  };
+
   const basePages = parseAtlas(baseData.atlasText);
 
   // 1. Original character package + sliced PNG frames
-  if (options.includeOriginalAndFrames) {
+  if (options.includeOriginalAndFrames && !checkpointMeta?.completedBase) {
     options.onProgress?.({
       phase: 'base',
       message: `Fatiando frames base de ${baseData.ninja.id}...`,
@@ -929,9 +1483,12 @@ export async function collectCharacterCompleteFiles(
         if (item) pushFile(item.path, item.blob);
       }
     }
+    if (checkpointMeta) {
+      checkpointMeta.completedBase = true;
+      await flushCheckpointProgress();
+    }
   }
 
-  const plan = collectCharacterEffectPlan(baseData.skeleton, options.effectScope);
   const needsEffects =
     Boolean(baseData.skeleton) &&
     options.effectScope !== 'base' &&
@@ -977,34 +1534,54 @@ export async function collectCharacterCompleteFiles(
     }
   }
 
-  // 2.5 Fetch passive idle aura, ultimate MP4 videos, MP3 voices/sounds & skill icons
+  // 2.5 Fetch passive idle aura, ultimate MP4 videos, MP3 voices/sounds, skill icons & official PNG artworks
   let passiveAuraAsset: ParsedEffectAsset | null = null;
   const wantPassiveAura = options.includePassiveAura !== false && Boolean(options.mediaProfile?.passiveAura);
   const wantMediaFiles = options.includeVideosAndAudio !== false;
   const wantSkillIcons =
     options.includeSkillIcons !== false &&
     getOrderedSkillIconTargets(options.mediaProfile).length > 0;
+  const wantArtworks = options.includeCharacterArtworks !== false && baseData.ninja.kind !== 'effect';
 
-  if (wantPassiveAura || wantMediaFiles || wantSkillIcons) {
-    options.onProgress?.({
-      phase: 'media',
-      message: `Baixando ícones das skills, aura passiva e mídias de ${baseData.ninja.id}...`,
-      percent: 28,
-    });
-    const mediaResult = await collectCharacterMediaFiles({
-      ninja: baseData.ninja,
-      skeleton: baseData.skeleton,
-      mediaProfile: options.mediaProfile,
-      includePassiveAura: wantPassiveAura,
-      includeVideosAndAudio: wantMediaFiles,
-      includeSkillIcons: wantSkillIcons,
-      sliceAuraFrames: options.includeLinkedEffects || options.includeOriginalAndFrames,
-      signal: options.signal,
-      effectCache: options.effectCache,
-    });
-    passiveAuraAsset = mediaResult.passiveAuraAsset;
-    for (const mf of mediaResult.files) {
-      pushFile(mf.path, mf.data);
+  if (wantPassiveAura || wantMediaFiles || wantSkillIcons || wantArtworks) {
+    if (checkpointMeta?.completedMedia) {
+      // Only reload lightweight passiveAuraAsset for rendering if idle still needs rendering
+      if (wantPassiveAura && options.mediaProfile?.passiveAura) {
+        const aura = options.mediaProfile.passiveAura;
+        passiveAuraAsset = await fetchParsedEffectAsset(
+          baseData.ninja.atlasUrl,
+          aura.id,
+          options.signal,
+          options.effectCache,
+          { atlasUrl: aura.atlasUrl, skeletonUrl: aura.skeletonUrl }
+        );
+      }
+    } else {
+      options.onProgress?.({
+        phase: 'media',
+        message: `Carregando artes oficiais, ícones, aura passiva e mídias de ${baseData.ninja.id}...`,
+        percent: 28,
+      });
+      const mediaResult = await collectCharacterMediaFiles({
+        ninja: baseData.ninja,
+        skeleton: baseData.skeleton,
+        mediaProfile: options.mediaProfile,
+        includePassiveAura: wantPassiveAura,
+        includeVideosAndAudio: wantMediaFiles,
+        includeSkillIcons: wantSkillIcons,
+        includeCharacterArtworks: wantArtworks,
+        sliceAuraFrames: options.includeLinkedEffects || options.includeOriginalAndFrames,
+        signal: options.signal,
+        effectCache: options.effectCache,
+      });
+      passiveAuraAsset = mediaResult.passiveAuraAsset;
+      for (const mf of mediaResult.files) {
+        pushFile(mf.path, mf.data);
+      }
+      if (checkpointMeta) {
+        checkpointMeta.completedMedia = true;
+        await flushCheckpointProgress();
+      }
     }
   }
 
@@ -1016,7 +1593,8 @@ export async function collectCharacterCompleteFiles(
       options.includeAnimGifs ||
       wantPassiveAura ||
       wantMediaFiles ||
-      wantSkillIcons)
+      wantSkillIcons ||
+      wantArtworks)
   ) {
     pushFile(
       'animacoes_instrucoes.json',
@@ -1036,7 +1614,7 @@ export async function collectCharacterCompleteFiles(
     pushFile('combate_e_habilidades.json', combatJson);
   }
 
-  if (options.includeLinkedEffects && options.effectScope !== 'base') {
+  if (options.includeLinkedEffects && options.effectScope !== 'base' && !checkpointMeta?.completedEffects) {
     for (const [spineId, eff] of effectBundles.entries()) {
       if (!eff) continue;
       throwIfAborted(options.signal);
@@ -1076,6 +1654,10 @@ export async function collectCharacterCompleteFiles(
           if (item) pushFile(item.path, item.blob);
         }
       }
+    }
+    if (checkpointMeta) {
+      checkpointMeta.completedEffects = true;
+      await flushCheckpointProgress();
     }
   }
 
@@ -1121,6 +1703,15 @@ export async function collectCharacterCompleteFiles(
     for (let aIdx = 0; aIdx < plan.animNames.length; aIdx++) {
       throwIfAborted(options.signal);
       const animName = plan.animNames[aIdx];
+      if (completedAnimSet.has(animName)) {
+        const skipPct = 32 + Math.round(((aIdx + 1) / plan.animNames.length) * 56);
+        options.onProgress?.({
+          phase: 'rendering',
+          message: `Retomando · "${animName}" já salva (${aIdx + 1}/${plan.animNames.length})`,
+          percent: skipPct,
+        });
+        continue;
+      }
       const effectiveAnim = resolveEffectiveAnimationName(baseData.skeleton, animName);
       const safeAnim = sanitizePathSegment(animName);
       const animDir = `animacoes/${safeAnim}`;
@@ -1278,7 +1869,26 @@ export async function collectCharacterCompleteFiles(
               }
               pendingPngs.push({
                 path: `${animDir}/frames/${safeAnim}_${String(f).padStart(3, '0')}.png`,
-                promise: exportWorkerPool.encodeCanvasToPng(renderCanvas),
+                promise: encodeCanvasToPngResilient(
+                  renderCanvas,
+                  () => {
+                    renderSpineFrameToCanvas(
+                      renderCtx,
+                      renderW,
+                      renderH,
+                      baseData.skeleton!,
+                      effectiveAnim,
+                      t,
+                      baseData.regionCanvasMap,
+                      1,
+                      0,
+                      0,
+                      bounds,
+                      layers
+                    );
+                  },
+                  options.signal
+                ),
               });
               if (pendingPngs.length >= maxInFlight) {
                 await flushOldestPng();
@@ -1308,7 +1918,7 @@ export async function collectCharacterCompleteFiles(
             }
 
             if (f % 6 === 5) {
-              await new Promise((r) => setTimeout(r, 0));
+              await yieldWithoutBackgroundThrottle();
             }
           }
         }
@@ -1319,7 +1929,7 @@ export async function collectCharacterCompleteFiles(
         }
 
         if (options.includeAnimPngsAndSheets && stripCtx) {
-          const stripBlob = await exportWorkerPool.encodeCanvasToPng(stripCanvas);
+          const stripBlob = await encodeCanvasToPngResilient(stripCanvas, undefined, options.signal);
           if (stripBlob) {
             pushFile(`${animDir}/${safeAnim}_spritesheet.png`, stripBlob);
           }
@@ -1370,13 +1980,32 @@ export async function collectCharacterCompleteFiles(
             );
             pendingPngs.push({
               path: `${animDir}/frames/${safeAnim}_${String(f).padStart(3, '0')}.png`,
-              promise: exportWorkerPool.encodeCanvasToPng(renderCanvas),
+              promise: encodeCanvasToPngResilient(
+                renderCanvas,
+                () => {
+                  renderSpineFrameToCanvas(
+                    renderCtx,
+                    cellW,
+                    cellH,
+                    baseData.skeleton!,
+                    effectiveAnim,
+                    t,
+                    baseData.regionCanvasMap,
+                    1,
+                    0,
+                    0,
+                    bounds,
+                    layers
+                  );
+                },
+                options.signal
+              ),
             });
             if (pendingPngs.length >= maxInFlight) {
               await flushOldestPng();
             }
             if (f % 6 === 5) {
-              await new Promise((r) => setTimeout(r, 0));
+              await yieldWithoutBackgroundThrottle();
             }
           }
           while (pendingPngs.length > 0) {
@@ -1477,13 +2106,13 @@ export async function collectCharacterCompleteFiles(
               }
             }
             if (f % 6 === 5) {
-              await new Promise((r) => setTimeout(r, 0));
+              await yieldWithoutBackgroundThrottle();
             }
           }
         }
 
         if (stripCtx) {
-          const stripBlob = await exportWorkerPool.encodeCanvasToPng(stripCanvas);
+          const stripBlob = await encodeCanvasToPngResilient(stripCanvas, undefined, options.signal);
           if (stripBlob) {
             pushFile(`${animDir}/${safeAnim}_spritesheet.png`, stripBlob);
           }
@@ -1500,7 +2129,11 @@ export async function collectCharacterCompleteFiles(
         }
       }
 
-      await new Promise((r) => setTimeout(r, 0));
+      if (checkpointMeta) {
+        completedAnimSet.add(animName);
+        await flushCheckpointProgress();
+      }
+      await yieldWithoutBackgroundThrottle();
     }
   }
 
@@ -1511,73 +2144,87 @@ export async function exportCompleteCharacterZip(
   baseData: BaseCharacterData,
   options: CompleteExportOptions
 ): Promise<{ fileCount: number; zipFilename: string }> {
-  const folderName = sanitizePathSegment(baseData.ninja.id);
-  const collected = await collectCharacterCompleteFiles(baseData, {
-    ...options,
-    folderPrefix: options.folderPrefix ?? folderName,
-  });
+  return await runWithExportKeepAlive(options.signal, async () => {
+    const folderName = sanitizePathSegment(baseData.ninja.id);
+    const enableCheckpoint = options.enableCheckpoint !== false;
+    const optionsFingerprint = enableCheckpoint ? buildExportOptionsFingerprint(options) : '';
+    const checkpointJobId = enableCheckpoint
+      ? buildExportJobId(baseData.ninja.id, optionsFingerprint)
+      : '';
 
-  throwIfAborted(options.signal);
-  options.onProgress?.({
-    phase: 'zipping',
-    message: `Empacotando ${collected.length} arquivos no ZIP...`,
-    percent: 90,
-  });
-
-  const textEncoder = new TextEncoder();
-  const entries: StreamingZipEntry[] = [];
-
-  for (let i = 0; i < collected.length; i++) {
-    throwIfAborted(options.signal);
-    const item = collected[i];
-    let bytes: Uint8Array;
-    let blob: Blob;
-
-    if (typeof item.data === 'string') {
-      bytes = textEncoder.encode(item.data);
-      blob = new Blob([bytes as Uint8Array<ArrayBuffer>], {
-        type: 'text/plain;charset=utf-8',
-      });
-    } else if (item.data instanceof Blob) {
-      const ab = await item.data.arrayBuffer();
-      bytes = new Uint8Array(ab);
-      blob = item.data;
-    } else if (item.data instanceof Uint8Array) {
-      bytes = item.data;
-      blob = new Blob([bytes as Uint8Array<ArrayBuffer>]);
-    } else {
-      bytes = new Uint8Array(item.data);
-      blob = new Blob([item.data]);
-    }
-
-    entries.push({
-      path: item.path,
-      size: bytes.byteLength,
-      crc32: computeCrc32(bytes),
-      blob,
+    const collected = await collectCharacterCompleteFiles(baseData, {
+      ...options,
+      enableCheckpoint,
+      folderPrefix: options.folderPrefix ?? folderName,
     });
-    if (i % 24 === 23) {
-      await new Promise((r) => setTimeout(r, 0));
-    }
-  }
 
-  const zipBlob = await assembleStreamingZipBlob(
-    async function* (): AsyncGenerator<StreamingZipEntry[]> {
-      for (let i = 0; i < entries.length; i += 24) {
-        yield entries.slice(i, i + 24);
+    throwIfAborted(options.signal);
+    options.onProgress?.({
+      phase: 'zipping',
+      message: `Empacotando ${collected.length} arquivos no ZIP...`,
+      percent: 90,
+    });
+
+    const textEncoder = new TextEncoder();
+    const entries: StreamingZipEntry[] = [];
+
+    for (let i = 0; i < collected.length; i++) {
+      throwIfAborted(options.signal);
+      const item = collected[i];
+      let bytes: Uint8Array;
+      let blob: Blob;
+
+      if (typeof item.data === 'string') {
+        bytes = textEncoder.encode(item.data);
+        blob = new Blob([bytes as Uint8Array<ArrayBuffer>], {
+          type: 'text/plain;charset=utf-8',
+        });
+      } else if (item.data instanceof Blob) {
+        const ab = await item.data.arrayBuffer();
+        bytes = new Uint8Array(ab);
+        blob = item.data;
+      } else if (item.data instanceof Uint8Array) {
+        bytes = item.data;
+        blob = new Blob([bytes as Uint8Array<ArrayBuffer>]);
+      } else {
+        bytes = new Uint8Array(item.data);
+        blob = new Blob([item.data]);
       }
-    },
-    entries.length,
-    (pct) => {
-      options.onProgress?.({
-        phase: 'zipping',
-        message: `Montando arquivo ZIP (${pct}%)...`,
-        percent: 90 + Math.round(pct * 0.1),
-      });
-    }
-  );
 
-  const zipFilename = `${folderName}_completo.zip`;
-  downloadBlob(zipBlob, zipFilename);
-  return { fileCount: entries.length, zipFilename };
+      entries.push({
+        path: item.path,
+        size: bytes.byteLength,
+        crc32: computeCrc32(bytes),
+        blob,
+      });
+      if (i % 24 === 23) {
+        await yieldWithoutBackgroundThrottle();
+      }
+    }
+
+    const zipBlob = await assembleStreamingZipBlob(
+      async function* (): AsyncGenerator<StreamingZipEntry[]> {
+        for (let i = 0; i < entries.length; i += 24) {
+          yield entries.slice(i, i + 24);
+        }
+      },
+      entries.length,
+      (pct) => {
+        options.onProgress?.({
+          phase: 'zipping',
+          message: `Montando arquivo ZIP (${pct}%)...`,
+          percent: 90 + Math.round(pct * 0.1),
+        });
+      }
+    );
+
+    const zipFilename = `${folderName}_completo.zip`;
+    downloadBlob(zipBlob, zipFilename);
+
+    if (enableCheckpoint && checkpointJobId) {
+      await clearExportCheckpoint(checkpointJobId);
+    }
+
+    return { fileCount: entries.length, zipFilename };
+  });
 }

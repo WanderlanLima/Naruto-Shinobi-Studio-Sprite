@@ -4,8 +4,10 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  Check,
   ChevronLeft,
   Clapperboard,
+  Copy,
   Crosshair,
   Download,
   Film,
@@ -18,6 +20,7 @@ import {
   SkipBack,
   SkipForward,
   Sparkles,
+  Terminal,
   Volume2,
   VolumeX,
   X,
@@ -72,6 +75,11 @@ import {
 } from '../utils/completeCharacterExporter';
 import { stripHtmlTags } from '../utils/combatMechanicsParser';
 import {
+  clearExportCheckpoint,
+  getLatestExportCheckpoint,
+  type ExportCheckpointJobMeta,
+} from '../utils/exportCheckpointStore';
+import {
   fetchNinjaBundle,
   fetchNinjaMediaProfile,
   resolveAssetFetchUrl,
@@ -80,6 +88,7 @@ import {
   resolveMediaVideoUrl,
 } from '../utils/remoteClient';
 import { assembleStreamingZipBlob, computeCrc32, type StreamingZipEntry } from '../utils/streamingZip';
+import { downloadTermuxCharacterExportScript } from '../utils/termuxCharacterExportScript';
 
 interface LoadedEffectBundle {
   skeleton: SpineSkeleton;
@@ -217,14 +226,143 @@ function clampPlayerPan(x: number, y: number, zoomLevel: number): { x: number; y
   };
 }
 
+const STUDIO_PREFS_STORAGE_KEY = 'shinobi_studio_prefs_v1';
+
+interface SavedStudioPrefs {
+  bgStyle: BgStyle;
+  effectMode: 'powers' | 'all' | 'base';
+  gifBg: 'transparent' | 'dark' | 'light' | 'chroma';
+  soundMuted: boolean;
+  soundVolume: number;
+  enableVideoCutscene: boolean;
+  completeEffectScope: EffectIncludeScope;
+  completeIncludeOriginals: boolean;
+  completeIncludeEffects: boolean;
+  completeIncludeAnimPngs: boolean;
+  completeIncludeAnimGifs: boolean;
+  completeIncludePassiveAura: boolean;
+  completeIncludeVideosAndAudio: boolean;
+  completeIncludeSkillIcons: boolean;
+  completeIncludeArtworks: boolean;
+  completeGifBg: 'transparent' | 'dark' | 'light' | 'chroma';
+  completeExportFps: 24 | 15 | 12;
+  completeExportMaxRes: 2048 | 1024 | 512;
+}
+
+const DEFAULT_STUDIO_PREFS: SavedStudioPrefs = {
+  bgStyle: 'checker',
+  effectMode: 'powers',
+  gifBg: 'transparent',
+  soundMuted: false,
+  soundVolume: 0.85,
+  enableVideoCutscene: true,
+  completeEffectScope: 'powers',
+  completeIncludeOriginals: true,
+  completeIncludeEffects: true,
+  completeIncludeAnimPngs: true,
+  completeIncludeAnimGifs: true,
+  completeIncludePassiveAura: true,
+  completeIncludeVideosAndAudio: true,
+  completeIncludeSkillIcons: true,
+  completeIncludeArtworks: true,
+  completeGifBg: 'transparent',
+  completeExportFps: 24,
+  completeExportMaxRes: 2048,
+};
+
+function loadStudioPrefs(): SavedStudioPrefs {
+  try {
+    const raw = localStorage.getItem(STUDIO_PREFS_STORAGE_KEY);
+    if (!raw) return DEFAULT_STUDIO_PREFS;
+    const p = JSON.parse(raw) as Partial<SavedStudioPrefs>;
+    const validBg = ['checker', 'dark', 'light', 'chroma'] as const;
+    const validGif = ['transparent', 'dark', 'light', 'chroma'] as const;
+    const validEff = ['powers', 'all', 'base'] as const;
+    const validFps = [24, 15, 12] as const;
+    const validRes = [2048, 1024, 512] as const;
+    return {
+      bgStyle: validBg.includes(p.bgStyle as (typeof validBg)[number])
+        ? (p.bgStyle as BgStyle)
+        : DEFAULT_STUDIO_PREFS.bgStyle,
+      effectMode: validEff.includes(p.effectMode as (typeof validEff)[number])
+        ? (p.effectMode as 'powers' | 'all' | 'base')
+        : DEFAULT_STUDIO_PREFS.effectMode,
+      gifBg: validGif.includes(p.gifBg as (typeof validGif)[number])
+        ? (p.gifBg as SavedStudioPrefs['gifBg'])
+        : DEFAULT_STUDIO_PREFS.gifBg,
+      soundMuted: typeof p.soundMuted === 'boolean' ? p.soundMuted : DEFAULT_STUDIO_PREFS.soundMuted,
+      soundVolume:
+        typeof p.soundVolume === 'number' && Number.isFinite(p.soundVolume)
+          ? Math.max(0, Math.min(1, p.soundVolume))
+          : DEFAULT_STUDIO_PREFS.soundVolume,
+      enableVideoCutscene:
+        typeof p.enableVideoCutscene === 'boolean'
+          ? p.enableVideoCutscene
+          : DEFAULT_STUDIO_PREFS.enableVideoCutscene,
+      completeEffectScope: validEff.includes(p.completeEffectScope as (typeof validEff)[number])
+        ? (p.completeEffectScope as EffectIncludeScope)
+        : DEFAULT_STUDIO_PREFS.completeEffectScope,
+      completeIncludeOriginals:
+        typeof p.completeIncludeOriginals === 'boolean'
+          ? p.completeIncludeOriginals
+          : DEFAULT_STUDIO_PREFS.completeIncludeOriginals,
+      completeIncludeEffects:
+        typeof p.completeIncludeEffects === 'boolean'
+          ? p.completeIncludeEffects
+          : DEFAULT_STUDIO_PREFS.completeIncludeEffects,
+      completeIncludeAnimPngs:
+        typeof p.completeIncludeAnimPngs === 'boolean'
+          ? p.completeIncludeAnimPngs
+          : DEFAULT_STUDIO_PREFS.completeIncludeAnimPngs,
+      completeIncludeAnimGifs:
+        typeof p.completeIncludeAnimGifs === 'boolean'
+          ? p.completeIncludeAnimGifs
+          : DEFAULT_STUDIO_PREFS.completeIncludeAnimGifs,
+      completeIncludePassiveAura:
+        typeof p.completeIncludePassiveAura === 'boolean'
+          ? p.completeIncludePassiveAura
+          : DEFAULT_STUDIO_PREFS.completeIncludePassiveAura,
+      completeIncludeVideosAndAudio:
+        typeof p.completeIncludeVideosAndAudio === 'boolean'
+          ? p.completeIncludeVideosAndAudio
+          : DEFAULT_STUDIO_PREFS.completeIncludeVideosAndAudio,
+      completeIncludeSkillIcons:
+        typeof p.completeIncludeSkillIcons === 'boolean'
+          ? p.completeIncludeSkillIcons
+          : DEFAULT_STUDIO_PREFS.completeIncludeSkillIcons,
+      completeIncludeArtworks:
+        typeof p.completeIncludeArtworks === 'boolean'
+          ? p.completeIncludeArtworks
+          : DEFAULT_STUDIO_PREFS.completeIncludeArtworks,
+      completeGifBg: validGif.includes(p.completeGifBg as (typeof validGif)[number])
+        ? (p.completeGifBg as SavedStudioPrefs['completeGifBg'])
+        : DEFAULT_STUDIO_PREFS.completeGifBg,
+      completeExportFps: validFps.includes(p.completeExportFps as (typeof validFps)[number])
+        ? (p.completeExportFps as 24 | 15 | 12)
+        : DEFAULT_STUDIO_PREFS.completeExportFps,
+      completeExportMaxRes: validRes.includes(p.completeExportMaxRes as (typeof validRes)[number])
+        ? (p.completeExportMaxRes as 2048 | 1024 | 512)
+        : DEFAULT_STUDIO_PREFS.completeExportMaxRes,
+    };
+  } catch {
+    return DEFAULT_STUDIO_PREFS;
+  }
+}
+
 export function StudioStage({
   ninja,
   openCompleteExportSignal = 0,
   onBackToCatalog,
   onLoadedFramesChange,
 }: StudioStageProps) {
+  const initialPrefsRef = useRef<SavedStudioPrefs | null>(null);
+  if (!initialPrefsRef.current) {
+    initialPrefsRef.current = loadStudioPrefs();
+  }
+  const initPrefs = initialPrefsRef.current;
+
   const [stageMode, setStageMode] = useState<StageMode>('player');
-  const [bgStyle, setBgStyle] = useState<BgStyle>('checker');
+  const [bgStyle, setBgStyle] = useState<BgStyle>(initPrefs.bgStyle);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [autoFit, setAutoFit] = useState(true);
@@ -255,34 +393,64 @@ export function StudioStage({
   const [selectedRegion, setSelectedRegion] = useState<AtlasRegion | null>(null);
   const [exportingAnim, setExportingAnim] = useState(false);
   const [gifProgress, setGifProgress] = useState<number | null>(null);
-  const [gifBg, setGifBg] = useState<'transparent' | 'dark' | 'light' | 'chroma'>('transparent');
+  const [gifBg, setGifBg] = useState<'transparent' | 'dark' | 'light' | 'chroma'>(initPrefs.gifBg);
 
   // Complete character export modal state
   const [showCompleteExportModal, setShowCompleteExportModal] = useState(false);
-  const [completeEffectScope, setCompleteEffectScope] = useState<EffectIncludeScope>('powers');
-  const [completeIncludeOriginals, setCompleteIncludeOriginals] = useState(true);
-  const [completeIncludeEffects, setCompleteIncludeEffects] = useState(true);
-  const [completeIncludeAnimPngs, setCompleteIncludeAnimPngs] = useState(true);
-  const [completeIncludeAnimGifs, setCompleteIncludeAnimGifs] = useState(true);
-  const [completeIncludePassiveAura, setCompleteIncludePassiveAura] = useState(true);
-  const [completeIncludeVideosAndAudio, setCompleteIncludeVideosAndAudio] = useState(true);
-  const [completeIncludeSkillIcons, setCompleteIncludeSkillIcons] = useState(true);
+  const [completeEffectScope, setCompleteEffectScope] = useState<EffectIncludeScope>(
+    initPrefs.completeEffectScope
+  );
+  const [completeIncludeOriginals, setCompleteIncludeOriginals] = useState(
+    initPrefs.completeIncludeOriginals
+  );
+  const [completeIncludeEffects, setCompleteIncludeEffects] = useState(
+    initPrefs.completeIncludeEffects
+  );
+  const [completeIncludeAnimPngs, setCompleteIncludeAnimPngs] = useState(
+    initPrefs.completeIncludeAnimPngs
+  );
+  const [completeIncludeAnimGifs, setCompleteIncludeAnimGifs] = useState(
+    initPrefs.completeIncludeAnimGifs
+  );
+  const [completeIncludePassiveAura, setCompleteIncludePassiveAura] = useState(
+    initPrefs.completeIncludePassiveAura
+  );
+  const [completeIncludeVideosAndAudio, setCompleteIncludeVideosAndAudio] = useState(
+    initPrefs.completeIncludeVideosAndAudio
+  );
+  const [completeIncludeSkillIcons, setCompleteIncludeSkillIcons] = useState(
+    initPrefs.completeIncludeSkillIcons
+  );
+  const [completeIncludeArtworks, setCompleteIncludeArtworks] = useState(
+    initPrefs.completeIncludeArtworks
+  );
   const [downloadingSkillIconsZip, setDownloadingSkillIconsZip] = useState(false);
   const [downloadingBaseFramesZip, setDownloadingBaseFramesZip] = useState(false);
   const [completeGifBg, setCompleteGifBg] = useState<'transparent' | 'dark' | 'light' | 'chroma'>(
-    'transparent'
+    initPrefs.completeGifBg
   );
-  const [completeExportFps, setCompleteExportFps] = useState<24 | 15 | 12>(24);
-  const [completeExportMaxRes, setCompleteExportMaxRes] = useState<2048 | 1024 | 512>(2048);
+  const [completeExportFps, setCompleteExportFps] = useState<24 | 15 | 12>(
+    initPrefs.completeExportFps
+  );
+  const [completeExportMaxRes, setCompleteExportMaxRes] = useState<2048 | 1024 | 512>(
+    initPrefs.completeExportMaxRes
+  );
   const [completeExportProgress, setCompleteExportProgress] = useState<{
     phase: string;
     message: string;
     percent: number;
   } | null>(null);
   const [completeExportError, setCompleteExportError] = useState<string | null>(null);
+  const [ninjaCheckpoint, setNinjaCheckpoint] = useState<ExportCheckpointJobMeta | null>(null);
+  const [termuxExportResult, setTermuxExportResult] = useState<{
+    scriptFilename: string;
+    zipFilename: string;
+    command: string;
+  } | null>(null);
+  const [copiedTermuxExportCmd, setCopiedTermuxExportCmd] = useState(false);
   const completeExportAbortRef = useRef<AbortController | null>(null);
 
-  const [effectMode, setEffectMode] = useState<'powers' | 'all' | 'base'>('powers');
+  const [effectMode, setEffectMode] = useState<'powers' | 'all' | 'base'>(initPrefs.effectMode);
   const [compositeLayers, setCompositeLayers] = useState<CompositeSpineLayer[]>([]);
   const [loadingEffects, setLoadingEffects] = useState(false);
   const [effectLoadError, setEffectLoadError] = useState<string | null>(null);
@@ -295,10 +463,10 @@ export function StudioStage({
   const [passiveAuraPhase, setPassiveAuraPhase] = useState<'loop' | 'intro' | 'outro'>('loop');
 
   // Audio & Ultimate MP4 cutscene state
-  const [soundMuted, setSoundMuted] = useState(false);
-  const [soundVolume, setSoundVolume] = useState(0.85);
+  const [soundMuted, setSoundMuted] = useState(initPrefs.soundMuted);
+  const [soundVolume, setSoundVolume] = useState(initPrefs.soundVolume);
   const [playingVoiceKey, setPlayingVoiceKey] = useState<string | null>(null);
-  const [enableVideoCutscene, setEnableVideoCutscene] = useState(true);
+  const [enableVideoCutscene, setEnableVideoCutscene] = useState(initPrefs.enableVideoCutscene);
   const [activeVideoOverlay, setActiveVideoOverlay] = useState<{
     playUrl: string;
     rawUrl: string;
@@ -310,6 +478,54 @@ export function StudioStage({
 
   const [playerDetached, setPlayerDetached] = useState(false);
   const [dockHeight, setDockHeight] = useState(0);
+
+  // Persist Studio & Export preferences whenever any preference changes
+  useEffect(() => {
+    try {
+      const prefs: SavedStudioPrefs = {
+        bgStyle,
+        effectMode,
+        gifBg,
+        soundMuted,
+        soundVolume,
+        enableVideoCutscene,
+        completeEffectScope,
+        completeIncludeOriginals,
+        completeIncludeEffects,
+        completeIncludeAnimPngs,
+        completeIncludeAnimGifs,
+        completeIncludePassiveAura,
+        completeIncludeVideosAndAudio,
+        completeIncludeSkillIcons,
+        completeIncludeArtworks,
+        completeGifBg,
+        completeExportFps,
+        completeExportMaxRes,
+      };
+      localStorage.setItem(STUDIO_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+    } catch {
+      // ignore storage errors
+    }
+  }, [
+    bgStyle,
+    effectMode,
+    gifBg,
+    soundMuted,
+    soundVolume,
+    enableVideoCutscene,
+    completeEffectScope,
+    completeIncludeOriginals,
+    completeIncludeEffects,
+    completeIncludeAnimPngs,
+    completeIncludeAnimGifs,
+    completeIncludePassiveAura,
+    completeIncludeVideosAndAudio,
+    completeIncludeSkillIcons,
+    completeIncludeArtworks,
+    completeGifBg,
+    completeExportFps,
+    completeExportMaxRes,
+  ]);
 
   const playerCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const playerBoxRef = useRef<HTMLDivElement | null>(null);
@@ -348,8 +564,12 @@ export function StudioStage({
     });
   };
 
+  const ninjaKeyId = ninja?.id || '';
+  const ninjaKeyAtlasUrl = ninja?.atlasUrl || '';
+  const ninjaKeySkeletonUrl = ninja?.skeletonUrl || '';
+
   useEffect(() => {
-    if (!ninja) {
+    if (!ninjaKeyId) {
       onLoadedFramesChange(null);
       return;
     }
@@ -366,10 +586,14 @@ export function StudioStage({
     savedScrollYRef.current = null;
     setDockHeight(0);
     setPlayerDetached(false);
-    setShowCompleteExportModal(false);
-    setCompleteExportProgress(null);
-    setCompleteExportError(null);
-    setEffectMode('powers');
+    setTermuxExportResult(null);
+    setCopiedTermuxExportCmd(false);
+    // Never abort or dismiss an actively running export if catalog references refresh
+    if (!completeExportAbortRef.current) {
+      setShowCompleteExportModal(false);
+      setCompleteExportProgress(null);
+      setCompleteExportError(null);
+    }
     setCompositeLayers([]);
     setMediaProfile(null);
     setPassiveAuraBundle(null);
@@ -383,10 +607,13 @@ export function StudioStage({
     prevAnimTimeRef.current = -1;
     videoTriggeredCycleRef.current = false;
 
+    void getLatestExportCheckpoint(ninjaKeyId).then((cp) => {
+      if (!cancelled) setNinjaCheckpoint(cp);
+    });
+
     async function loadBundle() {
-      if (!ninja) return;
       try {
-        const data = await fetchNinjaBundle(ninja.atlasUrl, ninja.skeletonUrl);
+        const data = await fetchNinjaBundle(ninjaKeyAtlasUrl, ninjaKeySkeletonUrl);
         if (cancelled) return;
 
         const parsedPages = parseAtlas(data.atlasText);
@@ -438,7 +665,7 @@ export function StudioStage({
         }
 
         onLoadedFramesChange({
-          ninjaId: ninja.id,
+          ninjaId: ninjaKeyId,
           frames: sliced,
           atlasText: data.atlasText,
           skeleton: data.skeleton,
@@ -457,7 +684,7 @@ export function StudioStage({
     return () => {
       cancelled = true;
     };
-  }, [ninja, onLoadedFramesChange]);
+  }, [ninjaKeyId, ninjaKeyAtlasUrl, ninjaKeySkeletonUrl, onLoadedFramesChange]);
 
   const animNames = useMemo(() => {
     const raw = Object.keys(skeleton?.animations || {});
@@ -1420,14 +1647,16 @@ export function StudioStage({
     }
   };
 
-  const handleRunCompleteCharacterExport = async () => {
+  const handleRunCompleteCharacterExport = async (resumeFromCheckpoint = true) => {
     if (!ninja) return;
     const controller = new AbortController();
     completeExportAbortRef.current = controller;
     setCompleteExportError(null);
     setCompleteExportProgress({
       phase: 'base',
-      message: 'Iniciando empacotamento completo...',
+      message: resumeFromCheckpoint && ninjaCheckpoint
+        ? 'Retomando exportação salva...'
+        : 'Iniciando empacotamento completo...',
       percent: 2,
     });
 
@@ -1450,14 +1679,18 @@ export function StudioStage({
           includePassiveAura: completeIncludePassiveAura,
           includeVideosAndAudio: completeIncludeVideosAndAudio,
           includeSkillIcons: completeIncludeSkillIcons,
+          includeCharacterArtworks: completeIncludeArtworks,
           mediaProfile,
           gifBg: completeGifBg,
           fps: completeExportFps,
           maxResolution: completeExportMaxRes,
+          enableCheckpoint: true,
+          resumeFromCheckpoint,
           signal: controller.signal,
           onProgress: (info) => setCompleteExportProgress(info),
         }
       );
+      setNinjaCheckpoint(null);
       setShowCompleteExportModal(false);
     } catch (err) {
       if (!(err instanceof DOMException && err.name === 'AbortError')) {
@@ -1465,9 +1698,45 @@ export function StudioStage({
           err instanceof Error ? err.message : 'Erro ao exportar personagem completo.'
         );
       }
+      void getLatestExportCheckpoint(ninja.id).then((cp) => setNinjaCheckpoint(cp));
     } finally {
       completeExportAbortRef.current = null;
       setCompleteExportProgress(null);
+    }
+  };
+
+  const handleDownloadTermuxCharacterExport = () => {
+    if (!ninja) return;
+    const result = downloadTermuxCharacterExportScript({
+      ninja,
+      skeleton,
+      mediaProfile,
+      effectScope: completeEffectScope,
+      includeOriginalAndFrames: completeIncludeOriginals,
+      includeLinkedEffects: completeIncludeEffects,
+      includeAnimPngsAndSheets: completeIncludeAnimPngs,
+      includeAnimGifs: completeIncludeAnimGifs,
+      includePassiveAura: completeIncludePassiveAura,
+      includeVideosAndAudio: completeIncludeVideosAndAudio,
+      includeSkillIcons: completeIncludeSkillIcons,
+      includeCharacterArtworks: completeIncludeArtworks,
+      gifBg: completeGifBg,
+      fps: completeExportFps,
+      maxResolution: completeExportMaxRes,
+    });
+    setTermuxExportResult(result);
+    setCopiedTermuxExportCmd(false);
+  };
+
+  const handleCopyTermuxCommand = () => {
+    if (!termuxExportResult?.command) return;
+    try {
+      void navigator.clipboard.writeText(termuxExportResult.command).then(() => {
+        setCopiedTermuxExportCmd(true);
+        setTimeout(() => setCopiedTermuxExportCmd(false), 2000);
+      });
+    } catch {
+      // ignore clipboard errors
     }
   };
 
@@ -3366,8 +3635,101 @@ export function StudioStage({
                     </div>
                   </div>
                 </label>
+
+                {ninja.kind !== 'effect' && (
+                  <label className="flex items-start gap-2.5 p-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      disabled={Boolean(completeExportProgress)}
+                      checked={completeIncludeArtworks}
+                      onChange={(e) => setCompleteIncludeArtworks(e.target.checked)}
+                      className="mt-0.5 accent-orange-500"
+                    />
+                    <div>
+                      <div className="font-medium text-slate-100">
+                        Artes oficiais do ninja (PNG)
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        Arte completa, meio corpo, retratos, avatar, close-up, expressões e arte do nome em <span className="font-mono">artes/</span>.
+                      </div>
+                    </div>
+                  </label>
+                )}
               </div>
             </div>
+
+            {ninjaCheckpoint && !completeExportProgress && (
+              <div className="rounded-lg border border-amber-500/35 bg-amber-950/20 p-3 text-xs space-y-2">
+                <div className="flex items-center justify-between gap-2 text-amber-100">
+                  <span className="font-medium">
+                    Progresso salvo encontrado ({ninjaCheckpoint.completedAnims.length}/
+                    {ninjaCheckpoint.totalAnims} animações prontas)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void clearExportCheckpoint(ninjaCheckpoint.jobId).then(() =>
+                        setNinjaCheckpoint(null)
+                      );
+                    }}
+                    className="text-[11px] text-amber-300/80 hover:text-amber-100 underline cursor-pointer"
+                  >
+                    Limpar
+                  </button>
+                </div>
+                <p className="text-[11px] text-amber-200/80">
+                  Ao clicar em <span className="font-semibold">Retomar ZIP</span>, o app continua exatamente da animação onde parou.
+                </p>
+              </div>
+            )}
+
+            {termuxExportResult && !completeExportProgress && (
+              <div className="rounded-lg border border-emerald-500/35 bg-emerald-950/20 p-3 text-xs space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-emerald-200">
+                    <Terminal className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                    <span>Script Termux baixado</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setTermuxExportResult(null)}
+                    aria-label="Fechar aviso Termux"
+                    className="text-emerald-300/70 hover:text-white cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                </div>
+                <p className="text-[11px] text-emerald-100/85">
+                  Abra o Termux e rode o comando abaixo. Ele detecta automaticamente seu backup{' '}
+                  <span className="font-mono">.zip</span> em <span className="font-mono">Downloads</span>,
+                  usa todos os núcleos da CPU (não para em segundo plano) e salva{' '}
+                  <span className="font-mono text-emerald-200">{termuxExportResult.zipFilename}</span>{' '}
+                  idêntico ao navegador em <span className="font-mono">Downloads</span>:
+                </p>
+                <div className="flex items-center gap-2 rounded-md border border-white/10 bg-[#090B10] px-2.5 py-2">
+                  <code className="flex-1 overflow-x-auto font-mono text-[11px] text-emerald-300 whitespace-nowrap">
+                    {termuxExportResult.command}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={handleCopyTermuxCommand}
+                    className="inline-flex shrink-0 items-center gap-1 rounded bg-emerald-600/25 px-2 py-1 text-[11px] font-medium text-emerald-200 hover:bg-emerald-600/40 cursor-pointer"
+                  >
+                    {copiedTermuxExportCmd ? (
+                      <>
+                        <Check className="h-3 w-3" aria-hidden="true" />
+                        <span>Copiado</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3 w-3" aria-hidden="true" />
+                        <span>Copiar</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {completeExportProgress && (
               <div className="space-y-1.5 rounded-lg border border-white/[0.08] bg-[#090B10] p-3">
@@ -3383,6 +3745,9 @@ export function StudioStage({
                     style={{ width: `${completeExportProgress.percent}%` }}
                   />
                 </div>
+                <p className="text-[11px] text-slate-400">
+                  Progresso salvo automaticamente a cada animação concluída.
+                </p>
               </div>
             )}
 
@@ -3395,7 +3760,7 @@ export function StudioStage({
               </div>
             )}
 
-            <div className="flex items-center justify-end gap-2 pt-1">
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
               {completeExportProgress ? (
                 <button
                   type="button"
@@ -3409,7 +3774,7 @@ export function StudioStage({
                   <button
                     type="button"
                     onClick={() => setShowCompleteExportModal(false)}
-                    className="rounded-lg border border-white/10 bg-[#090B10] px-4 py-2 text-xs font-medium text-slate-300 hover:border-white/25 cursor-pointer"
+                    className="rounded-lg border border-white/10 bg-[#090B10] px-3.5 py-2 text-xs font-medium text-slate-300 hover:border-white/25 cursor-pointer"
                   >
                     Fechar
                   </button>
@@ -3420,13 +3785,32 @@ export function StudioStage({
                       !completeIncludeEffects &&
                       !completeIncludeAnimPngs &&
                       !completeIncludeAnimGifs &&
-                      !completeIncludeVideosAndAudio
+                      !completeIncludeVideosAndAudio &&
+                      !completeIncludeSkillIcons &&
+                      !completeIncludeArtworks
                     }
-                    onClick={() => void handleRunCompleteCharacterExport()}
+                    onClick={handleDownloadTermuxCharacterExport}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/40 px-3.5 py-2 text-xs font-semibold text-emerald-200 hover:border-emerald-400/70 hover:bg-emerald-900/50 disabled:opacity-40 transition-colors cursor-pointer"
+                  >
+                    <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Extrair pelo Termux (.sh)</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      !completeIncludeOriginals &&
+                      !completeIncludeEffects &&
+                      !completeIncludeAnimPngs &&
+                      !completeIncludeAnimGifs &&
+                      !completeIncludeVideosAndAudio &&
+                      !completeIncludeSkillIcons &&
+                      !completeIncludeArtworks
+                    }
+                    onClick={() => void handleRunCompleteCharacterExport(true)}
                     className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors cursor-pointer"
                   >
                     <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Baixar ZIP</span>
+                    <span>{ninjaCheckpoint ? 'Retomar ZIP' : 'Baixar ZIP'}</span>
                   </button>
                 </>
               )}

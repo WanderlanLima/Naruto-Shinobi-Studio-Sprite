@@ -358,6 +358,7 @@ const SOURCE_PREFS_STORAGE_KEY = 'shinobi_offline_source_prefs_v1';
 const OFFLINE_IDB_NAME = 'shinobi_offline_source_db_v1';
 const OFFLINE_IDB_STORE = 'persisted_source';
 const OFFLINE_IDB_KEY = 'active';
+const OFFLINE_IDB_CATALOG_KEY = 'cached_catalog';
 const MAX_IDB_INLINE_FILE_BYTES = 250 * 1024 * 1024; // 250 MB safe limit for Android/Desktop blob cloning
 
 interface PersistedSourcePrefs {
@@ -376,6 +377,12 @@ interface HandlePermissionApi {
 type PersistedIdbRecord =
   | { kind: 'handles'; handles: HandlePermissionApi[]; savedAt: number }
   | { kind: 'files'; files: File[]; savedAt: number };
+
+interface PersistedCatalogCache {
+  catalog: ExtractResponse;
+  origin: string;
+  savedAt: number;
+}
 
 function loadPersistedPrefs(): PersistedSourcePrefs {
   try {
@@ -452,6 +459,59 @@ async function readPersistedIdbRecord(): Promise<PersistedIdbRecord | null> {
   });
 }
 
+async function readPersistedCatalogCache(): Promise<PersistedCatalogCache | null> {
+  const db = await openOfflineSourceDb();
+  if (!db) return null;
+  return await new Promise((resolve) => {
+    try {
+      const tx = db.transaction(OFFLINE_IDB_STORE, 'readonly');
+      const req = tx.objectStore(OFFLINE_IDB_STORE).get(OFFLINE_IDB_CATALOG_KEY);
+      req.onsuccess = () => {
+        db.close();
+        resolve((req.result as PersistedCatalogCache | undefined) || null);
+      };
+      req.onerror = () => {
+        db.close();
+        resolve(null);
+      };
+    } catch {
+      db.close();
+      resolve(null);
+    }
+  });
+}
+
+async function writePersistedCatalogCache(cache: PersistedCatalogCache | null): Promise<boolean> {
+  const db = await openOfflineSourceDb();
+  if (!db) return false;
+  return await new Promise((resolve) => {
+    try {
+      const tx = db.transaction(OFFLINE_IDB_STORE, 'readwrite');
+      const store = tx.objectStore(OFFLINE_IDB_STORE);
+      if (cache) {
+        store.put(cache, OFFLINE_IDB_CATALOG_KEY);
+      } else {
+        store.delete(OFFLINE_IDB_CATALOG_KEY);
+      }
+      tx.oncomplete = () => {
+        db.close();
+        resolve(true);
+      };
+      tx.onerror = () => {
+        db.close();
+        resolve(false);
+      };
+      tx.onabort = () => {
+        db.close();
+        resolve(false);
+      };
+    } catch {
+      db.close();
+      resolve(false);
+    }
+  });
+}
+
 async function writePersistedIdbRecord(record: PersistedIdbRecord | null): Promise<boolean> {
   const db = await openOfflineSourceDb();
   if (!db) return false;
@@ -500,6 +560,7 @@ let persistedHandlesAwaitingPermission: HandlePermissionApi[] = [];
 let savedArchivesMeta: SavedOfflineArchiveMeta[] = initialPrefs.savedArchives;
 let currentSourceMode: DataSourceMode = initialPrefs.sourceMode;
 let mountedCatalog: ExtractResponse | null = null;
+let cachedOfflineCatalog: ExtractResponse | null = null;
 let mountedOrigin = 'https://naruto.jotagame.com';
 let strictOfflineMode = initialPrefs.strictOffline;
 let restoringPersisted = false;
@@ -596,10 +657,9 @@ function buildSnapshot(): OfflineZipSnapshot {
   const hasMounted = mountedArchives.length > 0;
   const active = currentSourceMode === 'offline' && hasMounted;
   const canReauth = !hasMounted && persistedHandlesAwaitingPermission.length > 0;
-  const needsReconnect =
-    currentSourceMode === 'offline' &&
-    !hasMounted &&
-    (savedArchivesMeta.length > 0 || canReauth);
+  const needsReconnect = currentSourceMode === 'offline' && !hasMounted;
+  const effectiveCatalog =
+    mountedCatalog || (currentSourceMode === 'offline' ? cachedOfflineCatalog : null);
 
   return {
     sourceMode: currentSourceMode,
@@ -613,8 +673,8 @@ function buildSnapshot(): OfflineZipSnapshot {
     canOneClickReauthorize: canReauth,
     needsReconnect,
     restoring: restoringPersisted,
-    hasCatalog: Boolean(mountedCatalog),
-    catalog: mountedCatalog,
+    hasCatalog: Boolean(effectiveCatalog),
+    catalog: effectiveCatalog,
     stats: computeCoverageStats(),
     lastError: lastStoreError,
   };
@@ -744,6 +804,27 @@ function findEntryByUrlOrPath(urlOrPath: string): ZipEntryRef | null {
 
 export function hasOfflineEntry(urlOrPath: string): boolean {
   return Boolean(findEntryByUrlOrPath(urlOrPath));
+}
+
+export function listOfflineEntryPathsByPredicate(
+  predicate: (lowerPath: string) => boolean
+): string[] {
+  if (!isOfflineBackupActive() || exactEntryMap.size === 0) return [];
+  const matches: string[] = [];
+  for (const [lowPath, ref] of lowerEntryMap.entries()) {
+    if (predicate(lowPath)) {
+      matches.push(ref.path);
+    }
+  }
+  return matches;
+}
+
+export async function readOfflineEntryBytes(urlOrPath: string): Promise<ArrayBuffer | null> {
+  if (!isOfflineBackupActive()) return null;
+  const entry = findEntryByUrlOrPath(urlOrPath);
+  if (!entry) return null;
+  const blob = await readEntryBlobAsync(entry);
+  return await blob.arrayBuffer();
 }
 
 /**
@@ -1162,6 +1243,10 @@ export async function mountBackupZipFiles(
     currentSourceMode = 'offline';
   }
 
+  if (mountedCatalog) {
+    cachedOfflineCatalog = mountedCatalog;
+  }
+
   if (!options?.skipPersist) {
     const now = Date.now();
     savedArchivesMeta = mountedArchives.map((a) => ({
@@ -1172,6 +1257,14 @@ export async function mountBackupZipFiles(
       savedAt: now,
     }));
     syncPrefsToStorage();
+
+    if (mountedCatalog) {
+      void writePersistedCatalogCache({
+        catalog: mountedCatalog,
+        origin: mountedOrigin,
+        savedAt: now,
+      });
+    }
 
     if (mountedHandles.length > 0 && mountedHandles.length === mountedArchives.length) {
       // Zero-copy persistent handle reference (works for 7 GB+ ZIPs on Chrome/Edge!)
@@ -1189,7 +1282,7 @@ export async function mountBackupZipFiles(
           savedAt: now,
         });
       } else {
-        // Avoid cloning multi-GB files into browser quota on Android; keep metadata + preference saved
+        // Avoid cloning multi-GB files into browser quota on Android; keep metadata + catalog + preference saved
         void writePersistedIdbRecord(null);
       }
     }
@@ -1324,6 +1417,16 @@ export async function initPersistedOfflineSource(): Promise<void> {
   if (initStarted) return;
   initStarted = true;
 
+  // Hydrate cached offline catalog immediately so Offline Mode stays populated on reload
+  const cachedCat = await readPersistedCatalogCache();
+  if (cachedCat?.catalog && Array.isArray(cachedCat.catalog.ninjas)) {
+    cachedOfflineCatalog = cachedCat.catalog;
+    if (cachedCat.origin) {
+      mountedOrigin = cachedCat.origin;
+    }
+    emitChange();
+  }
+
   const record = await readPersistedIdbRecord();
   if (!record) return;
 
@@ -1393,10 +1496,12 @@ export function unmountBackupZip(options?: { keepPreference?: boolean }): void {
   lastStoreError = null;
 
   if (!options?.keepPreference) {
+    cachedOfflineCatalog = null;
     currentSourceMode = 'online';
     savedArchivesMeta = [];
     syncPrefsToStorage();
     void writePersistedIdbRecord(null);
+    void writePersistedCatalogCache(null);
   }
 
   emitChange();

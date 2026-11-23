@@ -9,6 +9,7 @@ import { OfflineIndicator, PWAInstallAction } from './components/PWAInstallBanne
 import { StudioStage } from './components/StudioStage';
 import { TopBar, type WorkspaceTab } from './components/TopBar';
 import {
+  getOfflineZipSnapshot,
   initPersistedOfflineSource,
   mountBackupZipFiles,
   pickAndMountOfflineZipFiles,
@@ -16,6 +17,11 @@ import {
   setPreferredSourceMode,
   useOfflineZipState,
 } from './utils/offlineZipStore';
+import {
+  clearExportCheckpoint,
+  getLatestExportCheckpoint,
+  type ExportCheckpointJobMeta,
+} from './utils/exportCheckpointStore';
 import type {
   ExtractResponse,
   NinjaEntry,
@@ -32,7 +38,8 @@ import {
 
 const DEFAULT_GAME_URL = 'https://naruto.jotagame.com/';
 const SAVED_GAME_URL_KEY = 'shinobi_saved_game_url_v1';
-const CATALOG_STATE_STORAGE_KEY = 'shinobi_catalog_state_v1';
+const CATALOG_STATE_STORAGE_KEY = 'shinobi_catalog_state_v2';
+const LEGACY_CATALOG_STATE_KEY = 'shinobi_catalog_state_v1';
 
 function loadSavedGameUrl(): string {
   try {
@@ -60,12 +67,16 @@ interface SavedCatalogState {
   kindFilter: 'character' | 'summon_skin' | 'effect' | 'all';
   onlyWithVideo: boolean;
   sortBy: 'id' | 'name' | 'largest' | 'smallest';
+  autoThumbnails: boolean;
   page: number;
+  selectedNinjaId?: string;
 }
 
 function loadSavedCatalogState(): SavedCatalogState {
   try {
-    const raw = sessionStorage.getItem(CATALOG_STATE_STORAGE_KEY);
+    const raw =
+      localStorage.getItem(CATALOG_STATE_STORAGE_KEY) ||
+      sessionStorage.getItem(LEGACY_CATALOG_STATE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<SavedCatalogState>;
       const validKinds = ['character', 'summon_skin', 'effect', 'all'] as const;
@@ -79,16 +90,29 @@ function loadSavedCatalogState(): SavedCatalogState {
         sortBy: validSorts.includes(parsed.sortBy as (typeof validSorts)[number])
           ? (parsed.sortBy as SavedCatalogState['sortBy'])
           : 'id',
+        autoThumbnails:
+          typeof parsed.autoThumbnails === 'boolean' ? parsed.autoThumbnails : true,
         page:
           typeof parsed.page === 'number' && Number.isFinite(parsed.page) && parsed.page >= 1
             ? Math.floor(parsed.page)
             : 1,
+        selectedNinjaId:
+          typeof parsed.selectedNinjaId === 'string' && parsed.selectedNinjaId
+            ? parsed.selectedNinjaId
+            : undefined,
       };
     }
   } catch {
     // ignore storage errors
   }
-  return { search: '', kindFilter: 'character', onlyWithVideo: false, sortBy: 'id', page: 1 };
+  return {
+    search: '',
+    kindFilter: 'character',
+    onlyWithVideo: false,
+    sortBy: 'id',
+    autoThumbnails: true,
+    page: 1,
+  };
 }
 
 export default function App() {
@@ -99,9 +123,11 @@ export default function App() {
   const [extractResult, setExtractResult] = useState<ExtractResponse | null>(null);
   const [quickMounting, setQuickMounting] = useState(false);
   const [quickMountError, setQuickMountError] = useState<string | null>(null);
+  const [savedCheckpoint, setSavedCheckpoint] = useState<ExportCheckpointJobMeta | null>(null);
   const quickOfflineInputRef = useRef<HTMLInputElement | null>(null);
   const offlineZip = useOfflineZipState();
-  const activeCatalog = offlineZip.active && offlineZip.catalog ? offlineZip.catalog : extractResult;
+  const isOfflineMode = offlineZip.sourceMode === 'offline';
+  const activeCatalog = isOfflineMode ? offlineZip.catalog : extractResult;
 
   const [selectedNinja, setSelectedNinja] = useState<NinjaEntry | null>(null);
   const [studioExportPayload, setStudioExportPayload] = useState<{
@@ -142,7 +168,9 @@ export default function App() {
   const [catalogSortBy, setCatalogSortBy] = useState<'id' | 'name' | 'largest' | 'smallest'>(
     initialCatalog.current.sortBy
   );
-  const [catalogAutoThumbnails, setCatalogAutoThumbnails] = useState(true);
+  const [catalogAutoThumbnails, setCatalogAutoThumbnails] = useState(
+    initialCatalog.current.autoThumbnails
+  );
   const [catalogPage, setCatalogPage] = useState(initialCatalog.current.page);
 
   const catalogReturnScrollYRef = useRef<number | null>(null);
@@ -155,13 +183,23 @@ export default function App() {
         kindFilter: catalogKindFilter,
         onlyWithVideo: catalogOnlyWithVideo,
         sortBy: catalogSortBy,
+        autoThumbnails: catalogAutoThumbnails,
         page: catalogPage,
+        selectedNinjaId: selectedNinja?.id || initialCatalog.current?.selectedNinjaId,
       };
-      sessionStorage.setItem(CATALOG_STATE_STORAGE_KEY, JSON.stringify(payload));
+      localStorage.setItem(CATALOG_STATE_STORAGE_KEY, JSON.stringify(payload));
     } catch {
       // ignore storage errors
     }
-  }, [catalogSearch, catalogKindFilter, catalogOnlyWithVideo, catalogSortBy, catalogPage]);
+  }, [
+    catalogSearch,
+    catalogKindFilter,
+    catalogOnlyWithVideo,
+    catalogSortBy,
+    catalogAutoThumbnails,
+    catalogPage,
+    selectedNinja?.id,
+  ]);
 
   const restoreCatalogScroll = useCallback(() => {
     const targetY = catalogReturnScrollYRef.current;
@@ -214,8 +252,20 @@ export default function App() {
 
   useEffect(() => {
     void initPersistedOfflineSource();
-    void runExtraction(loadSavedGameUrl());
+    // Respect user's persisted sourceMode: never silently fetch the live game site when Offline Mode is saved
+    if (getOfflineZipSnapshot().sourceMode === 'online') {
+      void runExtraction(loadSavedGameUrl());
+    }
+    void getLatestExportCheckpoint().then((cp) => {
+      if (cp) setSavedCheckpoint(cp);
+    });
   }, [runExtraction]);
+
+  useEffect(() => {
+    if (activeTab === 'ninjas') {
+      void getLatestExportCheckpoint().then((cp) => setSavedCheckpoint(cp));
+    }
+  }, [activeTab]);
 
   const handleQuickMountFromInput = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
@@ -306,6 +356,11 @@ export default function App() {
     setSelectedNinja((prev) => {
       if (prev && activeCatalog.ninjas.some((n) => n.id === prev.id)) {
         return prev;
+      }
+      const savedId = initialCatalog.current?.selectedNinjaId;
+      if (savedId) {
+        const matched = activeCatalog.ninjas.find((n) => n.id === savedId);
+        if (matched) return matched;
       }
       return activeCatalog.ninjas[0];
     });
@@ -407,6 +462,8 @@ export default function App() {
 
   const sourceLabel = offlineZip.active
     ? `Backup local (${offlineZip.archives.length} ${offlineZip.archives.length === 1 ? 'arquivo' : 'arquivos'})`
+    : isOfflineMode
+    ? 'Modo offline (aguardando .ZIP)'
     : activeCatalog?.resolvedGameUrl
     ? activeCatalog.resolvedGameUrl.replace(/^https?:\/\//i, '').replace(/\/$/, '')
     : targetUrl.replace(/^https?:\/\//i, '').replace(/\/$/, '');
@@ -418,7 +475,7 @@ export default function App() {
         : `${offlineZip.savedArchives.length} arquivos salvos (${formatCompactBytes(
             offlineZip.savedArchives.reduce((sum, a) => sum + a.fileSize, 0)
           )})`
-      : 'Backup offline salvo';
+      : 'Selecione seu backup .ZIP local';
 
   return (
     <div className="min-h-screen flex flex-col bg-[#090B10] text-slate-100">
@@ -521,7 +578,50 @@ export default function App() {
               </div>
             )}
 
-            {extractError && !offlineZip.active && (
+            {savedCheckpoint && (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-orange-500/35 bg-orange-950/25 px-4 py-2.5 text-xs text-orange-100">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Archive className="h-3.5 w-3.5 text-orange-400 shrink-0" aria-hidden="true" />
+                  <span className="truncate">
+                    Exportação interrompida de{' '}
+                    <span className="font-semibold text-white">{savedCheckpoint.ninjaName}</span> ·{' '}
+                    {savedCheckpoint.completedAnims.length}/{savedCheckpoint.totalAnims} animações salvas
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = activeCatalog?.ninjas.find(
+                        (n) => n.id === savedCheckpoint.ninjaId
+                      );
+                      if (target) {
+                        setSelectedNinja(target);
+                        setActiveTab('studio');
+                        setStudioCompleteExportSignal((v) => v + 1);
+                      }
+                    }}
+                    disabled={!activeCatalog?.ninjas.some((n) => n.id === savedCheckpoint.ninjaId)}
+                    className="rounded-md bg-orange-600 px-3 py-1.5 font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    Retomar de onde parou
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void clearExportCheckpoint(savedCheckpoint.jobId).then(() =>
+                        setSavedCheckpoint(null)
+                      );
+                    }}
+                    className="rounded-md border border-white/15 bg-[#090B10]/80 px-2.5 py-1.5 font-medium text-slate-300 hover:text-white cursor-pointer whitespace-nowrap"
+                  >
+                    Descartar
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {extractError && !isOfflineMode && (
               <div
                 role="alert"
                 className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-500/30 bg-red-950/25 px-4 py-3 text-xs text-red-200"
@@ -694,7 +794,7 @@ export default function App() {
                       type="button"
                       onClick={handleSwitchToGameSite}
                       className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                        !offlineZip.active
+                        !isOfflineMode
                           ? 'bg-orange-600 text-white'
                           : 'text-slate-400 hover:text-slate-100'
                       }`}
@@ -709,6 +809,8 @@ export default function App() {
                       className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium transition-colors whitespace-nowrap cursor-pointer ${
                         offlineZip.active
                           ? 'bg-emerald-600 text-white'
+                          : isOfflineMode
+                          ? 'bg-amber-600 text-white'
                           : 'text-slate-400 hover:text-slate-100'
                       }`}
                     >
@@ -716,8 +818,10 @@ export default function App() {
                       <span>
                         {quickMounting
                           ? 'Abrindo...'
-                          : offlineZip.hasMountedArchives
+                          : offlineZip.active
                           ? 'Arquivo offline'
+                          : isOfflineMode
+                          ? 'Offline (reconectar)'
                           : 'Offline'}
                       </span>
                     </button>
