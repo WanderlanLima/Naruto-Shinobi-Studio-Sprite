@@ -12,6 +12,7 @@ import {
   Download,
   FileText,
   FolderOpen,
+  Globe,
   HardDrive,
   Layers,
   Music,
@@ -42,6 +43,9 @@ import {
 } from '../utils/directBackupScript';
 import {
   mountBackupZipFiles,
+  pickAndMountOfflineZipFiles,
+  reauthorizeSavedOfflineHandles,
+  setPreferredSourceMode,
   setStrictOfflineMode,
   unmountBackupZip,
   useOfflineZipState,
@@ -129,7 +133,7 @@ export function OfflineBackupView({
   const [planError, setPlanError] = useState<string | null>(null);
   const [downloadedIds, setDownloadedIds] = useState<Set<string>>(() => new Set());
   const [viewMode, setViewMode] = useState<'download' | 'open'>(() =>
-    offlineZip.active ? 'open' : 'download'
+    offlineZip.hasMountedArchives || offlineZip.needsReconnect ? 'open' : 'download'
   );
   const [showConnectionPanel, setShowConnectionPanel] = useState(false);
   const [downloadTab, setDownloadTab] = useState<'presets' | 'modular' | 'custom'>('presets');
@@ -325,18 +329,33 @@ export function OfflineBackupView({
 
   const handleMountFiles = async (fileList: FileList | File[] | null, append: boolean) => {
     if (!fileList || fileList.length === 0) return;
-    const files = Array.from(fileList).filter(
-      (f) => f.name.toLowerCase().endsWith('.zip') || f.type.includes('zip') || f.size > 22
-    );
+    const rawFiles = Array.from(fileList);
+    const files: File[] = [];
+    for (const f of rawFiles) {
+      if (f.size < 22) continue;
+      if (f.name.toLowerCase().endsWith('.zip') || f.type.includes('zip')) {
+        files.push(f);
+        continue;
+      }
+      // Fallback: check ZIP magic bytes ("PK") in case Android strips extension or reports application/octet-stream
+      try {
+        const head = new Uint8Array(await f.slice(0, 4).arrayBuffer());
+        if (head[0] === 0x50 && head[1] === 0x4b) {
+          files.push(f);
+        }
+      } catch {
+        // ignore unreadable selection
+      }
+    }
     if (files.length === 0) {
-      setMountError('Selecione arquivos no formato .zip.');
+      setMountError('Selecione arquivos válidos no formato .zip.');
       return;
     }
     setMounting(true);
     setMountError(null);
     try {
       clearMediaProfileCache();
-      await mountBackupZipFiles(files, { append });
+      await mountBackupZipFiles(files, { append, activateOffline: true });
     } catch (err) {
       setMountError(
         err instanceof Error ? err.message : 'Não foi possível ler o arquivo .zip selecionado.'
@@ -346,6 +365,50 @@ export function OfflineBackupView({
       if (replaceInputRef.current) replaceInputRef.current.value = '';
       if (appendInputRef.current) appendInputRef.current.value = '';
     }
+  };
+
+  const handleSmartPickFiles = async (append: boolean) => {
+    setMountError(null);
+    setMounting(true);
+    try {
+      const result = await pickAndMountOfflineZipFiles({ append });
+      if (result.status === 'mounted') {
+        clearMediaProfileCache();
+      } else if (result.status === 'fallback-input') {
+        if (append) {
+          appendInputRef.current?.click();
+        } else {
+          replaceInputRef.current?.click();
+        }
+      }
+    } catch (err) {
+      setMountError(
+        err instanceof Error ? err.message : 'Não foi possível ler o arquivo .zip selecionado.'
+      );
+    } finally {
+      setMounting(false);
+    }
+  };
+
+  const handleReauthorizeSaved = async () => {
+    setMountError(null);
+    setMounting(true);
+    try {
+      clearMediaProfileCache();
+      const ok = await reauthorizeSavedOfflineHandles();
+      if (!ok) {
+        setMountError(
+          'Permissão negada ou arquivo movido. Selecione o arquivo .zip novamente.'
+        );
+      }
+    } finally {
+      setMounting(false);
+    }
+  };
+
+  const handleSwitchSourceMode = (mode: 'online' | 'offline') => {
+    clearMediaProfileCache();
+    setPreferredSourceMode(mode);
   };
 
   const handleUnmount = () => {
@@ -896,11 +959,10 @@ export function OfflineBackupView({
 
   return (
     <div className="space-y-6">
-      {/* Hidden native file inputs for Android & Desktop */}
+      {/* Hidden native file inputs for Android & Desktop (no MIME accept filter so Android Chrome shows Termux-created >4GB ZIPs) */}
       <input
         ref={replaceInputRef}
         type="file"
-        accept=".zip,application/zip,application/x-zip-compressed"
         multiple
         className="hidden"
         onChange={(e) => void handleMountFiles(e.target.files, false)}
@@ -908,7 +970,6 @@ export function OfflineBackupView({
       <input
         ref={appendInputRef}
         type="file"
-        accept=".zip,application/zip,application/x-zip-compressed"
         multiple
         className="hidden"
         onChange={(e) => void handleMountFiles(e.target.files, true)}
@@ -921,6 +982,8 @@ export function OfflineBackupView({
           <p className="mt-1 text-xs text-slate-400 tabular-nums">
             {offlineZip.active
               ? `Modo offline ativo · ${offlineZip.archives.length} ZIP · ${offlineZip.stats.totalEntries.toLocaleString('pt-BR')} arquivos`
+              : offlineZip.hasMountedArchives
+              ? `Site do jogo ativo · ${offlineZip.archives.length} ZIP carregado em espera`
               : 'Baixe pacotes para uso sem internet ou abra arquivos .zip salvos no dispositivo'}
           </p>
         </div>
@@ -948,9 +1011,11 @@ export function OfflineBackupView({
               }`}
             >
               <span>Abrir ZIP local</span>
-              {offlineZip.active && (
+              {offlineZip.active ? (
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" />
-              )}
+              ) : offlineZip.hasMountedArchives || offlineZip.needsReconnect ? (
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" />
+              ) : null}
             </button>
           </div>
 
@@ -1193,6 +1258,56 @@ export function OfflineBackupView({
       {/* VIEW 1: OPEN LOCAL ZIP (OFFLINE MODE) */}
       {viewMode === 'open' && (
         <section className="space-y-5">
+          {offlineZip.needsReconnect && !offlineZip.hasMountedArchives && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="space-y-1 min-w-0">
+                <div className="text-xs font-semibold text-amber-200">
+                  Preferência salva: Modo offline
+                </div>
+                <div className="text-xs text-slate-300 truncate">
+                  Último pacote:{' '}
+                  <span className="font-mono text-amber-100">
+                    {offlineZip.savedArchives.map((a) => `${a.fileName} (${formatSize(a.fileSize)})`).join(', ')}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  {offlineZip.canOneClickReauthorize
+                    ? 'Toque no botão abaixo para reativar imediatamente sem precisar procurar o arquivo.'
+                    : 'Por segurança do navegador móvel para arquivos grandes (> 250 MB), confirme o arquivo para reabrir ou volte ao site do jogo.'}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={mounting}
+                  onClick={() =>
+                    offlineZip.canOneClickReauthorize
+                      ? void handleReauthorizeSaved()
+                      : void handleSmartPickFiles(false)
+                  }
+                  className="rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50 transition-colors cursor-pointer"
+                >
+                  {mounting
+                    ? 'Reconectando...'
+                    : offlineZip.canOneClickReauthorize
+                    ? 'Reativar backup (1 clique)'
+                    : 'Reconectar .ZIP salvo'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSwitchSourceMode('online');
+                    onGoToCatalog();
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-[#090B10] px-3 py-2 text-xs font-medium text-slate-200 hover:border-white/30 transition-colors cursor-pointer"
+                >
+                  <Globe className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Usar site do jogo</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Dropzone */}
           <div
             onDragOver={(e) => {
@@ -1203,20 +1318,25 @@ export function OfflineBackupView({
             onDrop={(e) => {
               e.preventDefault();
               setIsDragging(false);
-              void handleMountFiles(e.dataTransfer.files, offlineZip.active);
+              void handleMountFiles(e.dataTransfer.files, offlineZip.hasMountedArchives);
             }}
             className={`rounded-xl border border-dashed p-8 text-center transition-colors ${
               isDragging
                 ? 'border-orange-500 bg-orange-500/10'
                 : offlineZip.active
                 ? 'border-emerald-500/35 bg-[#11141C]'
+                : offlineZip.hasMountedArchives
+                ? 'border-amber-500/35 bg-[#11141C]'
                 : 'border-white/15 bg-[#11141C] hover:border-white/25'
             }`}
           >
             <div className="mx-auto flex max-w-md flex-col items-center gap-3">
               <div className="rounded-lg bg-[#090B10] border border-white/[0.07] p-3">
-                {offlineZip.active ? (
-                  <PackageCheck className="h-5 w-5 text-emerald-400" aria-hidden="true" />
+                {offlineZip.hasMountedArchives ? (
+                  <PackageCheck
+                    className={`h-5 w-5 ${offlineZip.active ? 'text-emerald-400' : 'text-amber-400'}`}
+                    aria-hidden="true"
+                  />
                 ) : (
                   <FolderOpen className="h-5 w-5 text-orange-400" aria-hidden="true" />
                 )}
@@ -1227,11 +1347,16 @@ export function OfflineBackupView({
                   {mounting
                     ? 'Indexando arquivos ZIP...'
                     : offlineZip.active
-                    ? `${offlineZip.archives.length} pacote(s) carregado(s)`
+                    ? `${offlineZip.archives.length} pacote(s) ativo(s) em modo offline`
+                    : offlineZip.hasMountedArchives
+                    ? `${offlineZip.archives.length} pacote(s) pronto(s) (usando site do jogo agora)`
                     : 'Arraste seus arquivos .zip ou selecione do dispositivo'}
                 </p>
                 <p className="text-xs text-slate-400">
-                  Compatível com backup completo, personalizado ou múltiplas partes juntas.
+                  A preferência offline é salva automaticamente. Compatível com backup completo (&gt; 4 GB do Termux), personalizado ou múltiplas partes.
+                </p>
+                <p className="text-[11px] text-slate-500">
+                  No Android, se o arquivo não aparecer em &ldquo;Recentes&rdquo;, toque no menu (☰) → armazenamento do aparelho → Download.
                 </p>
               </div>
 
@@ -1239,18 +1364,18 @@ export function OfflineBackupView({
                 <button
                   type="button"
                   disabled={mounting}
-                  onClick={() => replaceInputRef.current?.click()}
+                  onClick={() => void handleSmartPickFiles(false)}
                   className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50 transition-colors cursor-pointer"
                 >
                   <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>{offlineZip.active ? 'Trocar arquivos' : 'Selecionar .ZIP'}</span>
+                  <span>{offlineZip.hasMountedArchives ? 'Trocar arquivos' : 'Selecionar .ZIP'}</span>
                 </button>
 
-                {offlineZip.active && (
+                {offlineZip.hasMountedArchives && (
                   <button
                     type="button"
                     disabled={mounting}
-                    onClick={() => appendInputRef.current?.click()}
+                    onClick={() => void handleSmartPickFiles(true)}
                     className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#090B10] px-4 py-2 text-xs font-medium text-slate-200 hover:border-white/20 disabled:opacity-50 transition-colors cursor-pointer"
                   >
                     <Plus className="h-3.5 w-3.5" aria-hidden="true" />
@@ -1270,7 +1395,7 @@ export function OfflineBackupView({
             </div>
           )}
 
-          {offlineZip.active && (
+          {offlineZip.hasMountedArchives && (
             <div className="rounded-xl border border-white/[0.07] bg-[#11141C] overflow-hidden">
               {/* Inline Hairline Stats Row */}
               <div className="grid grid-cols-3 sm:grid-cols-6 divide-x divide-y sm:divide-y-0 divide-white/[0.06] border-b border-white/[0.06]">
@@ -1312,7 +1437,7 @@ export function OfflineBackupView({
                 </div>
               </div>
 
-              {/* Strict Offline + Actions */}
+              {/* Strict Offline + Quick Source Toggle + Actions */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
                 <label className="inline-flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
                   <input
@@ -1324,10 +1449,29 @@ export function OfflineBackupView({
                   <span>Modo offline estrito (bloquear requisições externas)</span>
                 </label>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-[11px] text-slate-500 tabular-nums mr-1">
                     {formatSize(offlineZip.stats.totalBytes)}
                   </span>
+                  {offlineZip.active ? (
+                    <button
+                      type="button"
+                      onClick={() => handleSwitchSourceMode('online')}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-[#090B10] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-orange-500/40 hover:text-orange-200 transition-colors cursor-pointer"
+                    >
+                      <Globe className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Usar site do jogo</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleSwitchSourceMode('offline')}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 transition-colors cursor-pointer"
+                    >
+                      <HardDrive className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Ativar arquivo offline</span>
+                    </button>
+                  )}
                   {offlineZip.hasCatalog && (
                     <button
                       type="button"

@@ -717,7 +717,7 @@ for tmp_ctl in (listfile, metab64file, metajsonfile):
 print("")
 print(f"Empacotando arquivo unico (ZIP64 STORE): {zipout}")
 os.makedirs(os.path.dirname(os.path.abspath(zipout)), exist_ok=True)
-tmp_zip = zipout + ".building"
+tmp_zip = (zipout[:-4] + ".tmp.zip") if zipout.lower().endswith(".zip") else (zipout + ".tmp.zip")
 if os.path.exists(tmp_zip):
     os.remove(tmp_zip)
 
@@ -767,6 +767,9 @@ else:
 PY_ENGINE
 
 if [ "$IS_TERMUX" -eq 1 ]; then
+  if [ -f "$ZIPOUT" ]; then
+    command -v termux-media-scan >/dev/null 2>&1 && termux-media-scan "$ZIPOUT" >/dev/null 2>&1 || true
+  fi
   command -v termux-wake-unlock >/dev/null 2>&1 && termux-wake-unlock || true
 fi
 `;
@@ -1550,7 +1553,7 @@ if not pack_zip:
 print("")
 print(f"[4/4] Empacotando tudo em 1 UNICO arquivo ZIP64 STORE: {zipout}")
 os.makedirs(os.path.dirname(os.path.abspath(zipout)), exist_ok=True)
-tmp_zip = zipout + ".building"
+tmp_zip = (zipout[:-4] + ".tmp.zip") if zipout.lower().endswith(".zip") else (zipout + ".tmp.zip")
 if os.path.exists(tmp_zip):
     os.remove(tmp_zip)
 
@@ -1599,6 +1602,9 @@ else:
 PY_MIRROR
 
 if [ "$IS_TERMUX" -eq 1 ]; then
+  if [ -f "$ZIPOUT" ]; then
+    command -v termux-media-scan >/dev/null 2>&1 && termux-media-scan "$ZIPOUT" >/dev/null 2>&1 || true
+  fi
   command -v termux-wake-unlock >/dev/null 2>&1 && termux-wake-unlock || true
 fi
 `;

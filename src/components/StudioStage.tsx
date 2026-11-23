@@ -272,6 +272,8 @@ export function StudioStage({
   const [completeGifBg, setCompleteGifBg] = useState<'transparent' | 'dark' | 'light' | 'chroma'>(
     'transparent'
   );
+  const [completeExportFps, setCompleteExportFps] = useState<24 | 15 | 12>(24);
+  const [completeExportMaxRes, setCompleteExportMaxRes] = useState<2048 | 1024 | 512>(2048);
   const [completeExportProgress, setCompleteExportProgress] = useState<{
     phase: string;
     message: string;
@@ -1450,7 +1452,8 @@ export function StudioStage({
           includeSkillIcons: completeIncludeSkillIcons,
           mediaProfile,
           gifBg: completeGifBg,
-          fps: 24,
+          fps: completeExportFps,
+          maxResolution: completeExportMaxRes,
           signal: controller.signal,
           onProgress: (info) => setCompleteExportProgress(info),
         }
@@ -3232,7 +3235,7 @@ export function StudioStage({
                   <div>
                     <div className="font-medium text-slate-100">Sequências PNG e spritesheets</div>
                     <div className="text-[11px] text-slate-400">
-                      Todas as animações renderizadas em 1:1 (24 FPS) com efeitos compostos.
+                      Todas as animações renderizadas em passagem única ({completeExportFps} FPS) com efeitos compostos.
                     </div>
                   </div>
                 </label>
@@ -3274,6 +3277,41 @@ export function StudioStage({
                     </div>
                   )}
                 </div>
+
+                {(completeIncludeAnimPngs || completeIncludeAnimGifs) && (
+                  <div className="grid grid-cols-2 gap-2.5 p-3 bg-white/[0.015]">
+                    <label className="space-y-1">
+                      <span className="block text-[11px] text-slate-400">Taxa de quadros</span>
+                      <select
+                        disabled={Boolean(completeExportProgress)}
+                        value={completeExportFps}
+                        onChange={(e) =>
+                          setCompleteExportFps(Number(e.target.value) as 24 | 15 | 12)
+                        }
+                        className="w-full rounded-md border border-white/10 bg-[#11141C] px-2 py-1.5 text-[11px] text-slate-200 focus:border-orange-500 focus:outline-none"
+                      >
+                        <option value={24}>24 FPS (Original)</option>
+                        <option value={15}>15 FPS (Mais rápido)</option>
+                        <option value={12}>12 FPS (Ultra rápido)</option>
+                      </select>
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-[11px] text-slate-400">Resolução máxima</span>
+                      <select
+                        disabled={Boolean(completeExportProgress)}
+                        value={completeExportMaxRes}
+                        onChange={(e) =>
+                          setCompleteExportMaxRes(Number(e.target.value) as 2048 | 1024 | 512)
+                        }
+                        className="w-full rounded-md border border-white/10 bg-[#11141C] px-2 py-1.5 text-[11px] text-slate-200 focus:border-orange-500 focus:outline-none"
+                      >
+                        <option value={2048}>Original (até 2048px)</option>
+                        <option value={1024}>Média (até 1024px)</option>
+                        <option value={512}>Compacta (até 512px)</option>
+                      </select>
+                    </label>
+                  </div>
+                )}
 
                 {mediaProfile?.passiveAura && (
                   <label className="flex items-start gap-2.5 p-3 cursor-pointer">

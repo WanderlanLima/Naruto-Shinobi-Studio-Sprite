@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Archive, ArrowRight, Globe, SlidersHorizontal, WifiOff, X } from 'lucide-react';
+import { Archive, ArrowRight, Globe, HardDrive, SlidersHorizontal, WifiOff, X } from 'lucide-react';
 import { BatchZipModal } from './components/BatchZipModal';
 import { GeneralAssetsView } from './components/GeneralAssetsView';
 import { LocalSlicer } from './components/LocalSlicer';
@@ -8,7 +8,14 @@ import { OfflineBackupView } from './components/OfflineBackupView';
 import { OfflineIndicator, PWAInstallAction } from './components/PWAInstallBanner';
 import { StudioStage } from './components/StudioStage';
 import { TopBar, type WorkspaceTab } from './components/TopBar';
-import { useOfflineZipState } from './utils/offlineZipStore';
+import {
+  initPersistedOfflineSource,
+  mountBackupZipFiles,
+  pickAndMountOfflineZipFiles,
+  reauthorizeSavedOfflineHandles,
+  setPreferredSourceMode,
+  useOfflineZipState,
+} from './utils/offlineZipStore';
 import type {
   ExtractResponse,
   NinjaEntry,
@@ -17,13 +24,36 @@ import type {
 } from './types/sprite';
 import { exportFramesAsZip } from './utils/atlasParser';
 import {
+  clearMediaProfileCache,
   extractGameCatalog,
   getSavedCorsProxy,
   setSavedCorsProxy,
 } from './utils/remoteClient';
 
 const DEFAULT_GAME_URL = 'https://naruto.jotagame.com/';
+const SAVED_GAME_URL_KEY = 'shinobi_saved_game_url_v1';
 const CATALOG_STATE_STORAGE_KEY = 'shinobi_catalog_state_v1';
+
+function loadSavedGameUrl(): string {
+  try {
+    const raw = localStorage.getItem(SAVED_GAME_URL_KEY);
+    if (raw && /^https?:\/\//i.test(raw.trim())) {
+      return raw.trim();
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return DEFAULT_GAME_URL;
+}
+
+function formatCompactBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 1) return `${gb.toFixed(2)} GB`;
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1) return `${mb.toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
 
 interface SavedCatalogState {
   search: string;
@@ -63,10 +93,13 @@ function loadSavedCatalogState(): SavedCatalogState {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('ninjas');
-  const [targetUrl, setTargetUrl] = useState(DEFAULT_GAME_URL);
+  const [targetUrl, setTargetUrl] = useState(() => loadSavedGameUrl());
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
   const [extractResult, setExtractResult] = useState<ExtractResponse | null>(null);
+  const [quickMounting, setQuickMounting] = useState(false);
+  const [quickMountError, setQuickMountError] = useState<string | null>(null);
+  const quickOfflineInputRef = useRef<HTMLInputElement | null>(null);
   const offlineZip = useOfflineZipState();
   const activeCatalog = offlineZip.active && offlineZip.catalog ? offlineZip.catalog : extractResult;
 
@@ -158,6 +191,12 @@ export default function App() {
     const trimmed = urlToScan.trim();
     if (!trimmed) return;
 
+    try {
+      localStorage.setItem(SAVED_GAME_URL_KEY, trimmed);
+    } catch {
+      // ignore storage errors
+    }
+
     setExtracting(true);
     setExtractError(null);
     try {
@@ -174,8 +213,93 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void runExtraction(DEFAULT_GAME_URL);
+    void initPersistedOfflineSource();
+    void runExtraction(loadSavedGameUrl());
   }, [runExtraction]);
+
+  const handleQuickMountFromInput = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    const validFiles: File[] = [];
+    for (const f of Array.from(fileList)) {
+      if (f.size < 22) continue;
+      if (f.name.toLowerCase().endsWith('.zip') || f.type.includes('zip')) {
+        validFiles.push(f);
+        continue;
+      }
+      try {
+        const head = new Uint8Array(await f.slice(0, 4).arrayBuffer());
+        if (head[0] === 0x50 && head[1] === 0x4b) {
+          validFiles.push(f);
+        }
+      } catch {
+        // ignore unreadable file
+      }
+    }
+    if (validFiles.length === 0) {
+      setQuickMountError('Selecione arquivos válidos no formato .zip.');
+      return;
+    }
+    setQuickMounting(true);
+    setQuickMountError(null);
+    try {
+      clearMediaProfileCache();
+      await mountBackupZipFiles(validFiles, { append: false, activateOffline: true });
+    } catch (err) {
+      setQuickMountError(
+        err instanceof Error ? err.message : 'Não foi possível abrir o arquivo offline.'
+      );
+    } finally {
+      setQuickMounting(false);
+      if (quickOfflineInputRef.current) quickOfflineInputRef.current.value = '';
+    }
+  };
+
+  const handleActivateOfflineSource = async () => {
+    setQuickMountError(null);
+    if (offlineZip.hasMountedArchives) {
+      clearMediaProfileCache();
+      setPreferredSourceMode('offline');
+      return;
+    }
+    if (offlineZip.canOneClickReauthorize) {
+      setQuickMounting(true);
+      try {
+        clearMediaProfileCache();
+        const ok = await reauthorizeSavedOfflineHandles();
+        if (!ok) {
+          setQuickMountError('Permissão necessária para reabrir o arquivo offline salvo.');
+        }
+      } finally {
+        setQuickMounting(false);
+      }
+      return;
+    }
+    // Open native picker (File System Access API when supported -> saves persistent handle; otherwise <input>)
+    setQuickMounting(true);
+    try {
+      const picked = await pickAndMountOfflineZipFiles({ append: false });
+      if (picked.status === 'mounted') {
+        clearMediaProfileCache();
+      } else if (picked.status === 'fallback-input') {
+        quickOfflineInputRef.current?.click();
+      }
+    } catch (err) {
+      setQuickMountError(
+        err instanceof Error ? err.message : 'Não foi possível abrir o arquivo offline.'
+      );
+    } finally {
+      setQuickMounting(false);
+    }
+  };
+
+  const handleSwitchToGameSite = () => {
+    setQuickMountError(null);
+    clearMediaProfileCache();
+    setPreferredSourceMode('online');
+    if (!extractResult && !extracting) {
+      void runExtraction(targetUrl);
+    }
+  };
 
   useEffect(() => {
     if (!activeCatalog?.ninjas.length) return;
@@ -287,8 +411,25 @@ export default function App() {
     ? activeCatalog.resolvedGameUrl.replace(/^https?:\/\//i, '').replace(/\/$/, '')
     : targetUrl.replace(/^https?:\/\//i, '').replace(/\/$/, '');
 
+  const savedSummaryLabel =
+    offlineZip.savedArchives.length > 0
+      ? offlineZip.savedArchives.length === 1
+        ? `${offlineZip.savedArchives[0].fileName} (${formatCompactBytes(offlineZip.savedArchives[0].fileSize)})`
+        : `${offlineZip.savedArchives.length} arquivos salvos (${formatCompactBytes(
+            offlineZip.savedArchives.reduce((sum, a) => sum + a.fileSize, 0)
+          )})`
+      : 'Backup offline salvo';
+
   return (
     <div className="min-h-screen flex flex-col bg-[#090B10] text-slate-100">
+      <input
+        ref={quickOfflineInputRef}
+        type="file"
+        multiple
+        onChange={(e) => void handleQuickMountFromInput(e.target.files)}
+        className="hidden"
+      />
+
       <TopBar
         activeTab={activeTab}
         onTabChange={setActiveTab}
@@ -303,19 +444,79 @@ export default function App() {
           <div className="space-y-5">
             {offlineZip.active && (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-500/25 bg-emerald-950/20 px-4 py-2.5 text-xs text-emerald-200">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 min-w-0">
                   <WifiOff className="h-3.5 w-3.5 text-emerald-400 shrink-0" aria-hidden="true" />
-                  <span>
+                  <span className="truncate">
                     Modo offline ativo · {offlineZip.archives.length}{' '}
                     {offlineZip.archives.length === 1 ? 'arquivo carregado' : 'arquivos carregados'}
                   </span>
                 </div>
+                <div className="flex flex-wrap items-center gap-3 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleSwitchToGameSite}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-white/15 bg-[#090B10]/80 px-2.5 py-1 font-medium text-slate-200 hover:border-orange-400/50 hover:text-orange-200 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <Globe className="h-3 w-3" aria-hidden="true" />
+                    <span>Voltar ao site do jogo</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('backup')}
+                    className="font-medium text-emerald-300 hover:text-emerald-100 underline-offset-4 hover:underline cursor-pointer whitespace-nowrap"
+                  >
+                    Gerenciar backup
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {offlineZip.needsReconnect && !offlineZip.restoring && (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-950/20 px-4 py-2.5 text-xs text-amber-100">
+                <div className="flex items-center gap-2 min-w-0">
+                  <HardDrive className="h-3.5 w-3.5 text-amber-400 shrink-0" aria-hidden="true" />
+                  <span className="truncate">
+                    Preferência salva em modo offline ·{' '}
+                    <span className="font-mono text-amber-200">{savedSummaryLabel}</span>
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={quickMounting}
+                    onClick={() => void handleActivateOfflineSource()}
+                    className="rounded-md bg-orange-600 px-3 py-1.5 font-semibold text-white hover:bg-orange-500 disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {quickMounting
+                      ? 'Conectando...'
+                      : offlineZip.canOneClickReauthorize
+                      ? 'Reativar offline (1 clique)'
+                      : 'Reconectar .ZIP offline'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSwitchToGameSite}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-white/15 bg-[#090B10]/80 px-3 py-1.5 font-medium text-slate-200 hover:border-white/30 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <Globe className="h-3 w-3" aria-hidden="true" />
+                    <span>Usar site do jogo</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {quickMountError && (
+              <div
+                role="alert"
+                className="flex items-center justify-between gap-3 rounded-lg border border-red-500/30 bg-red-950/25 px-4 py-2.5 text-xs text-red-200"
+              >
+                <span>{quickMountError}</span>
                 <button
                   type="button"
-                  onClick={() => setActiveTab('backup')}
-                  className="font-medium text-emerald-300 hover:text-emerald-100 underline-offset-4 hover:underline cursor-pointer whitespace-nowrap"
+                  onClick={() => setQuickMountError(null)}
+                  className="text-red-300 hover:text-white cursor-pointer"
                 >
-                  Gerenciar backup
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
                 </button>
               </div>
             )}
@@ -365,6 +566,8 @@ export default function App() {
                   <form
                     onSubmit={(e) => {
                       e.preventDefault();
+                      clearMediaProfileCache();
+                      setPreferredSourceMode('online');
                       void runExtraction(targetUrl);
                     }}
                     className="space-y-2"
@@ -481,19 +684,59 @@ export default function App() {
               sourceSettingsOpen={showSourcePanel}
               onOpenBatchZip={(list) => setBatchZipList(list)}
               headerExtra={
-                <button
-                  type="button"
-                  onClick={() => setShowSourcePanel((v) => !v)}
-                  aria-expanded={showSourcePanel}
-                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    showSourcePanel
-                      ? 'border-orange-500/60 bg-orange-500/10 text-orange-300'
-                      : 'border-white/10 bg-[#11141C] text-slate-300 hover:border-white/25 hover:text-slate-100'
-                  }`}
-                >
-                  <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Fonte</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <div
+                    role="group"
+                    aria-label="Alternar fonte de dados"
+                    className="inline-flex items-center rounded-lg border border-white/10 bg-[#090B10] p-0.5 text-xs"
+                  >
+                    <button
+                      type="button"
+                      onClick={handleSwitchToGameSite}
+                      className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                        !offlineZip.active
+                          ? 'bg-orange-600 text-white'
+                          : 'text-slate-400 hover:text-slate-100'
+                      }`}
+                    >
+                      <Globe className="h-3 w-3" aria-hidden="true" />
+                      <span>Site do jogo</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={quickMounting}
+                      onClick={() => void handleActivateOfflineSource()}
+                      className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                        offlineZip.active
+                          ? 'bg-emerald-600 text-white'
+                          : 'text-slate-400 hover:text-slate-100'
+                      }`}
+                    >
+                      <HardDrive className="h-3 w-3" aria-hidden="true" />
+                      <span>
+                        {quickMounting
+                          ? 'Abrindo...'
+                          : offlineZip.hasMountedArchives
+                          ? 'Arquivo offline'
+                          : 'Offline'}
+                      </span>
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowSourcePanel((v) => !v)}
+                    aria-expanded={showSourcePanel}
+                    className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      showSourcePanel
+                        ? 'border-orange-500/60 bg-orange-500/10 text-orange-300'
+                        : 'border-white/10 bg-[#11141C] text-slate-300 hover:border-white/25 hover:text-slate-100'
+                    }`}
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Fonte</span>
+                  </button>
+                </div>
               }
             />
           </div>

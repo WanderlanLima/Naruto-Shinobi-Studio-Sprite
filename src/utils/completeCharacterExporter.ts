@@ -1,3 +1,4 @@
+import { GIFEncoder } from 'gifenc';
 import type {
   AtlasPage,
   CompositeSpineLayer,
@@ -12,9 +13,8 @@ import {
   canvasToPngBlob,
   computeCompositeAnimationWorldBounds,
   computeNativeExportCellSize,
+  computeStripLayout,
   downloadBlob,
-  exportAnimationGif,
-  exportAnimationStripPngBlob,
   extractRegionToPngBlob,
   extractSpineAudioRefs,
   extractSpineEffectRefs,
@@ -25,8 +25,10 @@ import {
   parseAtlas,
   renderSpineFrameToCanvas,
   resolveEffectiveAnimationName,
+  writeQuantizedGifFrame,
 } from './atlasParser';
 import { CHASE_SYSTEM_LEGEND } from './combatMechanicsParser';
+import { exportWorkerPool, type QuantizedGifFrameResult } from './exportWorkerPool';
 import {
   fetchNinjaBundle,
   resolveAssetFetchUrl,
@@ -49,6 +51,7 @@ export interface CompleteExportOptions {
   mediaProfile?: NinjaMediaProfile | null;
   gifBg: 'transparent' | 'dark' | 'light' | 'chroma';
   fps?: number;
+  maxResolution?: number;
   folderPrefix?: string;
   signal?: AbortSignal;
   effectCache?: Map<string, Promise<ParsedEffectAsset | null>>;
@@ -794,20 +797,29 @@ export async function collectCharacterMediaFiles(params: {
       }
     }
 
-    // Download MP4 videos
-    for (const [key, url] of videoTargets.entries()) {
+    // Download MP4 videos in parallel batches of 3
+    const videoList = Array.from(videoTargets.entries());
+    for (let i = 0; i < videoList.length; i += 3) {
       throwIfAborted(params.signal);
-      const buf = await fetchBinaryAssetSafe(url, params.signal);
-      if (buf) {
-        push(`videos/${sanitizePathSegment(key)}.mp4`, buf);
+      const batch = videoList.slice(i, i + 3);
+      const results = await Promise.all(
+        batch.map(async ([key, url]) => ({
+          key,
+          buf: await fetchBinaryAssetSafe(url, params.signal),
+        }))
+      );
+      for (const item of results) {
+        if (item.buf) {
+          push(`videos/${sanitizePathSegment(item.key)}.mp4`, item.buf);
+        }
       }
     }
 
-    // Download animation SFX MP3s (up to 64 unique clips, batched 4 at a time)
+    // Download animation SFX MP3s (up to 64 unique clips, batched 8 at a time)
     const soundList = Array.from(soundTargets.entries()).slice(0, 64);
-    for (let i = 0; i < soundList.length; i += 4) {
+    for (let i = 0; i < soundList.length; i += 8) {
       throwIfAborted(params.signal);
-      const batch = soundList.slice(i, i + 4);
+      const batch = soundList.slice(i, i + 8);
       const results = await Promise.all(
         batch.map(async ([key, url]) => ({
           key,
@@ -821,11 +833,11 @@ export async function collectCharacterMediaFiles(params: {
       }
     }
 
-    // Download character voice clips (MP3)
+    // Download character voice clips (MP3, batched 8 at a time)
     const voices = mediaProfile?.voices || [];
-    for (let i = 0; i < voices.length; i += 4) {
+    for (let i = 0; i < voices.length; i += 8) {
       throwIfAborted(params.signal);
-      const batch = voices.slice(i, i + 4);
+      const batch = voices.slice(i, i + 8);
       const results = await Promise.all(
         batch.map(async (v) => ({
           v,
@@ -887,13 +899,17 @@ export async function collectCharacterCompleteFiles(
       pushFile(`${baseData.ninja.id}.json`, JSON.stringify(baseData.skeleton, null, 2));
     }
 
-    for (const [pageName, proxyUrl] of Object.entries(baseData.pageUrls)) {
-      throwIfAborted(options.signal);
-      const sheetData = await fetchRawPageOrFallbackBlob(
-        proxyUrl,
-        baseData.pageImages[pageName],
-        options.signal
-      );
+    const baseSheetResults = await Promise.all(
+      Object.entries(baseData.pageUrls).map(async ([pageName, proxyUrl]) => ({
+        pageName,
+        sheetData: await fetchRawPageOrFallbackBlob(
+          proxyUrl,
+          baseData.pageImages[pageName],
+          options.signal
+        ),
+      }))
+    );
+    for (const { pageName, sheetData } of baseSheetResults) {
       if (sheetData) {
         pushFile(pageName, sheetData);
       }
@@ -923,30 +939,40 @@ export async function collectCharacterCompleteFiles(
       options.includeAnimPngsAndSheets ||
       options.includeAnimGifs);
 
-  // 2. Fetch linked particle bundles (noe_*)
+  // 2. Fetch linked particle bundles (noe_*) in parallel batches of 6
   const effectBundles = new Map<string, ParsedEffectAsset | null>();
   const missingEffects: string[] = [];
 
   if (needsEffects && plan.uniqueSpineIds.length > 0) {
-    for (let i = 0; i < plan.uniqueSpineIds.length; i++) {
+    let completedEffects = 0;
+    const totalEffects = plan.uniqueSpineIds.length;
+    const EFFECT_BATCH = 6;
+    for (let i = 0; i < totalEffects; i += EFFECT_BATCH) {
       throwIfAborted(options.signal);
-      const spineId = plan.uniqueSpineIds[i];
-      const pct = 10 + Math.round(((i + 1) / plan.uniqueSpineIds.length) * 18);
-      options.onProgress?.({
-        phase: 'effects',
-        message: `Baixando partículas (${i + 1}/${plan.uniqueSpineIds.length}): ${spineId}...`,
-        percent: pct,
-      });
-
-      const parsed = await fetchParsedEffectAsset(
-        baseData.ninja.atlasUrl,
-        spineId,
-        options.signal,
-        options.effectCache
+      const batch = plan.uniqueSpineIds.slice(i, i + EFFECT_BATCH);
+      const results = await Promise.all(
+        batch.map(async (spineId) => {
+          const parsed = await fetchParsedEffectAsset(
+            baseData.ninja.atlasUrl,
+            spineId,
+            options.signal,
+            options.effectCache
+          );
+          completedEffects++;
+          const pct = 10 + Math.round((completedEffects / totalEffects) * 18);
+          options.onProgress?.({
+            phase: 'effects',
+            message: `Carregando partículas (${completedEffects}/${totalEffects}): ${spineId}...`,
+            percent: pct,
+          });
+          return { spineId, parsed };
+        })
       );
-      effectBundles.set(spineId, parsed);
-      if (!parsed) {
-        missingEffects.push(spineId);
+      for (const { spineId, parsed } of results) {
+        effectBundles.set(spineId, parsed);
+        if (!parsed) {
+          missingEffects.push(spineId);
+        }
       }
     }
   }
@@ -1018,13 +1044,17 @@ export async function collectCharacterCompleteFiles(
       pushFile(`${effDir}/${spineId}.atlas`, eff.atlasText);
       pushFile(`${effDir}/${spineId}.json`, JSON.stringify(eff.skeleton, null, 2));
 
-      for (const [pageName, proxyUrl] of Object.entries(eff.pageUrls)) {
-        throwIfAborted(options.signal);
-        const sheetData = await fetchRawPageOrFallbackBlob(
-          proxyUrl,
-          eff.pageImages[pageName],
-          options.signal
-        );
+      const effSheetResults = await Promise.all(
+        Object.entries(eff.pageUrls).map(async ([pageName, proxyUrl]) => ({
+          pageName,
+          sheetData: await fetchRawPageOrFallbackBlob(
+            proxyUrl,
+            eff.pageImages[pageName],
+            options.signal
+          ),
+        }))
+      );
+      for (const { pageName, sheetData } of effSheetResults) {
         if (sheetData) {
           pushFile(`${effDir}/${pageName}`, sheetData);
         }
@@ -1049,15 +1079,22 @@ export async function collectCharacterCompleteFiles(
     }
   }
 
-  // 4. Render all animations composited with their particles (+ passive aura on idle)
+  // 4. Single-pass animation rendering + multi-core Web Worker PNG/GIF encoding
   if (
     baseData.skeleton &&
     plan.animNames.length > 0 &&
     (options.includeAnimPngsAndSheets || options.includeAnimGifs)
   ) {
     const fps = options.fps ?? 24;
+    const maxRes = options.maxResolution ?? 2048;
+    const maxStripRes = Math.min(1536, maxRes);
+    const maxGifRes = Math.min(1280, maxRes);
     const bgColor = getGifBgColor(options.gifBg);
-    const frameCanvas = document.createElement('canvas');
+    const maxInFlight = Math.max(2, exportWorkerPool.concurrency * 2);
+
+    const renderCanvas = document.createElement('canvas');
+    const stripCanvas = document.createElement('canvas');
+    const gifCanvas = document.createElement('canvas');
 
     const passiveAuraLayers: CompositeSpineLayer[] = [];
     if (wantPassiveAura && passiveAuraAsset && options.mediaProfile?.passiveAura) {
@@ -1133,20 +1170,192 @@ export async function collectCharacterCompleteFiles(
         percent: basePct,
       });
 
-      if (options.includeAnimPngsAndSheets) {
-        const frameCount =
-          totalDuration <= 0 ? 1 : Math.max(1, Math.min(240, Math.round(totalDuration * fps)));
-        const { width: cellW, height: cellH } = computeNativeExportCellSize(bounds, 2048);
-        frameCanvas.width = cellW;
-        frameCanvas.height = cellH;
-        const ctx = frameCanvas.getContext('2d');
+      const pngFrameCount =
+        totalDuration <= 0 ? 1 : Math.max(1, Math.min(240, Math.round(totalDuration * fps)));
+      const stripGifFrameCount =
+        totalDuration <= 0 ? 1 : Math.max(1, Math.min(180, Math.round(totalDuration * fps)));
+      const unifiedSinglePass =
+        !options.includeAnimPngsAndSheets || pngFrameCount === stripGifFrameCount;
 
-        if (ctx) {
-          for (let f = 0; f < frameCount; f++) {
+      const gifDelayMs =
+        totalDuration <= 0 ? 100 : Math.max(20, Math.round((totalDuration / stripGifFrameCount) * 1000));
+      const { width: gifW, height: gifH } = computeNativeExportCellSize(bounds, maxGifRes);
+
+      if (unifiedSinglePass) {
+        // Unified single-pass: render every frame ONCE and feed PNG + Spritesheet + GIF in parallel!
+        const totalFrames = options.includeAnimPngsAndSheets ? pngFrameCount : stripGifFrameCount;
+        const { width: renderW, height: renderH } = computeNativeExportCellSize(
+          bounds,
+          options.includeAnimPngsAndSheets ? maxRes : maxGifRes
+        );
+        renderCanvas.width = renderW;
+        renderCanvas.height = renderH;
+        const renderCtx = renderCanvas.getContext('2d');
+
+        let stripCtx: CanvasRenderingContext2D | null = null;
+        let stripCols = 1;
+        let stripCellW = renderW;
+        let stripCellH = renderH;
+        if (options.includeAnimPngsAndSheets) {
+          const layout = computeStripLayout(bounds, stripGifFrameCount, maxStripRes);
+          stripCols = layout.cols;
+          stripCellW = layout.cellW;
+          stripCellH = layout.cellH;
+          stripCanvas.width = layout.cols * layout.cellW;
+          stripCanvas.height = layout.rows * layout.cellH;
+          stripCtx = stripCanvas.getContext('2d');
+          if (stripCtx) {
+            stripCtx.clearRect(0, 0, stripCanvas.width, stripCanvas.height);
+            stripCtx.imageSmoothingEnabled = true;
+            stripCtx.imageSmoothingQuality = 'high';
+          }
+        }
+
+        let gifCtx: CanvasRenderingContext2D | null = null;
+        let gifEncoder: ReturnType<typeof GIFEncoder> | null = null;
+        if (options.includeAnimGifs) {
+          gifCanvas.width = gifW;
+          gifCanvas.height = gifH;
+          gifCtx = gifCanvas.getContext('2d', { willReadFrequently: true });
+          if (gifCtx) {
+            gifCtx.imageSmoothingEnabled = true;
+            gifCtx.imageSmoothingQuality = 'high';
+          }
+          gifEncoder = GIFEncoder();
+        }
+
+        const pendingPngs: Array<{ path: string; promise: Promise<Blob | null> }> = [];
+        const pendingGifs: Array<Promise<QuantizedGifFrameResult>> = [];
+
+        const flushOldestPng = async () => {
+          const next = pendingPngs.shift();
+          if (!next) return;
+          const blob = await next.promise;
+          if (blob) pushFile(next.path, blob);
+        };
+
+        const flushOldestGif = async () => {
+          const next = pendingGifs.shift();
+          if (!next || !gifEncoder) return;
+          const quantized = await next;
+          writeQuantizedGifFrame(gifEncoder, quantized, gifW, gifH, gifDelayMs);
+        };
+
+        if (renderCtx) {
+          for (let f = 0; f < totalFrames; f++) {
             throwIfAborted(options.signal);
-            const t = frameCount === 1 ? 0 : (f / frameCount) * totalDuration;
+            const t = totalFrames === 1 ? 0 : (f / totalFrames) * totalDuration;
             renderSpineFrameToCanvas(
-              ctx,
+              renderCtx,
+              renderW,
+              renderH,
+              baseData.skeleton,
+              effectiveAnim,
+              t,
+              baseData.regionCanvasMap,
+              1,
+              0,
+              0,
+              bounds,
+              layers
+            );
+
+            if (options.includeAnimPngsAndSheets) {
+              if (stripCtx) {
+                const col = f % stripCols;
+                const row = Math.floor(f / stripCols);
+                stripCtx.drawImage(
+                  renderCanvas,
+                  0,
+                  0,
+                  renderW,
+                  renderH,
+                  col * stripCellW,
+                  row * stripCellH,
+                  stripCellW,
+                  stripCellH
+                );
+              }
+              pendingPngs.push({
+                path: `${animDir}/frames/${safeAnim}_${String(f).padStart(3, '0')}.png`,
+                promise: exportWorkerPool.encodeCanvasToPng(renderCanvas),
+              });
+              if (pendingPngs.length >= maxInFlight) {
+                await flushOldestPng();
+              }
+            }
+
+            if (options.includeAnimGifs && gifCtx && gifEncoder) {
+              if (bgColor) {
+                gifCtx.fillStyle = bgColor;
+                gifCtx.fillRect(0, 0, gifW, gifH);
+              } else {
+                gifCtx.clearRect(0, 0, gifW, gifH);
+              }
+              gifCtx.drawImage(renderCanvas, 0, 0, renderW, renderH, 0, 0, gifW, gifH);
+              const imgData = gifCtx.getImageData(0, 0, gifW, gifH);
+              pendingGifs.push(
+                exportWorkerPool.quantizeGifFrame(
+                  imgData.data.buffer as ArrayBuffer,
+                  gifW,
+                  gifH,
+                  Boolean(bgColor)
+                )
+              );
+              if (pendingGifs.length >= maxInFlight) {
+                await flushOldestGif();
+              }
+            }
+
+            if (f % 6 === 5) {
+              await new Promise((r) => setTimeout(r, 0));
+            }
+          }
+        }
+
+        while (pendingPngs.length > 0) {
+          throwIfAborted(options.signal);
+          await flushOldestPng();
+        }
+
+        if (options.includeAnimPngsAndSheets && stripCtx) {
+          const stripBlob = await exportWorkerPool.encodeCanvasToPng(stripCanvas);
+          if (stripBlob) {
+            pushFile(`${animDir}/${safeAnim}_spritesheet.png`, stripBlob);
+          }
+        }
+
+        while (pendingGifs.length > 0) {
+          throwIfAborted(options.signal);
+          await flushOldestGif();
+        }
+
+        if (gifEncoder) {
+          gifEncoder.finish();
+          pushFile(`${animDir}/${safeAnim}.gif`, new Blob([gifEncoder.bytes()], { type: 'image/gif' }));
+        }
+      } else {
+        // Rare >7.5s animation where PNG frames cap at 240 while Spritesheet & GIF cap at 180:
+        // Pass A: PNG frames via parallel worker pool; Pass B: Combined Spritesheet + GIF single pass!
+        const { width: cellW, height: cellH } = computeNativeExportCellSize(bounds, maxRes);
+        renderCanvas.width = cellW;
+        renderCanvas.height = cellH;
+        const renderCtx = renderCanvas.getContext('2d');
+
+        if (renderCtx) {
+          const pendingPngs: Array<{ path: string; promise: Promise<Blob | null> }> = [];
+          const flushOldestPng = async () => {
+            const next = pendingPngs.shift();
+            if (!next) return;
+            const blob = await next.promise;
+            if (blob) pushFile(next.path, blob);
+          };
+
+          for (let f = 0; f < pngFrameCount; f++) {
+            throwIfAborted(options.signal);
+            const t = pngFrameCount === 1 ? 0 : (f / pngFrameCount) * totalDuration;
+            renderSpineFrameToCanvas(
+              renderCtx,
               cellW,
               cellH,
               baseData.skeleton,
@@ -1159,12 +1368,113 @@ export async function collectCharacterCompleteFiles(
               bounds,
               layers
             );
-            const pngBlob = await canvasToPngBlob(frameCanvas);
-            if (pngBlob) {
-              pushFile(
-                `${animDir}/frames/${safeAnim}_${String(f).padStart(3, '0')}.png`,
-                pngBlob
+            pendingPngs.push({
+              path: `${animDir}/frames/${safeAnim}_${String(f).padStart(3, '0')}.png`,
+              promise: exportWorkerPool.encodeCanvasToPng(renderCanvas),
+            });
+            if (pendingPngs.length >= maxInFlight) {
+              await flushOldestPng();
+            }
+            if (f % 6 === 5) {
+              await new Promise((r) => setTimeout(r, 0));
+            }
+          }
+          while (pendingPngs.length > 0) {
+            throwIfAborted(options.signal);
+            await flushOldestPng();
+          }
+        }
+
+        const layout = computeStripLayout(bounds, stripGifFrameCount, maxStripRes);
+        stripCanvas.width = layout.cols * layout.cellW;
+        stripCanvas.height = layout.rows * layout.cellH;
+        const stripCtx = stripCanvas.getContext('2d');
+        if (stripCtx) {
+          stripCtx.clearRect(0, 0, stripCanvas.width, stripCanvas.height);
+          stripCtx.imageSmoothingEnabled = true;
+          stripCtx.imageSmoothingQuality = 'high';
+        }
+
+        const stepW = Math.max(layout.cellW, options.includeAnimGifs ? gifW : 0);
+        const stepH = Math.max(layout.cellH, options.includeAnimGifs ? gifH : 0);
+        renderCanvas.width = stepW;
+        renderCanvas.height = stepH;
+        const combinedCtx = renderCanvas.getContext('2d');
+
+        let gifCtx: CanvasRenderingContext2D | null = null;
+        let gifEncoder: ReturnType<typeof GIFEncoder> | null = null;
+        if (options.includeAnimGifs) {
+          gifCanvas.width = gifW;
+          gifCanvas.height = gifH;
+          gifCtx = gifCanvas.getContext('2d', { willReadFrequently: true });
+          if (gifCtx) {
+            gifCtx.imageSmoothingEnabled = true;
+            gifCtx.imageSmoothingQuality = 'high';
+          }
+          gifEncoder = GIFEncoder();
+        }
+
+        const pendingGifs: Array<Promise<QuantizedGifFrameResult>> = [];
+        const flushOldestGif = async () => {
+          const next = pendingGifs.shift();
+          if (!next || !gifEncoder) return;
+          const quantized = await next;
+          writeQuantizedGifFrame(gifEncoder, quantized, gifW, gifH, gifDelayMs);
+        };
+
+        if (combinedCtx) {
+          for (let f = 0; f < stripGifFrameCount; f++) {
+            throwIfAborted(options.signal);
+            const t = stripGifFrameCount === 1 ? 0 : (f / stripGifFrameCount) * totalDuration;
+            renderSpineFrameToCanvas(
+              combinedCtx,
+              stepW,
+              stepH,
+              baseData.skeleton,
+              effectiveAnim,
+              t,
+              baseData.regionCanvasMap,
+              1,
+              0,
+              0,
+              bounds,
+              layers
+            );
+            if (stripCtx) {
+              const col = f % layout.cols;
+              const row = Math.floor(f / layout.cols);
+              stripCtx.drawImage(
+                renderCanvas,
+                0,
+                0,
+                stepW,
+                stepH,
+                col * layout.cellW,
+                row * layout.cellH,
+                layout.cellW,
+                layout.cellH
               );
+            }
+            if (options.includeAnimGifs && gifCtx && gifEncoder) {
+              if (bgColor) {
+                gifCtx.fillStyle = bgColor;
+                gifCtx.fillRect(0, 0, gifW, gifH);
+              } else {
+                gifCtx.clearRect(0, 0, gifW, gifH);
+              }
+              gifCtx.drawImage(renderCanvas, 0, 0, stepW, stepH, 0, 0, gifW, gifH);
+              const imgData = gifCtx.getImageData(0, 0, gifW, gifH);
+              pendingGifs.push(
+                exportWorkerPool.quantizeGifFrame(
+                  imgData.data.buffer as ArrayBuffer,
+                  gifW,
+                  gifH,
+                  Boolean(bgColor)
+                )
+              );
+              if (pendingGifs.length >= maxInFlight) {
+                await flushOldestGif();
+              }
             }
             if (f % 6 === 5) {
               await new Promise((r) => setTimeout(r, 0));
@@ -1172,33 +1482,22 @@ export async function collectCharacterCompleteFiles(
           }
         }
 
-        const strip = await exportAnimationStripPngBlob(
-          baseData.skeleton,
-          effectiveAnim,
-          baseData.regionCanvasMap,
-          fps,
-          layers,
-          bounds
-        );
-        if (strip.blob) {
-          pushFile(`${animDir}/${safeAnim}_spritesheet.png`, strip.blob);
-        }
-      }
-
-      if (options.includeAnimGifs) {
-        throwIfAborted(options.signal);
-        const gifRes = await exportAnimationGif(
-          baseData.skeleton,
-          effectiveAnim,
-          baseData.regionCanvasMap,
-          {
-            fps,
-            bounds,
-            backgroundColor: bgColor,
-            compositeLayers: layers,
+        if (stripCtx) {
+          const stripBlob = await exportWorkerPool.encodeCanvasToPng(stripCanvas);
+          if (stripBlob) {
+            pushFile(`${animDir}/${safeAnim}_spritesheet.png`, stripBlob);
           }
-        );
-        pushFile(`${animDir}/${safeAnim}.gif`, gifRes.blob);
+        }
+
+        while (pendingGifs.length > 0) {
+          throwIfAborted(options.signal);
+          await flushOldestGif();
+        }
+
+        if (gifEncoder) {
+          gifEncoder.finish();
+          pushFile(`${animDir}/${safeAnim}.gif`, new Blob([gifEncoder.bytes()], { type: 'image/gif' }));
+        }
       }
 
       await new Promise((r) => setTimeout(r, 0));
@@ -1257,6 +1556,9 @@ export async function exportCompleteCharacterZip(
       crc32: computeCrc32(bytes),
       blob,
     });
+    if (i % 24 === 23) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
   }
 
   const zipBlob = await assembleStreamingZipBlob(

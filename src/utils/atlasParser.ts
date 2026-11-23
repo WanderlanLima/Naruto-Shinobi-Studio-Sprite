@@ -1,4 +1,4 @@
-import { GIFEncoder, applyPalette, quantize } from 'gifenc';
+import { GIFEncoder } from 'gifenc';
 import type {
   AtlasPage,
   AtlasRegion,
@@ -16,6 +16,7 @@ import type {
   SpineVideoEventRef,
   SpriteRegionSource,
 } from '../types/sprite';
+import { exportWorkerPool, type QuantizedGifFrameResult } from './exportWorkerPool';
 import { createZipWorkerSession } from './zipWorkerClient';
 import {
   assembleStreamingZipBlob,
@@ -1763,13 +1764,14 @@ export function computeNativeExportCellSize(
   return { width: w, height: h };
 }
 
-function computeStripLayout(
+export function computeStripLayout(
   bounds: AnimationWorldBounds,
-  frameCount: number
+  frameCount: number,
+  maxCellSide = 1536
 ): { cols: number; rows: number; cellW: number; cellH: number } {
   const cols = Math.max(1, Math.min(frameCount, Math.ceil(Math.sqrt(frameCount))));
   const rows = Math.max(1, Math.ceil(frameCount / cols));
-  const native = computeNativeExportCellSize(bounds, 1536);
+  const native = computeNativeExportCellSize(bounds, maxCellSide);
   let cellW = native.width;
   let cellH = native.height;
 
@@ -1922,12 +1924,42 @@ export async function exportAnimationStripPngBlob(
   };
 }
 
+export function writeQuantizedGifFrame(
+  gif: ReturnType<typeof GIFEncoder>,
+  quantized: QuantizedGifFrameResult,
+  width: number,
+  height: number,
+  delayMs: number
+): void {
+  if (quantized.transparent) {
+    gif.writeFrame(quantized.indexed, width, height, {
+      palette: quantized.palette,
+      delay: delayMs,
+      repeat: 0,
+      dispose: 2,
+      colorDepth: quantized.depth,
+      transparent: true,
+      transparentIndex: 0,
+    });
+  } else {
+    gif.writeFrame(quantized.indexed, width, height, {
+      palette: quantized.palette,
+      delay: delayMs,
+      repeat: 0,
+      dispose: 0,
+      colorDepth: quantized.depth,
+      transparent: false,
+    });
+  }
+}
+
 export async function exportAnimationGif(
   skeleton: SpineSkeleton,
   animName: string,
   regionCanvasMap: Map<string, SpriteRegionSource>,
   options?: {
     fps?: number;
+    maxResolution?: number;
     bounds?: AnimationWorldBounds | null;
     backgroundColor?: string | null;
     compositeLayers?: CompositeSpineLayer[];
@@ -1935,6 +1967,7 @@ export async function exportAnimationGif(
   }
 ): Promise<{ blob: Blob; frameCount: number; width: number; height: number }> {
   const fps = options?.fps ?? 24;
+  const maxGifSide = Math.min(1280, options?.maxResolution ?? 1280);
   const compositeLayers = options?.compositeLayers || [];
   const baseDuration = getAnimationDuration(skeleton, animName);
   const duration = getCompositeAnimationDuration(baseDuration, compositeLayers);
@@ -1951,7 +1984,7 @@ export async function exportAnimationGif(
       compositeLayers,
       24
     );
-  const { width: cellW, height: cellH } = computeNativeExportCellSize(bounds, 1280);
+  const { width: cellW, height: cellH } = computeNativeExportCellSize(bounds, maxGifSide);
 
   const frameCanvas = document.createElement('canvas');
   frameCanvas.width = cellW;
@@ -1962,6 +1995,19 @@ export async function exportAnimationGif(
   const gif = GIFEncoder();
 
   if (ctx) {
+    const maxInFlight = Math.max(2, exportWorkerPool.concurrency * 2);
+    const pending: Array<Promise<QuantizedGifFrameResult>> = [];
+    let written = 0;
+
+    const flushOldest = async () => {
+      const next = pending.shift();
+      if (!next) return;
+      const quantized = await next;
+      writeQuantizedGifFrame(gif, quantized, cellW, cellH, delayMs);
+      written++;
+      options?.onProgress?.(Math.round((written / frameCount) * 100));
+    };
+
     for (let i = 0; i < frameCount; i++) {
       const t = frameCount === 1 ? 0 : (i / frameCount) * duration;
       renderSpineFrameToCanvas(
@@ -1988,84 +2034,24 @@ export async function exportAnimationGif(
       }
 
       const imageData = ctx.getImageData(0, 0, cellW, cellH);
-      const rgba = imageData.data;
+      pending.push(
+        exportWorkerPool.quantizeGifFrame(
+          imageData.data.buffer as ArrayBuffer,
+          cellW,
+          cellH,
+          Boolean(bgColor)
+        )
+      );
 
-      if (bgColor) {
-        const palette = quantize(rgba, 256, { format: 'rgb565' });
-        while (palette.length < 4) palette.push([0, 0, 0]);
-        const indexed = applyPalette(rgba, palette, 'rgb565');
-        const depth = Math.max(2, Math.ceil(Math.log2(palette.length)));
-        gif.writeFrame(indexed, cellW, cellH, {
-          palette,
-          delay: delayMs,
-          repeat: 0,
-          dispose: 0,
-          colorDepth: depth,
-          transparent: false,
-        });
-      } else {
-        // Extract only opaque pixels so transparent index 0 never collides with black outlines
-        const totalPixels = cellW * cellH;
-        const opaqueMask = new Uint8Array(totalPixels);
-        let opaqueCount = 0;
-        for (let px = 0, p = 0; px < totalPixels; px++, p += 4) {
-          if (rgba[p + 3] >= 32) {
-            opaqueMask[px] = 1;
-            opaqueCount++;
-          }
-        }
-
-        const opaqueRgba = new Uint8Array(Math.max(4, opaqueCount * 4));
-        if (opaqueCount === 0) {
-          opaqueRgba[0] = 0;
-          opaqueRgba[1] = 0;
-          opaqueRgba[2] = 0;
-          opaqueRgba[3] = 255;
-        } else {
-          let wIdx = 0;
-          for (let px = 0, p = 0; px < totalPixels; px++, p += 4) {
-            if (opaqueMask[px]) {
-              opaqueRgba[wIdx++] = rgba[p];
-              opaqueRgba[wIdx++] = rgba[p + 1];
-              opaqueRgba[wIdx++] = rgba[p + 2];
-              opaqueRgba[wIdx++] = 255;
-            }
-          }
-        }
-
-        const opaquePalette = quantize(opaqueRgba, 255, { format: 'rgb565' });
-        const finalPalette: Array<[number, number, number]> = [
-          [0, 0, 0], // Index 0 is strictly reserved as the transparent background index
-          ...opaquePalette.map(
-            (c) => [c[0], c[1], c[2]] as [number, number, number]
-          ),
-        ];
-        while (finalPalette.length < 4) finalPalette.push([0, 0, 0]);
-
-        const finalIndexed = new Uint8Array(totalPixels);
-        if (opaqueCount > 0) {
-          const opaqueIndexed = applyPalette(rgba, opaquePalette, 'rgb565');
-          for (let px = 0; px < totalPixels; px++) {
-            finalIndexed[px] = opaqueMask[px] ? opaqueIndexed[px] + 1 : 0;
-          }
-        }
-
-        const depth = Math.max(2, Math.ceil(Math.log2(finalPalette.length)));
-        gif.writeFrame(finalIndexed, cellW, cellH, {
-          palette: finalPalette,
-          delay: delayMs,
-          repeat: 0,
-          dispose: 2,
-          colorDepth: depth,
-          transparent: true,
-          transparentIndex: 0,
-        });
-      }
-
-      options?.onProgress?.(Math.round(((i + 1) / frameCount) * 100));
-      if (i % 3 === 2) {
+      if (pending.length >= maxInFlight) {
+        await flushOldest();
+      } else if (i % 6 === 5) {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
+    }
+
+    while (pending.length > 0) {
+      await flushOldest();
     }
   }
 

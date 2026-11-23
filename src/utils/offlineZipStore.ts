@@ -24,12 +24,28 @@ export interface OfflineCoverageStats {
   nameArts: number;
 }
 
+export type DataSourceMode = 'online' | 'offline';
+
+export interface SavedOfflineArchiveMeta {
+  fileName: string;
+  fileSize: number;
+  entryCount: number;
+  label?: string;
+  savedAt: number;
+}
+
 export interface OfflineZipSnapshot {
+  sourceMode: DataSourceMode;
   active: boolean;
+  hasMountedArchives: boolean;
   strictOffline: boolean;
   generation: number;
   origin: string;
   archives: MountedZipInfo[];
+  savedArchives: SavedOfflineArchiveMeta[];
+  canOneClickReauthorize: boolean;
+  needsReconnect: boolean;
+  restoring: boolean;
   hasCatalog: boolean;
   catalog: ExtractResponse | null;
   stats: OfflineCoverageStats;
@@ -336,7 +352,140 @@ async function readEntryBlobAsync(entry: ZipEntryRef): Promise<Blob> {
   throw new Error(`Método de compressão ZIP não suportado (${entry.compressionMethod}) em "${entry.path}".`);
 }
 
+// ---------- Persistence (localStorage + IndexedDB handles/blobs) ----------
+
+const SOURCE_PREFS_STORAGE_KEY = 'shinobi_offline_source_prefs_v1';
+const OFFLINE_IDB_NAME = 'shinobi_offline_source_db_v1';
+const OFFLINE_IDB_STORE = 'persisted_source';
+const OFFLINE_IDB_KEY = 'active';
+const MAX_IDB_INLINE_FILE_BYTES = 250 * 1024 * 1024; // 250 MB safe limit for Android/Desktop blob cloning
+
+interface PersistedSourcePrefs {
+  sourceMode: DataSourceMode;
+  strictOffline: boolean;
+  savedArchives: SavedOfflineArchiveMeta[];
+}
+
+interface HandlePermissionApi {
+  name?: string;
+  getFile: () => Promise<File>;
+  queryPermission?: (desc?: { mode?: 'read' | 'readwrite' }) => Promise<'granted' | 'denied' | 'prompt'>;
+  requestPermission?: (desc?: { mode?: 'read' | 'readwrite' }) => Promise<'granted' | 'denied' | 'prompt'>;
+}
+
+type PersistedIdbRecord =
+  | { kind: 'handles'; handles: HandlePermissionApi[]; savedAt: number }
+  | { kind: 'files'; files: File[]; savedAt: number };
+
+function loadPersistedPrefs(): PersistedSourcePrefs {
+  try {
+    const raw = localStorage.getItem(SOURCE_PREFS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<PersistedSourcePrefs>;
+      const savedArchives = Array.isArray(parsed.savedArchives)
+        ? parsed.savedArchives.filter(
+            (a): a is SavedOfflineArchiveMeta =>
+              Boolean(a) &&
+              typeof a.fileName === 'string' &&
+              typeof a.fileSize === 'number' &&
+              Number.isFinite(a.fileSize)
+          )
+        : [];
+      return {
+        sourceMode: parsed.sourceMode === 'offline' ? 'offline' : 'online',
+        strictOffline: typeof parsed.strictOffline === 'boolean' ? parsed.strictOffline : true,
+        savedArchives,
+      };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return { sourceMode: 'online', strictOffline: true, savedArchives: [] };
+}
+
+function savePersistedPrefs(prefs: PersistedSourcePrefs) {
+  try {
+    localStorage.setItem(SOURCE_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+  } catch {
+    // ignore quota/private-mode errors
+  }
+}
+
+function openOfflineSourceDb(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(OFFLINE_IDB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(OFFLINE_IDB_STORE)) {
+          db.createObjectStore(OFFLINE_IDB_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function readPersistedIdbRecord(): Promise<PersistedIdbRecord | null> {
+  const db = await openOfflineSourceDb();
+  if (!db) return null;
+  return await new Promise((resolve) => {
+    try {
+      const tx = db.transaction(OFFLINE_IDB_STORE, 'readonly');
+      const req = tx.objectStore(OFFLINE_IDB_STORE).get(OFFLINE_IDB_KEY);
+      req.onsuccess = () => {
+        db.close();
+        resolve((req.result as PersistedIdbRecord | undefined) || null);
+      };
+      req.onerror = () => {
+        db.close();
+        resolve(null);
+      };
+    } catch {
+      db.close();
+      resolve(null);
+    }
+  });
+}
+
+async function writePersistedIdbRecord(record: PersistedIdbRecord | null): Promise<boolean> {
+  const db = await openOfflineSourceDb();
+  if (!db) return false;
+  return await new Promise((resolve) => {
+    try {
+      const tx = db.transaction(OFFLINE_IDB_STORE, 'readwrite');
+      const store = tx.objectStore(OFFLINE_IDB_STORE);
+      if (record) {
+        store.put(record, OFFLINE_IDB_KEY);
+      } else {
+        store.delete(OFFLINE_IDB_KEY);
+      }
+      tx.oncomplete = () => {
+        db.close();
+        resolve(true);
+      };
+      tx.onerror = () => {
+        db.close();
+        resolve(false);
+      };
+      tx.onabort = () => {
+        db.close();
+        resolve(false);
+      };
+    } catch {
+      db.close();
+      resolve(false);
+    }
+  });
+}
+
 // ---------- Module Singleton State ----------
+
+const initialPrefs = loadPersistedPrefs();
 
 let exactEntryMap = new Map<string, ZipEntryRef>();
 let lowerEntryMap = new Map<string, ZipEntryRef>();
@@ -345,12 +494,27 @@ let mediaProfilesById = new Map<string, NinjaMediaProfile>();
 let mediaProfilesByLower = new Map<string, NinjaMediaProfile>();
 let offlineSonsMap: Record<string, string> = {};
 let mountedArchives: MountedZipInfo[] = [];
+let mountedRawFiles: File[] = [];
+let mountedHandles: HandlePermissionApi[] = [];
+let persistedHandlesAwaitingPermission: HandlePermissionApi[] = [];
+let savedArchivesMeta: SavedOfflineArchiveMeta[] = initialPrefs.savedArchives;
+let currentSourceMode: DataSourceMode = initialPrefs.sourceMode;
 let mountedCatalog: ExtractResponse | null = null;
 let mountedOrigin = 'https://naruto.jotagame.com';
-let strictOfflineMode = true;
+let strictOfflineMode = initialPrefs.strictOffline;
+let restoringPersisted = false;
+let initStarted = false;
 let stateGeneration = 0;
 let lastStoreError: string | null = null;
 const listeners = new Set<() => void>();
+
+function syncPrefsToStorage() {
+  savePersistedPrefs({
+    sourceMode: currentSourceMode,
+    strictOffline: strictOfflineMode,
+    savedArchives: savedArchivesMeta,
+  });
+}
 
 function revokeAllBlobUrls() {
   for (const url of blobUrlLru.values()) {
@@ -429,12 +593,26 @@ function computeCoverageStats(): OfflineCoverageStats {
 let cachedSnapshot: OfflineZipSnapshot = buildSnapshot();
 
 function buildSnapshot(): OfflineZipSnapshot {
+  const hasMounted = mountedArchives.length > 0;
+  const active = currentSourceMode === 'offline' && hasMounted;
+  const canReauth = !hasMounted && persistedHandlesAwaitingPermission.length > 0;
+  const needsReconnect =
+    currentSourceMode === 'offline' &&
+    !hasMounted &&
+    (savedArchivesMeta.length > 0 || canReauth);
+
   return {
-    active: mountedArchives.length > 0,
+    sourceMode: currentSourceMode,
+    active,
+    hasMountedArchives: hasMounted,
     strictOffline: strictOfflineMode,
     generation: stateGeneration,
     origin: mountedOrigin,
     archives: [...mountedArchives],
+    savedArchives: [...savedArchivesMeta],
+    canOneClickReauthorize: canReauth,
+    needsReconnect,
+    restoring: restoringPersisted,
     hasCatalog: Boolean(mountedCatalog),
     catalog: mountedCatalog,
     stats: computeCoverageStats(),
@@ -464,16 +642,24 @@ export function useOfflineZipState(): OfflineZipSnapshot {
 }
 
 export function isOfflineBackupActive(): boolean {
-  return mountedArchives.length > 0;
+  return currentSourceMode === 'offline' && mountedArchives.length > 0;
 }
 
 export function isStrictOfflineMode(): boolean {
-  return mountedArchives.length > 0 && strictOfflineMode;
+  return currentSourceMode === 'offline' && mountedArchives.length > 0 && strictOfflineMode;
 }
 
 export function setStrictOfflineMode(enabled: boolean) {
   if (strictOfflineMode === enabled) return;
   strictOfflineMode = enabled;
+  syncPrefsToStorage();
+  emitChange();
+}
+
+export function setPreferredSourceMode(mode: DataSourceMode) {
+  if (currentSourceMode === mode) return;
+  currentSourceMode = mode;
+  syncPrefsToStorage();
   emitChange();
 }
 
@@ -697,7 +883,12 @@ async function synthesizeFallbackCatalogFromEntries(): Promise<ExtractResponse |
 
 export async function mountBackupZipFiles(
   files: File[],
-  options?: { append?: boolean }
+  options?: {
+    append?: boolean;
+    handles?: HandlePermissionApi[];
+    activateOffline?: boolean;
+    skipPersist?: boolean;
+  }
 ): Promise<OfflineZipSnapshot> {
   const validFiles = files.filter((f) => f && f.size > 0);
   if (validFiles.length === 0) {
@@ -715,6 +906,8 @@ export async function mountBackupZipFiles(
     mediaProfilesByLower = new Map();
     offlineSonsMap = {};
     mountedArchives = [];
+    mountedRawFiles = [];
+    mountedHandles = [];
     mountedCatalog = null;
     mountedOrigin = 'https://naruto.jotagame.com';
   }
@@ -945,21 +1138,246 @@ export async function mountBackupZipFiles(
     };
     if (existingIdx >= 0) {
       mountedArchives[existingIdx] = info;
+      mountedRawFiles[existingIdx] = file;
     } else {
       mountedArchives.push(info);
+      mountedRawFiles.push(file);
     }
   }
+
+  if (options?.handles && options.handles.length > 0) {
+    mountedHandles = append ? [...mountedHandles, ...options.handles] : [...options.handles];
+  } else if (!append) {
+    mountedHandles = [];
+  }
+
+  persistedHandlesAwaitingPermission = [];
 
   // If no formal catalog.json was found in any loaded ZIP, try synthesizing from exported character ZIPs
   if (!mountedCatalog) {
     mountedCatalog = await synthesizeFallbackCatalogFromEntries();
   }
 
+  if (options?.activateOffline !== false) {
+    currentSourceMode = 'offline';
+  }
+
+  if (!options?.skipPersist) {
+    const now = Date.now();
+    savedArchivesMeta = mountedArchives.map((a) => ({
+      fileName: a.fileName,
+      fileSize: a.fileSize,
+      entryCount: a.entryCount,
+      label: a.label,
+      savedAt: now,
+    }));
+    syncPrefsToStorage();
+
+    if (mountedHandles.length > 0 && mountedHandles.length === mountedArchives.length) {
+      // Zero-copy persistent handle reference (works for 7 GB+ ZIPs on Chrome/Edge!)
+      void writePersistedIdbRecord({
+        kind: 'handles',
+        handles: mountedHandles,
+        savedAt: now,
+      });
+    } else {
+      const totalBytes = mountedRawFiles.reduce((acc, f) => acc + f.size, 0);
+      if (totalBytes > 0 && totalBytes <= MAX_IDB_INLINE_FILE_BYTES) {
+        void writePersistedIdbRecord({
+          kind: 'files',
+          files: mountedRawFiles,
+          savedAt: now,
+        });
+      } else {
+        // Avoid cloning multi-GB files into browser quota on Android; keep metadata + preference saved
+        void writePersistedIdbRecord(null);
+      }
+    }
+  }
+
   emitChange();
   return cachedSnapshot;
 }
 
-export function unmountBackupZip(): void {
+export async function pickAndMountOfflineZipFiles(options?: {
+  append?: boolean;
+}): Promise<
+  | { status: 'mounted'; snapshot: OfflineZipSnapshot }
+  | { status: 'cancelled' }
+  | { status: 'fallback-input' }
+> {
+  const win = typeof window !== 'undefined' ? (window as unknown as {
+    showOpenFilePicker?: (opts?: unknown) => Promise<HandlePermissionApi[]>;
+  }) : null;
+
+  if (!win || typeof win.showOpenFilePicker !== 'function') {
+    return { status: 'fallback-input' };
+  }
+
+  let handles: HandlePermissionApi[];
+  try {
+    handles = await win.showOpenFilePicker({
+      multiple: true,
+      excludeAcceptAllOption: false,
+      types: [
+        {
+          description: 'Pacotes ZIP de Backup',
+          accept: {
+            'application/zip': ['.zip'],
+            'application/x-zip-compressed': ['.zip'],
+            'application/octet-stream': ['.zip'],
+          },
+        },
+      ],
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      return { status: 'cancelled' };
+    }
+    // Cross-origin iframe / unsupported mobile picker -> fallback cleanly to <input type="file">
+    return { status: 'fallback-input' };
+  }
+
+  if (!handles || handles.length === 0) {
+    return { status: 'cancelled' };
+  }
+
+  const validFiles: File[] = [];
+  const validHandles: HandlePermissionApi[] = [];
+  for (const h of handles) {
+    try {
+      const f = await h.getFile();
+      if (f.size < 22) continue;
+      const head = new Uint8Array(await f.slice(0, 4).arrayBuffer());
+      if (head[0] === 0x50 && head[1] === 0x4b) {
+        validFiles.push(f);
+        validHandles.push(h);
+      }
+    } catch {
+      // ignore unreadable entry
+    }
+  }
+
+  if (validFiles.length === 0) {
+    throw new Error('Selecione arquivos válidos no formato .zip.');
+  }
+
+  const snapshot = await mountBackupZipFiles(validFiles, {
+    append: options?.append,
+    handles: validHandles,
+    activateOffline: true,
+  });
+  return { status: 'mounted', snapshot };
+}
+
+export async function reauthorizeSavedOfflineHandles(): Promise<boolean> {
+  if (persistedHandlesAwaitingPermission.length === 0) return false;
+  restoringPersisted = true;
+  lastStoreError = null;
+  emitChange();
+
+  try {
+    const files: File[] = [];
+    const grantedHandles: HandlePermissionApi[] = [];
+
+    for (const handle of persistedHandlesAwaitingPermission) {
+      let perm: string = 'granted';
+      if (typeof handle.queryPermission === 'function') {
+        perm = await handle.queryPermission({ mode: 'read' });
+      }
+      if (perm !== 'granted' && typeof handle.requestPermission === 'function') {
+        perm = await handle.requestPermission({ mode: 'read' });
+      }
+      if (perm !== 'granted') {
+        restoringPersisted = false;
+        emitChange();
+        return false;
+      }
+      const file = await handle.getFile();
+      files.push(file);
+      grantedHandles.push(handle);
+    }
+
+    if (files.length === 0) {
+      restoringPersisted = false;
+      emitChange();
+      return false;
+    }
+
+    await mountBackupZipFiles(files, {
+      handles: grantedHandles,
+      activateOffline: true,
+      skipPersist: false,
+    });
+    return true;
+  } catch (err) {
+    lastStoreError =
+      err instanceof Error ? err.message : 'Não foi possível reabrir o arquivo offline salvo.';
+    return false;
+  } finally {
+    restoringPersisted = false;
+    emitChange();
+  }
+}
+
+export async function initPersistedOfflineSource(): Promise<void> {
+  if (initStarted) return;
+  initStarted = true;
+
+  const record = await readPersistedIdbRecord();
+  if (!record) return;
+
+  restoringPersisted = true;
+  emitChange();
+
+  try {
+    if (record.kind === 'files' && Array.isArray(record.files) && record.files.length > 0) {
+      await mountBackupZipFiles(record.files, {
+        activateOffline: currentSourceMode === 'offline',
+        skipPersist: true,
+      });
+      return;
+    }
+
+    if (record.kind === 'handles' && Array.isArray(record.handles) && record.handles.length > 0) {
+      let allGranted = true;
+      for (const h of record.handles) {
+        if (typeof h.queryPermission === 'function') {
+          const perm = await h.queryPermission({ mode: 'read' });
+          if (perm !== 'granted') {
+            allGranted = false;
+            break;
+          }
+        }
+      }
+
+      if (allGranted) {
+        const files: File[] = [];
+        for (const h of record.handles) {
+          files.push(await h.getFile());
+        }
+        await mountBackupZipFiles(files, {
+          handles: record.handles,
+          activateOffline: currentSourceMode === 'offline',
+          skipPersist: true,
+        });
+      } else {
+        persistedHandlesAwaitingPermission = record.handles;
+      }
+    }
+  } catch {
+    // Saved file may have been moved/deleted; keep metadata so user can reconnect cleanly
+    if (record.kind === 'handles') {
+      persistedHandlesAwaitingPermission = [];
+      void writePersistedIdbRecord(null);
+    }
+  } finally {
+    restoringPersisted = false;
+    emitChange();
+  }
+}
+
+export function unmountBackupZip(options?: { keepPreference?: boolean }): void {
   revokeAllBlobUrls();
   exactEntryMap = new Map();
   lowerEntryMap = new Map();
@@ -967,8 +1385,19 @@ export function unmountBackupZip(): void {
   mediaProfilesByLower = new Map();
   offlineSonsMap = {};
   mountedArchives = [];
+  mountedRawFiles = [];
+  mountedHandles = [];
+  persistedHandlesAwaitingPermission = [];
   mountedCatalog = null;
   mountedOrigin = 'https://naruto.jotagame.com';
   lastStoreError = null;
+
+  if (!options?.keepPreference) {
+    currentSourceMode = 'online';
+    savedArchivesMeta = [];
+    syncPrefsToStorage();
+    void writePersistedIdbRecord(null);
+  }
+
   emitChange();
 }
