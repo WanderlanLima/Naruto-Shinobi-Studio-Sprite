@@ -1,13 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Archive, ArrowRight, Globe, HardDrive, SlidersHorizontal, WifiOff, X } from 'lucide-react';
-import { BatchZipModal } from './components/BatchZipModal';
-import { GeneralAssetsView } from './components/GeneralAssetsView';
-import { LocalSlicer } from './components/LocalSlicer';
+import { Archive, ArrowRight, ChevronDown, Globe, HardDrive, SlidersHorizontal, WifiOff, X } from 'lucide-react';
 import { NinjaCatalog } from './components/NinjaCatalog';
 import { OfflineBackupView } from './components/OfflineBackupView';
 import { OfflineIndicator, PWAInstallAction } from './components/PWAInstallBanner';
 import { StudioStage } from './components/StudioStage';
-import { TopBar, type WorkspaceTab } from './components/TopBar';
+import { TopBar, type TopBarActionIcon, type WorkspaceTab } from './components/TopBar';
 import {
   getOfflineZipSnapshot,
   initPersistedOfflineSource,
@@ -28,7 +25,6 @@ import type {
   SlicedFrame,
   SpineSkeleton,
 } from './types/sprite';
-import { exportFramesAsZip } from './utils/atlasParser';
 import {
   clearMediaProfileCache,
   extractGameCatalog,
@@ -137,17 +133,6 @@ export default function App() {
     skeleton: SpineSkeleton | null;
   } | null>(null);
 
-  const [localSlicerSource, setLocalSlicerSource] = useState<{
-    url: string;
-    filename: string;
-  } | null>(null);
-  const [localExportPayload, setLocalExportPayload] = useState<{
-    name: string;
-    frames: SlicedFrame[];
-  } | null>(null);
-
-  const [isExportingZip, setIsExportingZip] = useState(false);
-  const [batchZipList, setBatchZipList] = useState<NinjaEntry[] | null>(null);
   const [studioCompleteExportSignal, setStudioCompleteExportSignal] = useState(0);
 
   const [showSourcePanel, setShowSourcePanel] = useState(false);
@@ -398,11 +383,6 @@ export default function App() {
     restoreCatalogScroll();
   }, [catalogPage, restoreCatalogScroll]);
 
-  const handleSendToSlicer = (proxyUrl: string, filename: string) => {
-    setLocalSlicerSource({ url: proxyUrl, filename });
-    setActiveTab('slicer');
-  };
-
   const handleLoadedFramesChange = useCallback(
     (
       payload: {
@@ -417,49 +397,39 @@ export default function App() {
     []
   );
 
-  const handleLocalFramesChange = useCallback((frames: SlicedFrame[], name: string) => {
-    setLocalExportPayload(frames.length > 0 ? { frames, name } : null);
-  }, []);
-
-  const hasSingleNinjaOrLocalZip =
-    (activeTab === 'slicer' && Boolean(localExportPayload?.frames.length)) ||
-    (activeTab === 'studio' && Boolean(studioExportPayload?.frames.length));
-
-  const canExportZip =
-    hasSingleNinjaOrLocalZip ||
-    Boolean(activeCatalog?.ninjas.length) ||
-    Boolean(studioExportPayload?.frames.length);
-
-  const exportLabel =
+  const topBarAction: {
+    label: string;
+    icon: TopBarActionIcon;
+    disabled: boolean;
+    onClick: () => void;
+  } =
     activeTab === 'studio'
-      ? 'Exportar ninja'
-      : activeTab === 'slicer'
-      ? 'Exportar PNGs'
-      : 'Exportar lote';
-
-  const handleGlobalExportZip = async () => {
-    if (activeTab === 'slicer' && localExportPayload?.frames.length) {
-      setIsExportingZip(true);
-      try {
-        await exportFramesAsZip(
-          `${localExportPayload.name}_sprites.zip`,
-          localExportPayload.frames
-        );
-      } finally {
-        setIsExportingZip(false);
-      }
-      return;
-    }
-
-    if (activeTab === 'studio' && studioExportPayload?.frames.length) {
-      setStudioCompleteExportSignal((v) => v + 1);
-      return;
-    }
-
-    if (activeCatalog?.ninjas.length) {
-      setBatchZipList(activeCatalog.ninjas);
-    }
-  };
+      ? {
+          label: 'Exportar ninja',
+          icon: 'export',
+          disabled: !studioExportPayload?.frames.length,
+          onClick: () => setStudioCompleteExportSignal((v) => v + 1),
+        }
+      : activeTab === 'backup'
+      ? {
+          label: 'Ir ao catálogo',
+          icon: 'catalog',
+          disabled: false,
+          onClick: () => setActiveTab('ninjas'),
+        }
+      : selectedNinja
+      ? {
+          label: 'Abrir Estúdio',
+          icon: 'studio',
+          disabled: false,
+          onClick: () => handleSelectNinja(selectedNinja),
+        }
+      : {
+          label: 'Backup offline',
+          icon: 'backup',
+          disabled: false,
+          onClick: () => setActiveTab('backup'),
+        };
 
   const handleSaveProxy = () => {
     setSavedCorsProxy(corsProxyInput);
@@ -499,10 +469,10 @@ export default function App() {
       <TopBar
         activeTab={activeTab}
         onTabChange={setActiveTab}
-        canExportZip={canExportZip}
-        isExportingZip={isExportingZip}
-        exportLabel={exportLabel}
-        onExportZip={() => void handleGlobalExportZip()}
+        actionDisabled={topBarAction.disabled}
+        actionLabel={topBarAction.label}
+        actionIcon={topBarAction.icon}
+        onAction={topBarAction.onClick}
       />
 
       <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-5 sm:px-6 sm:py-6">
@@ -511,45 +481,29 @@ export default function App() {
             {offlineZip.restoring && !offlineZip.active && (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-500/25 bg-emerald-950/20 px-4 py-2.5 text-xs text-emerald-200">
                 <div className="flex items-center gap-2 min-w-0">
-                  <WifiOff className="h-3.5 w-3.5 text-emerald-400 shrink-0 animate-pulse" aria-hidden="true" />
+                  <WifiOff className="h-3.5 w-3.5 text-emerald-400 shrink-0" aria-hidden="true" />
                   <span className="truncate">Restaurando backup offline salvo automaticamente...</span>
                 </div>
               </div>
             )}
 
-            {offlineZip.active && (
+            {offlineZip.active && (offlineZip.opfsSync.active || offlineZip.opfsSync.error) && (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-500/25 bg-emerald-950/20 px-4 py-2.5 text-xs text-emerald-200">
                 <div className="flex items-center gap-2 min-w-0">
-                  <WifiOff className="h-3.5 w-3.5 text-emerald-400 shrink-0" aria-hidden="true" />
+                  <HardDrive className="h-3.5 w-3.5 text-emerald-400 shrink-0" aria-hidden="true" />
                   <span className="truncate">
-                    Modo offline ativo · {offlineZip.archives.length}{' '}
-                    {offlineZip.archives.length === 1 ? 'arquivo carregado' : 'arquivos carregados'}
                     {offlineZip.opfsSync.active
-                      ? ` · Salvando cópia automática (${offlineZip.opfsSync.percent}%)...`
-                      : offlineZip.opfsSync.storedInOpfs
-                      ? ' · Reabertura automática ativa'
-                      : offlineZip.opfsSync.error
-                      ? ` · ${offlineZip.opfsSync.error}`
-                      : ''}
+                      ? `Salvando cópia offline para reabertura automática (${offlineZip.opfsSync.percent}%)...`
+                      : offlineZip.opfsSync.error}
                   </span>
                 </div>
-                <div className="flex flex-wrap items-center gap-3 shrink-0">
-                  <button
-                    type="button"
-                    onClick={handleSwitchToGameSite}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-white/15 bg-[#090B10]/80 px-2.5 py-1 font-medium text-slate-200 hover:border-orange-400/50 hover:text-orange-200 transition-colors cursor-pointer whitespace-nowrap"
-                  >
-                    <Globe className="h-3 w-3" aria-hidden="true" />
-                    <span>Voltar ao site do jogo</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('backup')}
-                    className="font-medium text-emerald-300 hover:text-emerald-100 underline-offset-4 hover:underline cursor-pointer whitespace-nowrap"
-                  >
-                    Gerenciar backup
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('backup')}
+                  className="font-medium text-emerald-300 hover:text-emerald-100 underline-offset-4 hover:underline cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  Gerenciar backup
+                </button>
               </div>
             )}
 
@@ -675,83 +629,19 @@ export default function App() {
               <section className="rounded-xl border border-white/[0.08] bg-[#11141C] p-4 sm:p-5 space-y-4">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="font-display text-sm font-semibold text-slate-100">
-                    Fonte de dados e opções
+                    Opções do catálogo
                   </h2>
                   <button
                     type="button"
                     onClick={() => setShowSourcePanel(false)}
-                    aria-label="Fechar configurações de fonte"
+                    aria-label="Fechar opções"
                     className="rounded-md p-1 text-slate-400 hover:bg-white/[0.06] hover:text-slate-100 cursor-pointer"
                   >
                     <X className="h-4 w-4" aria-hidden="true" />
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      clearMediaProfileCache();
-                      setPreferredSourceMode('online');
-                      void runExtraction(targetUrl);
-                    }}
-                    className="space-y-2"
-                  >
-                    <label className="block text-xs font-medium text-slate-300">
-                      Endereço do jogo
-                    </label>
-                    <div className="flex flex-col gap-2 sm:flex-row">
-                      <div className="relative flex-1">
-                        <Globe
-                          className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500"
-                          aria-hidden="true"
-                        />
-                        <input
-                          type="url"
-                          required
-                          value={targetUrl}
-                          onChange={(e) => setTargetUrl(e.target.value)}
-                          placeholder="https://naruto.jotagame.com/"
-                          aria-label="URL do jogo web"
-                          className="w-full rounded-lg border border-white/10 bg-[#090B10] py-2 pl-9 pr-3 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
-                        />
-                      </div>
-                      <button
-                        type="submit"
-                        disabled={extracting}
-                        className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-orange-500 disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer"
-                      >
-                        <span>{extracting ? 'Carregando...' : 'Atualizar'}</span>
-                        <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-                      </button>
-                    </div>
-                  </form>
-
-                  <div className="space-y-2">
-                    <label className="block text-xs font-medium text-slate-300">
-                      Proxy opcional (para outras URLs)
-                    </label>
-                    <div className="flex flex-col gap-2 sm:flex-row">
-                      <input
-                        type="url"
-                        value={corsProxyInput}
-                        onChange={(e) => setCorsProxyInput(e.target.value)}
-                        placeholder="Automático"
-                        aria-label="URL de Proxy CORS"
-                        className="w-full min-w-0 flex-1 rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={handleSaveProxy}
-                        className="rounded-lg border border-white/10 bg-[#090B10] px-4 py-2 text-xs font-medium text-slate-200 hover:border-white/25 cursor-pointer shrink-0 whitespace-nowrap"
-                      >
-                        {proxySavedNotice ? 'Salvo' : 'Salvar'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.06] pt-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
                   <label className="inline-flex items-center gap-2 text-slate-300 cursor-pointer select-none">
                     <input
                       type="checkbox"
@@ -770,9 +660,82 @@ export default function App() {
                     className="inline-flex items-center gap-1.5 text-slate-300 hover:text-orange-400 transition-colors cursor-pointer"
                   >
                     <Archive className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Usar backup offline (.ZIP)</span>
+                    <span>Gerenciar backup offline (.ZIP)</span>
                   </button>
                 </div>
+
+                <details className="group border-t border-white/[0.06] pt-3">
+                  <summary className="flex cursor-pointer list-none items-center justify-between text-xs font-medium text-slate-400 hover:text-slate-200 select-none">
+                    <span>Avançado (URL do jogo e Proxy CORS)</span>
+                    <ChevronDown
+                      className="h-3.5 w-3.5 transition-transform group-open:rotate-180"
+                      aria-hidden="true"
+                    />
+                  </summary>
+                  <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        clearMediaProfileCache();
+                        setPreferredSourceMode('online');
+                        void runExtraction(targetUrl);
+                      }}
+                      className="space-y-2"
+                    >
+                      <label className="block text-xs font-medium text-slate-300">
+                        Endereço do jogo
+                      </label>
+                      <div className="flex flex-col gap-2 sm:flex-row">
+                        <div className="relative flex-1">
+                          <Globe
+                            className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500"
+                            aria-hidden="true"
+                          />
+                          <input
+                            type="url"
+                            required
+                            value={targetUrl}
+                            onChange={(e) => setTargetUrl(e.target.value)}
+                            placeholder="https://naruto.jotagame.com/"
+                            aria-label="URL do jogo web"
+                            className="w-full rounded-lg border border-white/10 bg-[#090B10] py-2 pl-9 pr-3 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={extracting}
+                          className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-orange-500 disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          <span>{extracting ? 'Carregando...' : 'Atualizar'}</span>
+                          <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+                        </button>
+                      </div>
+                    </form>
+
+                    <div className="space-y-2">
+                      <label className="block text-xs font-medium text-slate-300">
+                        Proxy CORS opcional
+                      </label>
+                      <div className="flex flex-col gap-2 sm:flex-row">
+                        <input
+                          type="url"
+                          value={corsProxyInput}
+                          onChange={(e) => setCorsProxyInput(e.target.value)}
+                          placeholder="Automático"
+                          aria-label="URL de Proxy CORS"
+                          className="w-full min-w-0 flex-1 rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-500 focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleSaveProxy}
+                          className="rounded-lg border border-white/10 bg-[#090B10] px-4 py-2 text-xs font-medium text-slate-200 hover:border-white/25 cursor-pointer shrink-0 whitespace-nowrap"
+                        >
+                          {proxySavedNotice ? 'Salvo' : 'Salvar'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </details>
               </section>
             )}
 
@@ -807,7 +770,6 @@ export default function App() {
               onSelectNinja={handleSelectNinja}
               onOpenSourceSettings={() => setShowSourcePanel((v) => !v)}
               sourceSettingsOpen={showSourcePanel}
-              onOpenBatchZip={(list) => setBatchZipList(list)}
               headerExtra={
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <div
@@ -815,18 +777,6 @@ export default function App() {
                     aria-label="Alternar fonte de dados"
                     className="inline-flex items-center rounded-lg border border-white/10 bg-[#090B10] p-0.5 text-xs"
                   >
-                    <button
-                      type="button"
-                      onClick={handleSwitchToGameSite}
-                      className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                        !isOfflineMode
-                          ? 'bg-orange-600 text-white'
-                          : 'text-slate-400 hover:text-slate-100'
-                      }`}
-                    >
-                      <Globe className="h-3 w-3" aria-hidden="true" />
-                      <span>Site do jogo</span>
-                    </button>
                     <button
                       type="button"
                       disabled={quickMounting || offlineZip.restoring}
@@ -846,11 +796,23 @@ export default function App() {
                           : offlineZip.restoring
                           ? 'Restaurando...'
                           : offlineZip.active
-                          ? 'Arquivo offline'
+                          ? 'Offline'
                           : isOfflineMode
                           ? 'Offline (reconectar)'
                           : 'Offline'}
                       </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSwitchToGameSite}
+                      className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                        !isOfflineMode
+                          ? 'bg-orange-600 text-white'
+                          : 'text-slate-400 hover:text-slate-100'
+                      }`}
+                    >
+                      <Globe className="h-3 w-3" aria-hidden="true" />
+                      <span>Online</span>
                     </button>
                   </div>
 
@@ -865,7 +827,7 @@ export default function App() {
                     }`}
                   >
                     <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Fonte</span>
+                    <span>Opções</span>
                   </button>
                 </div>
               }
@@ -882,21 +844,6 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'assets' && (
-          <GeneralAssetsView
-            sheets={activeCatalog?.sheets || []}
-            assets={activeCatalog?.assets || []}
-            onSendToSlicer={handleSendToSlicer}
-          />
-        )}
-
-        {activeTab === 'slicer' && (
-          <LocalSlicer
-            externalSource={localSlicerSource}
-            onFramesChange={handleLocalFramesChange}
-          />
-        )}
-
         {activeTab === 'backup' && (
           <OfflineBackupView
             sourceUrl={targetUrl}
@@ -905,12 +852,6 @@ export default function App() {
           />
         )}
       </main>
-
-      <BatchZipModal
-        isOpen={Boolean(batchZipList)}
-        ninjas={batchZipList || []}
-        onClose={() => setBatchZipList(null)}
-      />
 
       <OfflineIndicator />
 

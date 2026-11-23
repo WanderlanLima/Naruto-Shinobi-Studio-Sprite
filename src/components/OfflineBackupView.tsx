@@ -31,6 +31,7 @@ import {
   Upload,
 } from 'lucide-react';
 import type { NinjaEntry } from '../types/sprite';
+import { OpfsStorageCard } from './OpfsStorageCard';
 import {
   CLOUDFLARE_WORKER_PROXY_CODE,
   downloadDirectUnixScript,
@@ -1528,6 +1529,9 @@ export function OfflineBackupView({
               </div>
             </div>
           )}
+
+          {/* Internal OPFS storage footprint + 1-click cleanup */}
+          <OpfsStorageCard />
         </section>
       )}
 

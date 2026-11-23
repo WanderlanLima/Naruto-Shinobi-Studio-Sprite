@@ -1009,7 +1009,8 @@ function findEntryByUrlOrPath(urlOrPath: string): ZipEntryRef | null {
     if (
       relLower.includes('/spine-no-estados/') ||
       relLower.includes('/spine/') ||
-      relLower.includes('/particulas/')
+      relLower.includes('/particulas/') ||
+      /\.(atlas|json|png|webp)$/i.test(baseName)
     ) {
       const hitBase = basenameEntryMap.get(baseName);
       if (hitBase) return hitBase;
@@ -2045,4 +2046,219 @@ export function unmountBackupZip(options?: { keepPreference?: boolean }): void {
   }
 
   emitChange();
+}
+
+export interface OpfsBackupUsageInfo {
+  bytes: number;
+  fileCount: number;
+  browserUsageBytes: number | null;
+  browserQuotaBytes: number | null;
+}
+
+export async function getOpfsBackupUsage(): Promise<OpfsBackupUsageInfo> {
+  let bytes = 0;
+  let fileCount = 0;
+  let browserUsageBytes: number | null = null;
+  let browserQuotaBytes: number | null = null;
+
+  try {
+    const dir = await getOpfsBackupDir(false);
+    if (dir && typeof dir.keys === 'function') {
+      for await (const key of dir.keys()) {
+        try {
+          const fh = await dir.getFileHandle(key);
+          const f = await fh.getFile();
+          bytes += f.size;
+          fileCount++;
+        } catch {
+          // ignore unreadable file
+        }
+      }
+    }
+  } catch {
+    // ignore OPFS unavailable
+  }
+
+  try {
+    if (typeof navigator !== 'undefined' && navigator.storage?.estimate) {
+      const est = await navigator.storage.estimate();
+      if (typeof est.usage === 'number') browserUsageBytes = est.usage;
+      if (typeof est.quota === 'number') browserQuotaBytes = est.quota;
+    }
+  } catch {
+    // ignore
+  }
+
+  return { bytes, fileCount, browserUsageBytes, browserQuotaBytes };
+}
+
+export async function clearOpfsInternalCopy(): Promise<{
+  freedBytes: number;
+  unmountedActiveSession: boolean;
+}> {
+  const usageBefore = await getOpfsBackupUsage();
+  // Cancel any in-progress OPFS copy
+  opfsSyncToken++;
+
+  const wasOpfsBackedWithoutHandles =
+    opfsSyncState.storedInOpfs && mountedHandles.length === 0 && mountedArchives.length > 0;
+
+  await clearOpfsBackupDir();
+
+  // Preserve FileSystemFileHandle fallback in IDB if available, otherwise clear OPFS pointer
+  if (mountedHandles.length > 0) {
+    await writePersistedIdbRecord({
+      kind: 'handles',
+      handles: [...mountedHandles],
+      savedAt: Date.now(),
+    });
+  } else {
+    const existingRec = await readPersistedIdbRecord();
+    if (existingRec?.kind === 'opfs') {
+      if (existingRec.fallbackHandles && existingRec.fallbackHandles.length > 0) {
+        persistedHandlesAwaitingPermission = existingRec.fallbackHandles;
+        await writePersistedIdbRecord({
+          kind: 'handles',
+          handles: existingRec.fallbackHandles,
+          savedAt: Date.now(),
+        });
+      } else {
+        await writePersistedIdbRecord(null);
+      }
+    }
+  }
+
+  opfsSyncState = {
+    active: false,
+    percent: 0,
+    copiedBytes: 0,
+    totalBytes: 0,
+    storedInOpfs: false,
+    error: null,
+  };
+
+  if (wasOpfsBackedWithoutHandles) {
+    // Mounted File slices pointed to the deleted OPFS files; keep offline preference & cached catalog intact
+    unmountBackupZip({ keepPreference: true });
+    return { freedBytes: usageBefore.bytes, unmountedActiveSession: true };
+  }
+
+  emitChange();
+  return { freedBytes: usageBefore.bytes, unmountedActiveSession: false };
+}
+
+export interface NinjaOfflineCoverage {
+  complete: boolean;
+  percent: number;
+  checks: {
+    sprites: boolean;
+    artwork: boolean | null;
+    video: boolean | null;
+    audio: boolean | null;
+    aura: boolean | null;
+  };
+  missing: string[];
+}
+
+/**
+ * Fast O(1) synchronous integrity check for a ninja against the currently mounted offline ZIP(s).
+ */
+export function getNinjaOfflineCoverage(
+  ninja: NinjaEntry,
+  mediaProfile?: NinjaMediaProfile | null
+): NinjaOfflineCoverage {
+  const missing: string[] = [];
+  let passed = 0;
+  let total = 0;
+
+  // 1. Core Spine sprites (.atlas + .json)
+  total++;
+  const hasAtlas = hasOfflineEntry(ninja.atlasUrl);
+  const hasSkel = hasOfflineEntry(ninja.skeletonUrl);
+  const spritesOk = hasAtlas && hasSkel;
+  if (spritesOk) {
+    passed++;
+  } else {
+    missing.push('sprites');
+  }
+
+  const profile = mediaProfile || getOfflineMediaProfile(ninja.id);
+  const heroCode = (profile?.heroCode || ninja.code || '').replace(/^0+/, '') || ninja.code;
+
+  // 2. Artwork (characters & summons)
+  let artworkOk: boolean | null = null;
+  if (ninja.kind !== 'effect') {
+    total++;
+    const hasNameArt = Boolean(ninja.nameArtUrl && hasOfflineEntry(ninja.nameArtUrl));
+    const hasOfficialArt =
+      Boolean(heroCode) &&
+      (hasOfflineEntry(`acervo/asset/heros/${heroCode}/halfpic_${heroCode}.png`) ||
+        hasOfflineEntry(`acervo/asset/heros/${heroCode}/fullpic_${heroCode}.png`) ||
+        hasOfflineEntry(`acervo/asset/heros/${heroCode}/smallpic_${heroCode}.png`) ||
+        hasOfflineEntry(`acervo/asset/items/smallpic_${heroCode}.png`));
+    artworkOk = hasNameArt || hasOfficialArt;
+    if (artworkOk) {
+      passed++;
+    } else {
+      missing.push('arte');
+    }
+  }
+
+  // 3. Video (when character has ultimate/recruit video)
+  let videoOk: boolean | null = null;
+  const profileVideos = profile?.videos || [];
+  if (ninja.hasVideo || profileVideos.length > 0) {
+    total++;
+    const hasProfileVideo = profileVideos.some((v) => v.url && hasOfflineEntry(v.url));
+    const hasCodeVideo =
+      Boolean(heroCode) &&
+      (hasOfflineEntry(`acervo/video/hero/${heroCode}.mp4`) ||
+        hasOfflineEntry(`acervo/video/hero/${heroCode}_left.mp4`) ||
+        hasOfflineEntry(`acervo/video/hero/${ninja.id}.mp4`));
+    videoOk = hasProfileVideo || hasCodeVideo;
+    if (videoOk) {
+      passed++;
+    } else {
+      missing.push('vídeo');
+    }
+  }
+
+  // 4. Audio / Voices (when profile declares voices or animation sounds)
+  let audioOk: boolean | null = null;
+  const profileVoices = profile?.voices || [];
+  if (profileVoices.length > 0) {
+    total++;
+    audioOk = profileVoices.some((v) => v.url && hasOfflineEntry(v.url));
+    if (audioOk) {
+      passed++;
+    } else {
+      missing.push('áudio');
+    }
+  }
+
+  // 5. Passive aura (when profile defines one)
+  let auraOk: boolean | null = null;
+  if (profile?.passiveAura?.atlasUrl) {
+    total++;
+    auraOk = hasOfflineEntry(profile.passiveAura.atlasUrl);
+    if (auraOk) {
+      passed++;
+    } else {
+      missing.push('aura');
+    }
+  }
+
+  const percent = total > 0 ? Math.round((passed / total) * 100) : 100;
+  return {
+    complete: missing.length === 0,
+    percent,
+    checks: {
+      sprites: spritesOk,
+      artwork: artworkOk,
+      video: videoOk,
+      audio: audioOk,
+      aura: auraOk,
+    },
+    missing,
+  };
 }

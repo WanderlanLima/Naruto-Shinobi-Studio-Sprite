@@ -19,6 +19,7 @@ import {
   extractSpineAudioRefs,
   extractSpineEffectRefs,
   extractSpineVideoRefs,
+  findMatchingCompanionAnimName,
   getAnimationDuration,
   getCompositeAnimationDuration,
   loadImageElement,
@@ -39,12 +40,18 @@ import {
 } from './exportCheckpointStore';
 import { exportWorkerPool, type QuantizedGifFrameResult } from './exportWorkerPool';
 import {
+  buildAnimationEventsTimelineMs,
+  buildGameEngineSpritesheetJson,
+  computeAnimationAnchorMetrics,
+} from './gameEngineExportMeta';
+import {
   isOfflineBackupActive,
   isStrictOfflineMode,
   listOfflineEntryPathsByPredicate,
   readOfflineEntryBytes,
 } from './offlineZipStore';
 import {
+  discoverCompanionEffectSpines,
   fetchNinjaBundle,
   resolveAssetFetchUrl,
   resolveMediaSoundUrl,
@@ -53,6 +60,12 @@ import {
 import { assembleStreamingZipBlob, computeCrc32, type StreamingZipEntry } from './streamingZip';
 
 export type EffectIncludeScope = 'powers' | 'all' | 'base';
+
+export interface CompleteExportProgress {
+  phase: 'base' | 'effects' | 'media' | 'rendering' | 'zipping';
+  message: string;
+  percent: number;
+}
 
 export interface CompleteExportOptions {
   effectScope: EffectIncludeScope;
@@ -73,11 +86,7 @@ export interface CompleteExportOptions {
   resumeFromCheckpoint?: boolean;
   signal?: AbortSignal;
   effectCache?: Map<string, Promise<ParsedEffectAsset | null>>;
-  onProgress?: (info: {
-    phase: 'base' | 'effects' | 'media' | 'rendering' | 'zipping';
-    message: string;
-    percent: number;
-  }) => void;
+  onProgress?: (info: CompleteExportProgress) => void;
 }
 
 export interface BaseCharacterData {
@@ -403,6 +412,9 @@ export function buildCharacterInstructionsJson(
       mediaProfile?.skills?.[effectiveAnim] ||
       mediaProfile?.skills?.[effectiveAnim.toLowerCase()];
 
+    const eventsMs = buildAnimationEventsTimelineMs(allRefs, audioRefs, videoRefs);
+    const safeAnimName = sanitizePathSegment(animName);
+
     return {
       name: animName,
       effectiveAnimation: effectiveAnim !== animName ? effectiveAnim : undefined,
@@ -410,8 +422,11 @@ export function buildCharacterInstructionsJson(
       skillIconFile: skillMeta?.iconUrl
         ? buildSkillIconRelPathForAnim(skillMeta.animKey, skillMeta.name, skillMeta.iconUrl)
         : undefined,
+      spritesheetFile: `animacoes/${safeAnimName}/${safeAnimName}_spritesheet.png`,
+      spritesheetMetaFile: `animacoes/${safeAnimName}/${safeAnimName}_spritesheet.json`,
       baseDurationSec,
       compositeDurationSec,
+      eventsMs,
       effects: allRefs.map((ref) => ({
         spineId: ref.spineId,
         effectAnim: ref.animName,
@@ -1511,24 +1526,35 @@ export async function collectCharacterCompleteFiles(
       options.includeAnimPngsAndSheets ||
       options.includeAnimGifs);
 
-  // 2. Fetch linked particle bundles (noe_*) in parallel batches of 6
+  // 2. Fetch linked particle bundles (noe_*) + companion classic spines (_ground, _effect, _highteffect)
   const effectBundles = new Map<string, ParsedEffectAsset | null>();
   const missingEffects: string[] = [];
+  const companionDescriptors = needsEffects
+    ? await discoverCompanionEffectSpines(baseData.ninja)
+    : [];
 
-  if (needsEffects && plan.uniqueSpineIds.length > 0) {
+  if (needsEffects && (plan.uniqueSpineIds.length > 0 || companionDescriptors.length > 0)) {
+    const companionById = new Map(companionDescriptors.map((d) => [d.spineId, d]));
+    const allIdsToLoad = Array.from(
+      new Set([...plan.uniqueSpineIds, ...companionDescriptors.map((d) => d.spineId)])
+    );
     let completedEffects = 0;
-    const totalEffects = plan.uniqueSpineIds.length;
+    const totalEffects = allIdsToLoad.length;
     const EFFECT_BATCH = 6;
     for (let i = 0; i < totalEffects; i += EFFECT_BATCH) {
       throwIfAborted(options.signal);
-      const batch = plan.uniqueSpineIds.slice(i, i + EFFECT_BATCH);
+      const batch = allIdsToLoad.slice(i, i + EFFECT_BATCH);
       const results = await Promise.all(
         batch.map(async (spineId) => {
+          const compDesc = companionById.get(spineId);
           const parsed = await fetchParsedEffectAsset(
             baseData.ninja.atlasUrl,
             spineId,
             options.signal,
-            options.effectCache
+            options.effectCache,
+            compDesc
+              ? { atlasUrl: compDesc.atlasUrl, skeletonUrl: compDesc.skeletonUrl }
+              : undefined
           );
           completedEffects++;
           const pct = 10 + Math.round((completedEffects / totalEffects) * 18);
@@ -1537,12 +1563,12 @@ export async function collectCharacterCompleteFiles(
             message: `Carregando partículas (${completedEffects}/${totalEffects}): ${spineId}...`,
             percent: pct,
           });
-          return { spineId, parsed };
+          return { spineId, parsed, isCompanion: Boolean(compDesc) };
         })
       );
-      for (const { spineId, parsed } of results) {
+      for (const { spineId, parsed, isCompanion } of results) {
         effectBundles.set(spineId, parsed);
-        if (!parsed) {
+        if (!parsed && !isCompanion) {
           missingEffects.push(spineId);
         }
       }
@@ -1737,6 +1763,29 @@ export async function collectCharacterCompleteFiles(
         layers.push(...passiveAuraLayers);
       }
 
+      // Attach synchronized companion particle spines (<id>_ground, <id>_effect, <id>_highteffect)
+      for (const compDesc of companionDescriptors) {
+        const compAsset = effectBundles.get(compDesc.spineId);
+        if (!compAsset) continue;
+        const matched = findMatchingCompanionAnimName(
+          compAsset.skeleton,
+          animName,
+          effectiveAnim
+        );
+        if (!matched) continue;
+        layers.push({
+          spineId: compDesc.spineId,
+          skeleton: compAsset.skeleton,
+          animName: matched,
+          regionCanvasMap: compAsset.regionCanvasMap,
+          startTime: 0,
+          duration: getAnimationDuration(compAsset.skeleton, matched),
+          layer: compDesc.layer,
+          loop: false,
+          isSelfOrScreen: true,
+        });
+      }
+
       for (const ref of refs) {
         const eff = effectBundles.get(ref.spineId);
         if (!eff) continue;
@@ -1800,11 +1849,13 @@ export async function collectCharacterCompleteFiles(
 
         let stripCtx: CanvasRenderingContext2D | null = null;
         let stripCols = 1;
+        let stripRows = 1;
         let stripCellW = renderW;
         let stripCellH = renderH;
         if (options.includeAnimPngsAndSheets) {
           const layout = computeStripLayout(bounds, stripGifFrameCount, maxStripRes);
           stripCols = layout.cols;
+          stripRows = layout.rows;
           stripCellW = layout.cellW;
           stripCellH = layout.cellH;
           stripCanvas.width = layout.cols * layout.cellW;
@@ -1948,6 +1999,25 @@ export async function collectCharacterCompleteFiles(
           if (stripBlob) {
             pushFile(`${animDir}/${safeAnim}_spritesheet.png`, stripBlob);
           }
+          const animAllRefs = extractSpineEffectRefs(baseData.skeleton, animName);
+          const animAudioRefs = extractSpineAudioRefs(baseData.skeleton, animName);
+          const animVideoRefs = extractSpineVideoRefs(baseData.skeleton, animName);
+          const sheetMetaJson = buildGameEngineSpritesheetJson({
+            characterId: baseData.ninja.id,
+            animName,
+            safeAnimName: safeAnim,
+            imageFilename: `${safeAnim}_spritesheet.png`,
+            frameCount: totalFrames,
+            cols: stripCols,
+            rows: stripRows,
+            cellW: stripCellW,
+            cellH: stripCellH,
+            fps,
+            durationSec: totalDuration,
+            anchor: computeAnimationAnchorMetrics(bounds, stripCellW, stripCellH),
+            events: buildAnimationEventsTimelineMs(animAllRefs, animAudioRefs, animVideoRefs),
+          });
+          pushFile(`${animDir}/${safeAnim}_spritesheet.json`, sheetMetaJson);
         }
 
         while (pendingGifs.length > 0) {
@@ -2131,6 +2201,25 @@ export async function collectCharacterCompleteFiles(
           if (stripBlob) {
             pushFile(`${animDir}/${safeAnim}_spritesheet.png`, stripBlob);
           }
+          const animAllRefs = extractSpineEffectRefs(baseData.skeleton, animName);
+          const animAudioRefs = extractSpineAudioRefs(baseData.skeleton, animName);
+          const animVideoRefs = extractSpineVideoRefs(baseData.skeleton, animName);
+          const sheetMetaJson = buildGameEngineSpritesheetJson({
+            characterId: baseData.ninja.id,
+            animName,
+            safeAnimName: safeAnim,
+            imageFilename: `${safeAnim}_spritesheet.png`,
+            frameCount: stripGifFrameCount,
+            cols: layout.cols,
+            rows: layout.rows,
+            cellW: layout.cellW,
+            cellH: layout.cellH,
+            fps,
+            durationSec: totalDuration,
+            anchor: computeAnimationAnchorMetrics(bounds, layout.cellW, layout.cellH),
+            events: buildAnimationEventsTimelineMs(animAllRefs, animAudioRefs, animVideoRefs),
+          });
+          pushFile(`${animDir}/${safeAnim}_spritesheet.json`, sheetMetaJson);
         }
 
         while (pendingGifs.length > 0) {

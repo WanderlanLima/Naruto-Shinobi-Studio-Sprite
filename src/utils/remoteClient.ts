@@ -1081,7 +1081,15 @@ export async function fetchNinjaBundle(
 
     try {
       const primary = await tryBackend(atlasUrl, skeletonUrl);
-      if (primary) return primary;
+      if (primary) {
+        if (!options?.skipSkeleton && !primary.skeleton) {
+          const bundled = await loadBundledStaticSpine(atlasUrl, false);
+          if (bundled.skeleton) {
+            return { ...primary, skeleton: bundled.skeleton };
+          }
+        }
+        return primary;
+      }
     } catch (err) {
       if (backendStatus === 'available') {
         const altAtlas = swapSpineFolderUrl(atlasUrl);
@@ -1180,6 +1188,121 @@ function getOriginFromUrl(url: string): string {
   } catch {
     return 'https://naruto.jotagame.com';
   }
+}
+
+export interface CompanionEffectDescriptor {
+  spineId: string;
+  layer: 'behind' | 'front';
+  atlasUrl: string;
+  skeletonUrl: string;
+}
+
+let manifestAtlasStemsPromise: Promise<Map<string, string>> | null = null;
+
+async function loadKnownCompanionAtlasStems(): Promise<Map<string, string>> {
+  if (!manifestAtlasStemsPromise) {
+    manifestAtlasStemsPromise = (async () => {
+      const stems = new Map<string, string>();
+      const registerPath = (p: string) => {
+        if (!p || !p.toLowerCase().endsWith('.atlas')) return;
+        const fileName = p.split('/').pop() || '';
+        const stem = fileName.replace(/\.atlas$/i, '');
+        if (stem) stems.set(stem.toLowerCase(), stem);
+      };
+
+      try {
+        const { zip } = await fetchStaticZip('data/backup-manifest.zip');
+        const entry = zip?.file('backup-manifest.json');
+        if (entry) {
+          const parsed = JSON.parse(await entry.async('text')) as Record<string, unknown>;
+          for (const bucket of ['particleFiles', 'spriteFiles', 'baseFiles']) {
+            const list = parsed[bucket];
+            if (!Array.isArray(list)) continue;
+            for (const item of list) {
+              const p = Array.isArray(item)
+                ? String(item[0] || '')
+                : typeof item === 'string'
+                ? item
+                : '';
+              registerPath(p);
+            }
+          }
+        }
+      } catch {
+        // ignore if manifest zip is unavailable
+      }
+
+      if (stems.size === 0) {
+        const [mainPack, effPack] = await Promise.all([
+          loadStaticAtlasPack().catch(() => null),
+          loadStaticEffectsAtlasPack().catch(() => null),
+        ]);
+        if (mainPack) {
+          for (const k of Object.keys(mainPack.zip.files)) registerPath(k);
+        }
+        if (effPack) {
+          for (const k of Object.keys(effPack.zip.files)) registerPath(k);
+        }
+      }
+
+      return stems;
+    })();
+  }
+  return manifestAtlasStemsPromise;
+}
+
+const COMPANION_EFFECT_SUFFIXES: ReadonlyArray<{
+  suffix: string;
+  layer: 'behind' | 'front';
+}> = [
+  { suffix: '_ground', layer: 'behind' },
+  { suffix: '_effect', layer: 'front' },
+  { suffix: '_highteffect', layer: 'front' },
+];
+
+/**
+ * Discovers companion Spine particle files (`<id>_ground`, `<id>_effect`, `<id>_highteffect`)
+ * used by ~155 classic ninjas (e.g., Sasuke, ABNan, afei, dashewan, didala, SRXBP) whose
+ * animations synchronize with same-named animations in companion Spine files rather than
+ * `{DISPLAY...}` event tags. Uses O(1) Offline ZIP lookup + bundled manifest (zero 404 requests).
+ */
+export async function discoverCompanionEffectSpines(
+  ninja: NinjaEntry
+): Promise<CompanionEffectDescriptor[]> {
+  if (!ninja?.id || !ninja.atlasUrl) return [];
+  if (ninja.kind === 'effect') return [];
+  if (/_(effect|highteffect|ground|qianjing|beijing|texiao)$/i.test(ninja.id)) return [];
+
+  const offlineActive = isOfflineBackupActive();
+  const knownStems = await loadKnownCompanionAtlasStems();
+  const discovered: CompanionEffectDescriptor[] = [];
+
+  for (const { suffix, layer } of COMPANION_EFFECT_SUFFIXES) {
+    const candidateLower = `${ninja.id}${suffix}`.toLowerCase();
+    const resolvedStem = knownStems.get(candidateLower) || `${ninja.id}${suffix}`;
+    let atlasUrl: string;
+    let skeletonUrl: string;
+    try {
+      atlasUrl = new URL(`${resolvedStem}.atlas`, ninja.atlasUrl).toString();
+      skeletonUrl = new URL(`${resolvedStem}.json`, ninja.atlasUrl).toString();
+    } catch {
+      continue;
+    }
+
+    const existsOffline = offlineActive && hasOfflineEntry(atlasUrl);
+    const existsInManifest = knownStems.has(candidateLower);
+
+    if (offlineActive) {
+      // In offline mode, include if present in mounted ZIPs OR if non-strict mode & present in manifest
+      if (existsOffline || (!isStrictOfflineMode() && existsInManifest)) {
+        discovered.push({ spineId: resolvedStem, layer, atlasUrl, skeletonUrl });
+      }
+    } else if (existsInManifest) {
+      discovered.push({ spineId: resolvedStem, layer, atlasUrl, skeletonUrl });
+    }
+  }
+
+  return discovered;
 }
 
 export function resolveFallbackPassiveAura(ninja: NinjaEntry): PassiveAuraDef | null {

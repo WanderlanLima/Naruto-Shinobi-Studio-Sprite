@@ -5,6 +5,7 @@ import {
   ArrowRight,
   ArrowUp,
   Check,
+  ChevronDown,
   ChevronLeft,
   Clapperboard,
   Copy,
@@ -20,7 +21,9 @@ import {
   SkipBack,
   SkipForward,
   Sparkles,
-  Terminal,
+  Star,
+  Swords,
+  Tag,
   Volume2,
   VolumeX,
   X,
@@ -52,6 +55,7 @@ import {
   extractSpineAudioRefs,
   extractSpineEffectRefs,
   extractSpineVideoRefs,
+  findMatchingCompanionAnimName,
   getAnimationDuration,
   getCompositeAnimationDuration,
   hasVisibleAnimationContent,
@@ -71,6 +75,7 @@ import {
   exportCompleteCharacterZip,
   getOrderedSkillIconTargets,
   sanitizePathSegment,
+  type CompleteExportProgress,
   type EffectIncludeScope,
 } from '../utils/completeCharacterExporter';
 import { stripHtmlTags } from '../utils/combatMechanicsParser';
@@ -79,8 +84,16 @@ import {
   getLatestExportCheckpoint,
   type ExportCheckpointJobMeta,
 } from '../utils/exportCheckpointStore';
-import { useOfflineZipState } from '../utils/offlineZipStore';
+import { getNinjaOfflineCoverage, useOfflineZipState } from '../utils/offlineZipStore';
 import {
+  markNinjaExported,
+  toggleNinjaExportedManual,
+  toggleNinjaFavorite,
+  toggleNinjaTag,
+  useNinjaCollections,
+} from '../utils/ninjaCollectionsStore';
+import {
+  discoverCompanionEffectSpines,
   fetchNinjaBundle,
   fetchNinjaMediaProfile,
   resolveAssetFetchUrl,
@@ -89,9 +102,12 @@ import {
   resolveMediaPlayUrlAsync,
   resolveMediaSoundUrl,
   resolveMediaVideoUrl,
+  type CompanionEffectDescriptor,
 } from '../utils/remoteClient';
 import { assembleStreamingZipBlob, computeCrc32, type StreamingZipEntry } from '../utils/streamingZip';
 import { downloadTermuxCharacterExportScript } from '../utils/termuxCharacterExportScript';
+import { BattleTimelineBar } from './BattleTimelineBar';
+import { StudioExportModal } from './StudioExportModal';
 
 interface LoadedEffectBundle {
   skeleton: SpineSkeleton;
@@ -240,7 +256,8 @@ function clampPlayerPan(x: number, y: number, zoomLevel: number): { x: number; y
   };
 }
 
-const STUDIO_PREFS_STORAGE_KEY = 'shinobi_studio_prefs_v2';
+const STUDIO_PREFS_STORAGE_KEY = 'shinobi_studio_prefs_v3';
+const LEGACY_V2_STUDIO_PREFS_STORAGE_KEY = 'shinobi_studio_prefs_v2';
 const LEGACY_STUDIO_PREFS_STORAGE_KEY = 'shinobi_studio_prefs_v1';
 
 interface SavedStudioPrefs {
@@ -287,9 +304,12 @@ const DEFAULT_STUDIO_PREFS: SavedStudioPrefs = {
 
 function loadStudioPrefs(): SavedStudioPrefs {
   try {
-    const v2Raw = localStorage.getItem(STUDIO_PREFS_STORAGE_KEY);
-    const isMigratingFromV1 = !v2Raw;
-    const raw = v2Raw || localStorage.getItem(LEGACY_STUDIO_PREFS_STORAGE_KEY);
+    const v3Raw = localStorage.getItem(STUDIO_PREFS_STORAGE_KEY);
+    const isMigratingFromLegacy = !v3Raw;
+    const raw =
+      v3Raw ||
+      localStorage.getItem(LEGACY_V2_STUDIO_PREFS_STORAGE_KEY) ||
+      localStorage.getItem(LEGACY_STUDIO_PREFS_STORAGE_KEY);
     if (!raw) return DEFAULT_STUDIO_PREFS;
     const p = JSON.parse(raw) as Partial<SavedStudioPrefs>;
     const validBg = ['checker', 'dark', 'light', 'chroma'] as const;
@@ -297,20 +317,20 @@ function loadStudioPrefs(): SavedStudioPrefs {
     const validEff = ['powers', 'all', 'base'] as const;
     const validFps = [24, 15, 12] as const;
     const validRes = [2048, 1024, 512] as const;
-    // When migrating from v1 (where the old default was 'powers'), upgrade to 'all'
-    // so particles and hit impacts play by default unless the user explicitly chose 'base'.
+    // Upgrade legacy 'powers' (or v2 'base' accidentally saved when clicking idle) to 'all'
+    // so particles and hit impacts always display unless explicitly toggled off by the user.
     const parsedEffectMode = validEff.includes(p.effectMode as (typeof validEff)[number])
       ? (p.effectMode as 'powers' | 'all' | 'base')
       : DEFAULT_STUDIO_PREFS.effectMode;
-    const migratedEffectMode =
-      isMigratingFromV1 && parsedEffectMode === 'powers' ? 'all' : parsedEffectMode;
+    const migratedEffectMode: 'powers' | 'all' | 'base' =
+      isMigratingFromLegacy || parsedEffectMode === 'powers' ? 'all' : parsedEffectMode;
     const parsedCompleteScope = validEff.includes(
       p.completeEffectScope as (typeof validEff)[number]
     )
       ? (p.completeEffectScope as EffectIncludeScope)
       : DEFAULT_STUDIO_PREFS.completeEffectScope;
     const migratedCompleteScope =
-      isMigratingFromV1 && parsedCompleteScope === 'powers' ? 'all' : parsedCompleteScope;
+      isMigratingFromLegacy && parsedCompleteScope === 'powers' ? 'all' : parsedCompleteScope;
 
     return {
       bgStyle: validBg.includes(p.bgStyle as (typeof validBg)[number])
@@ -420,6 +440,13 @@ export function StudioStage({
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [currentTime, setCurrentTime] = useState(0);
+  const [battlePreviewEnabled, setBattlePreviewEnabled] = useState(false);
+  const [battleTargetDistance, setBattleTargetDistance] = useState(240);
+  const [comboQueue, setComboQueue] = useState<string[]>([]);
+  const comboQueueRef = useRef<string[]>([]);
+  comboQueueRef.current = comboQueue;
+  const [showTagsPopover, setShowTagsPopover] = useState(false);
+  const collections = useNinjaCollections();
   const [showAtlasBoxes, setShowAtlasBoxes] = useState(true);
   const [selectedRegion, setSelectedRegion] = useState<AtlasRegion | null>(null);
   const [exportingAnim, setExportingAnim] = useState(false);
@@ -428,6 +455,7 @@ export function StudioStage({
 
   // Complete character export modal state
   const [showCompleteExportModal, setShowCompleteExportModal] = useState(false);
+  const [showAdvancedExportOptions, setShowAdvancedExportOptions] = useState(false);
   const [completeEffectScope, setCompleteEffectScope] = useState<EffectIncludeScope>(
     initPrefs.completeEffectScope
   );
@@ -466,11 +494,80 @@ export function StudioStage({
   const [completeExportMaxRes, setCompleteExportMaxRes] = useState<2048 | 1024 | 512>(
     initPrefs.completeExportMaxRes
   );
-  const [completeExportProgress, setCompleteExportProgress] = useState<{
-    phase: string;
-    message: string;
-    percent: number;
-  } | null>(null);
+
+  const activeExportPreset: 'engine' | 'complete' | 'preview' | 'custom' =
+    completeEffectScope === 'all' &&
+    completeIncludeOriginals &&
+    completeIncludeEffects &&
+    completeIncludeAnimPngs &&
+    !completeIncludeAnimGifs &&
+    completeIncludePassiveAura &&
+    completeIncludeVideosAndAudio &&
+    completeIncludeSkillIcons &&
+    completeIncludeArtworks &&
+    completeExportFps === 24 &&
+    completeExportMaxRes === 2048
+      ? 'engine'
+      : completeEffectScope === 'all' &&
+        completeIncludeOriginals &&
+        completeIncludeEffects &&
+        completeIncludeAnimPngs &&
+        completeIncludeAnimGifs &&
+        completeIncludePassiveAura &&
+        completeIncludeVideosAndAudio &&
+        completeIncludeSkillIcons &&
+        completeIncludeArtworks &&
+        completeExportFps === 24 &&
+        completeExportMaxRes === 2048
+      ? 'complete'
+      : completeEffectScope === 'all' &&
+        !completeIncludeOriginals &&
+        !completeIncludeEffects &&
+        !completeIncludeAnimPngs &&
+        completeIncludeAnimGifs &&
+        completeIncludePassiveAura &&
+        completeIncludeVideosAndAudio &&
+        completeIncludeSkillIcons &&
+        completeIncludeArtworks &&
+        completeExportFps === 15 &&
+        completeExportMaxRes === 1024
+      ? 'preview'
+      : 'custom';
+
+  const applyExportPreset = (preset: 'engine' | 'complete' | 'preview') => {
+    setCompleteEffectScope('all');
+    setCompleteIncludePassiveAura(true);
+    setCompleteIncludeVideosAndAudio(true);
+    setCompleteIncludeSkillIcons(true);
+    setCompleteIncludeArtworks(true);
+    if (preset === 'engine') {
+      setCompleteIncludeOriginals(true);
+      setCompleteIncludeEffects(true);
+      setCompleteIncludeAnimPngs(true);
+      setCompleteIncludeAnimGifs(false);
+      setCompleteExportFps(24);
+      setCompleteExportMaxRes(2048);
+    } else if (preset === 'complete') {
+      setCompleteIncludeOriginals(true);
+      setCompleteIncludeEffects(true);
+      setCompleteIncludeAnimPngs(true);
+      setCompleteIncludeAnimGifs(true);
+      setCompleteGifBg('transparent');
+      setCompleteExportFps(24);
+      setCompleteExportMaxRes(2048);
+    } else {
+      setCompleteIncludeOriginals(false);
+      setCompleteIncludeEffects(false);
+      setCompleteIncludeAnimPngs(false);
+      setCompleteIncludeAnimGifs(true);
+      setCompleteGifBg('transparent');
+      setCompleteExportFps(15);
+      setCompleteExportMaxRes(1024);
+    }
+  };
+
+  const [completeExportProgress, setCompleteExportProgress] =
+    useState<CompleteExportProgress | null>(null);
   const [completeExportError, setCompleteExportError] = useState<string | null>(null);
   const [ninjaCheckpoint, setNinjaCheckpoint] = useState<ExportCheckpointJobMeta | null>(null);
   const [termuxExportResult, setTermuxExportResult] = useState<{
@@ -483,6 +580,10 @@ export function StudioStage({
 
   const [effectMode, setEffectMode] = useState<'powers' | 'all' | 'base'>(initPrefs.effectMode);
   const [compositeLayers, setCompositeLayers] = useState<CompositeSpineLayer[]>([]);
+  const [companionEffects, setCompanionEffects] = useState<
+    Array<{ descriptor: CompanionEffectDescriptor; bundle: LoadedEffectBundle }>
+  >([]);
+  const [loadingCompanionEffects, setLoadingCompanionEffects] = useState(false);
   const [loadingEffects, setLoadingEffects] = useState(false);
   const [effectLoadError, setEffectLoadError] = useState<string | null>(null);
 
@@ -567,6 +668,29 @@ export function StudioStage({
   const videoElemRef = useRef<HTMLVideoElement | null>(null);
   const resolvedMediaUrlMapRef = useRef<Map<string, string>>(new Map());
   const lastLoadedNinjaIdRef = useRef<string>('');
+  const playbackSessionRef = useRef(0);
+
+  const stopPlaybackCompletely = useCallback(() => {
+    playbackSessionRef.current += 1;
+    setIsPlaying(false);
+    setComboQueue([]);
+    audioCuePlayer.stopAll();
+    setPlayingVoiceKey(null);
+    if (videoElemRef.current) {
+      try {
+        videoElemRef.current.pause();
+        videoElemRef.current.currentTime = 0;
+      } catch {
+        // ignore media pause errors
+      }
+    }
+    setActiveVideoOverlay(null);
+    setVideoAutoplayMuted(false);
+    animTimeRef.current = 0;
+    prevAnimTimeRef.current = -1;
+    videoTriggeredCycleRef.current = false;
+    setCurrentTime(0);
+  }, []);
 
   const openDetachedPlayer = () => {
     if (!playerDetached) {
@@ -579,9 +703,10 @@ export function StudioStage({
     setPlayerDetached(true);
   };
 
-  const closeDetachedPlayer = () => {
+  const closeDetachedPlayer = useCallback(() => {
+    stopPlaybackCompletely();
     setPlayerDetached(false);
-  };
+  }, [stopPlaybackCompletely]);
 
   const applyZoom = (updater: (prev: number) => number) => {
     setZoom((prevZoom) => {
@@ -637,6 +762,7 @@ export function StudioStage({
     setLoading(true);
     setError(null);
     setCompositeLayers([]);
+    setCompanionEffects([]);
     setMediaProfile(null);
     setPassiveAuraBundle(null);
     setActiveVideoOverlay(null);
@@ -743,12 +869,13 @@ export function StudioStage({
     });
   }, [skeleton]);
 
-  // Exit detached overlay if user leaves player mode
+  // Stop playback & exit detached overlay if user leaves player mode
   useEffect(() => {
     if (stageMode !== 'player') {
+      stopPlaybackCompletely();
       setPlayerDetached(false);
     }
-  }, [stageMode]);
+  }, [stageMode, stopPlaybackCompletely]);
 
   // Lock background scroll, allow Escape key to dismiss, and restore scrollY on close
   useEffect(() => {
@@ -777,7 +904,7 @@ export function StudioStage({
       document.body.style.overflow = prevOverflow;
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [playerDetached]);
+  }, [playerDetached, closeDetachedPlayer]);
 
   useEffect(() => {
     if (openCompleteExportSignal > 0 && ninja && !loading && !error) {
@@ -839,6 +966,54 @@ export function StudioStage({
       cancelled = true;
     };
   }, [ninja, mediaProfile, offlineMediaScope]);
+
+  // Discover & load companion Spine particle bundles (<id>_ground, <id>_effect, <id>_highteffect)
+  // used by ~155 classic ninjas whose animations synchronize with same-named animations in companion files.
+  useEffect(() => {
+    if (!ninja || !skeleton) {
+      setCompanionEffects([]);
+      setLoadingCompanionEffects(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingCompanionEffects(true);
+    void discoverCompanionEffectSpines(ninja)
+      .then(async (descriptors) => {
+        if (cancelled || descriptors.length === 0) {
+          if (!cancelled) setCompanionEffects([]);
+          return;
+        }
+        const loaded = await Promise.all(
+          descriptors.map(async (descriptor) => {
+            const bundle = await loadEffectBundle(
+              ninja.atlasUrl,
+              descriptor.spineId,
+              {
+                atlasUrl: descriptor.atlasUrl,
+                skeletonUrl: descriptor.skeletonUrl,
+              },
+              offlineMediaScope
+            );
+            return bundle ? { descriptor, bundle } : null;
+          })
+        );
+        if (!cancelled) {
+          setCompanionEffects(
+            loaded.filter(
+              (item): item is { descriptor: CompanionEffectDescriptor; bundle: LoadedEffectBundle } =>
+                item !== null
+            )
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingCompanionEffects(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ninja, skeleton, offlineMediaScope]);
 
   // Automatically show passive aura when on idle (user can also toggle on/off for any animation)
   useEffect(() => {
@@ -922,15 +1097,6 @@ export function StudioStage({
     [animVideoMap, selectedAnim]
   );
 
-  const hasSelfPowers = useMemo(
-    () => rawEffectRefs.some((r) => r.isSelfOrScreen),
-    [rawEffectRefs]
-  );
-  const hasImpactEffects = useMemo(
-    () => rawEffectRefs.some((r) => !r.isSelfOrScreen),
-    [rawEffectRefs]
-  );
-
   // Build passive aura composite layers when enabled
   const passiveAuraLayers = useMemo<CompositeSpineLayer[]>(() => {
     const aura = mediaProfile?.passiveAura;
@@ -958,18 +1124,80 @@ export function StudioStage({
         duration: getAnimationDuration(passiveAuraBundle.skeleton, target),
         layer: layerDef.layer,
         loop: passiveAuraPhase === 'loop',
+        isSelfOrScreen: true,
       });
     }
     return layers;
   }, [mediaProfile?.passiveAura, passiveAuraBundle, showPassiveAura, passiveAuraPhase]);
 
-  const allCompositeLayers = useMemo<CompositeSpineLayer[]>(
-    () =>
-      passiveAuraLayers.length > 0
-        ? [...passiveAuraLayers, ...compositeLayers]
-        : compositeLayers,
-    [passiveAuraLayers, compositeLayers]
+  const companionEffectRefsMap = useMemo(() => {
+    const map = new Map<string, SpineCommandEffectRef[]>();
+    if (!skeleton || companionEffects.length === 0) return map;
+    for (const animName of animNames) {
+      const eff = resolveEffectiveAnimationName(skeleton, animName);
+      const refs: SpineCommandEffectRef[] = [];
+      for (const comp of companionEffects) {
+        const matched = findMatchingCompanionAnimName(comp.bundle.skeleton, animName, eff);
+        if (!matched) continue;
+        refs.push({
+          spineId: comp.descriptor.spineId,
+          animName: matched,
+          startTime: 0,
+          layer: comp.descriptor.layer,
+          isSelfOrScreen: true,
+          loop: false,
+          rawCommand: `{COMPANION:spine="${comp.descriptor.spineId}",source="${matched}"}`,
+        });
+      }
+      if (refs.length > 0) map.set(animName, refs);
+    }
+    return map;
+  }, [skeleton, animNames, companionEffects]);
+
+  const activeCompanionRefs = useMemo(
+    () => companionEffectRefsMap.get(selectedAnim) || [],
+    [companionEffectRefsMap, selectedAnim]
   );
+
+  const combinedTimelineEffectRefs = useMemo(
+    () =>
+      activeCompanionRefs.length > 0
+        ? [...activeCompanionRefs, ...rawEffectRefs]
+        : rawEffectRefs,
+    [activeCompanionRefs, rawEffectRefs]
+  );
+
+  const companionCompositeLayers = useMemo<CompositeSpineLayer[]>(() => {
+    if (effectMode === 'base' || companionEffects.length === 0 || !selectedAnim) return [];
+    const layers: CompositeSpineLayer[] = [];
+    for (const comp of companionEffects) {
+      const matched = findMatchingCompanionAnimName(
+        comp.bundle.skeleton,
+        selectedAnim,
+        effectiveAnim
+      );
+      if (!matched) continue;
+      layers.push({
+        spineId: comp.descriptor.spineId,
+        skeleton: comp.bundle.skeleton,
+        animName: matched,
+        regionCanvasMap: comp.bundle.regionCanvasMap,
+        startTime: 0,
+        duration: getAnimationDuration(comp.bundle.skeleton, matched),
+        layer: comp.descriptor.layer,
+        loop: false,
+        isSelfOrScreen: true,
+      });
+    }
+    return layers;
+  }, [effectMode, companionEffects, selectedAnim, effectiveAnim]);
+
+  const allCompositeLayers = useMemo<CompositeSpineLayer[]>(() => {
+    if (passiveAuraLayers.length === 0 && companionCompositeLayers.length === 0) {
+      return compositeLayers;
+    }
+    return [...passiveAuraLayers, ...companionCompositeLayers, ...compositeLayers];
+  }, [passiveAuraLayers, companionCompositeLayers, compositeLayers]);
 
   // Load companion Spine power/particle bundles for the selected animation
   useEffect(() => {
@@ -1031,11 +1259,16 @@ export function StudioStage({
             duration: getAnimationDuration(bundle.skeleton, targetAnim),
             layer: ref.layer,
             loop: ref.loop,
+            isSelfOrScreen: ref.isSelfOrScreen,
           });
         }
         setCompositeLayers(builtLayers);
         if (builtLayers.length === 0) {
-          setEffectLoadError('Partículas indisponíveis no momento');
+          setEffectLoadError(
+            offlineZip.active
+              ? 'Partículas ausentes no ZIP offline (adicione o pacote de Partículas na aba Backup)'
+              : 'Partículas indisponíveis no momento'
+          );
         }
       })
       .finally(() => {
@@ -1045,7 +1278,7 @@ export function StudioStage({
     return () => {
       cancelled = true;
     };
-  }, [ninja, skeleton, selectedAnim, effectMode, rawEffectRefs, offlineMediaScope]);
+  }, [ninja, skeleton, selectedAnim, effectMode, rawEffectRefs, offlineMediaScope, offlineZip.active]);
 
   // Clear cached resolved media Blob URLs whenever offline source / generation changes
   useEffect(() => {
@@ -1147,7 +1380,15 @@ export function StudioStage({
 
   useEffect(() => {
     return () => {
+      playbackSessionRef.current += 1;
       audioCuePlayer.stopAll();
+      if (videoElemRef.current) {
+        try {
+          videoElemRef.current.pause();
+        } catch {
+          // ignore
+        }
+      }
     };
   }, []);
 
@@ -1310,6 +1551,46 @@ export function StudioStage({
     }
   }, [selectedAnim, autoFit]);
 
+  const playerStageRenderOptions = useMemo<RenderSpineFrameOptions>(
+    () =>
+      battlePreviewEnabled
+        ? {
+            ...PLAYER_STAGE_RENDER_OPTIONS,
+            battlePreview: {
+              enabled: true,
+              targetDistance: battleTargetDistance,
+              showGuides: true,
+            },
+          }
+        : PLAYER_STAGE_RENDER_OPTIONS,
+    [battlePreviewEnabled, battleTargetDistance]
+  );
+
+  const availableComboSequence = useMemo(() => {
+    const findAnim = (candidates: string[]) =>
+      candidates.find((c) => animNames.some((a) => a.toLowerCase() === c.toLowerCase()));
+    const matchExact = (cand: string | undefined) =>
+      cand ? animNames.find((a) => a.toLowerCase() === cand.toLowerCase()) || null : null;
+    const seq = [
+      matchExact(findAnim(['attack', 'atk'])),
+      matchExact(findAnim(['chase1', 'skill', 'chase2'])),
+      matchExact(findAnim(['UniqueSkill', 'uniqueSkill', 'superUniqueSkill', 'skill'])),
+    ].filter((x, i, arr): x is string => Boolean(x) && arr.indexOf(x) === i);
+    return seq;
+  }, [animNames]);
+
+  const handleStartComboPreview = () => {
+    if (availableComboSequence.length < 2) return;
+    audioCuePlayer.unlock();
+    setBattlePreviewEnabled(true);
+    setSelectedAnim(availableComboSequence[0]);
+    setComboQueue(availableComboSequence.slice(1));
+    animTimeRef.current = 0;
+    prevAnimTimeRef.current = -1;
+    setCurrentTime(0);
+    setIsPlaying(true);
+  };
+
   // Animation loop (+ synchronized Spine SFX and Ultimate MP4 cutscene triggers)
   useEffect(() => {
     if (stageMode !== 'player' || !skeleton || !effectiveAnim || regionCanvasMap.size === 0) {
@@ -1337,7 +1618,7 @@ export function StudioStage({
         pan.y,
         autoFit ? animWorldBounds : null,
         allCompositeLayers,
-        PLAYER_STAGE_RENDER_OPTIONS
+        playerStageRenderOptions
       );
     };
 
@@ -1371,6 +1652,15 @@ export function StudioStage({
 
       if (loopWrapped) {
         videoTriggeredCycleRef.current = false;
+        if (comboQueueRef.current.length > 0) {
+          const [nextComboAnim, ...restCombo] = comboQueueRef.current;
+          setComboQueue(restCombo);
+          setSelectedAnim(nextComboAnim);
+          animTimeRef.current = 0;
+          prevAnimTimeRef.current = -1;
+          setCurrentTime(0);
+          return;
+        }
       }
 
       if (activeAudioRefs.length > 0 && !soundMuted) {
@@ -1421,8 +1711,15 @@ export function StudioStage({
             }
             // Offline ZIP MP4 still decompressing / verifying offset: resolve asynchronously and trigger
             videoTriggeredCycleRef.current = true;
+            const sessionAtTrigger = playbackSessionRef.current;
             void resolveMediaPlayUrlAsync(rawVideoUrl).then((asyncPlayUrl) => {
-              if (cancelledLoop || !asyncPlayUrl) return;
+              if (
+                cancelledLoop ||
+                !asyncPlayUrl ||
+                playbackSessionRef.current !== sessionAtTrigger
+              ) {
+                return;
+              }
               resolvedMediaUrlMapRef.current.set(rawVideoUrl, asyncPlayUrl);
               setActiveVideoOverlay({
                 playUrl: asyncPlayUrl,
@@ -1472,6 +1769,7 @@ export function StudioStage({
     ninja,
     playerDetached,
     offlineMediaScope,
+    playerStageRenderOptions,
   ]);
 
   // Redraw when manually scrubbing while paused or if mobile GPU restores canvas context
@@ -1495,7 +1793,7 @@ export function StudioStage({
           pan.y,
           autoFit ? animWorldBounds : null,
           allCompositeLayers,
-          PLAYER_STAGE_RENDER_OPTIONS
+          playerStageRenderOptions
         );
       }
     };
@@ -1525,6 +1823,7 @@ export function StudioStage({
     autoFit,
     animWorldBounds,
     playerDetached,
+    playerStageRenderOptions,
   ]);
 
   const bgClass =
@@ -1818,6 +2117,7 @@ export function StudioStage({
           onProgress: (info) => setCompleteExportProgress(info),
         }
       );
+      markNinjaExported(ninja.id, 'browser');
       setNinjaCheckpoint(null);
       setShowCompleteExportModal(false);
     } catch (err) {
@@ -1852,6 +2152,7 @@ export function StudioStage({
       fps: completeExportFps,
       maxResolution: completeExportMaxRes,
     });
+    markNinjaExported(ninja.id, 'termux');
     setTermuxExportResult(result);
     setCopiedTermuxExportCmd(false);
   };
@@ -2078,10 +2379,17 @@ export function StudioStage({
     (mediaProfile?.videos.length || 0) +
     (mediaProfile?.voices.length || 0);
 
+  const isNinjaFav = collections.favorites.includes(ninja.id);
+  const isNinjaExp = Boolean(collections.exported[ninja.id]);
+  const assignedTagIds = collections.assignments[ninja.id] || [];
+  const offlineCoverage = offlineZip.active
+    ? getNinjaOfflineCoverage(ninja, mediaProfile)
+    : null;
+
   return (
     <section className="space-y-4">
       {/* Studio Sub-header */}
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/[0.07] pb-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] pb-4">
         <div className="flex items-center gap-3 min-w-0">
           <button
             type="button"
@@ -2092,17 +2400,80 @@ export function StudioStage({
             <span>Catálogo</span>
           </button>
           <div className="min-w-0">
-            <div className="flex flex-wrap items-baseline gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h1 className="truncate font-display text-lg sm:text-xl font-bold tracking-tight text-slate-50">
                 {mediaProfile?.displayName || ninja.name || ninja.id}
               </h1>
               {(mediaProfile?.displayName || ninja.name) && (
                 <span className="font-mono text-xs text-slate-500">{ninja.id}</span>
               )}
+              <button
+                type="button"
+                onClick={() => toggleNinjaFavorite(ninja.id)}
+                aria-pressed={isNinjaFav}
+                title={isNinjaFav ? 'Remover dos favoritos' : 'Favoritar personagem'}
+                className={`inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors cursor-pointer ${
+                  isNinjaFav
+                    ? 'border-amber-500/50 bg-amber-500/15 text-amber-400'
+                    : 'border-white/[0.08] bg-[#11141C] text-slate-500 hover:text-amber-300'
+                }`}
+              >
+                <Star className={`h-3.5 w-3.5 ${isNinjaFav ? 'fill-amber-400' : ''}`} />
+              </button>
+
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowTagsPopover((v) => !v)}
+                  className={`inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-colors cursor-pointer ${
+                    assignedTagIds.length > 0
+                      ? 'border-orange-500/45 bg-orange-500/12 text-orange-200'
+                      : 'border-white/[0.08] bg-[#11141C] text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Tag className="h-3 w-3" />
+                  <span>{assignedTagIds.length > 0 ? `Listas (${assignedTagIds.length})` : 'Listas'}</span>
+                </button>
+
+                {showTagsPopover && (
+                  <div className="absolute left-0 top-9 z-40 w-48 rounded-lg border border-white/15 bg-[#11141C] p-2 shadow-xl space-y-1">
+                    {collections.tags.map((tag) => {
+                      const hasTag = assignedTagIds.includes(tag.id);
+                      return (
+                        <button
+                          key={tag.id}
+                          type="button"
+                          onClick={() => toggleNinjaTag(ninja.id, tag.id)}
+                          className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs text-slate-200 hover:bg-white/[0.06] cursor-pointer"
+                        >
+                          <span className="truncate">{tag.name}</span>
+                          {hasTag && <Check className="h-3.5 w-3.5 text-orange-400 shrink-0" />}
+                        </button>
+                      );
+                    })}
+                    <div className="border-t border-white/[0.08] pt-1 mt-1">
+                      <button
+                        type="button"
+                        onClick={() => toggleNinjaExportedManual(ninja.id)}
+                        className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs text-slate-300 hover:bg-white/[0.06] cursor-pointer"
+                      >
+                        <span>Já exportado</span>
+                        {isNinjaExp && <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
             <p className="text-xs text-slate-400 font-mono tabular-nums truncate">
               {ninja.width} × {ninja.height} px · {frames.length} frames · {animNames.length} animações
               {mediaProfile?.combatProfile?.natureLabel ? ` · ${mediaProfile.combatProfile.natureLabel}` : ''}
+              {isNinjaExp ? ' · Exportado' : ''}
+              {offlineCoverage
+                ? offlineCoverage.complete
+                  ? ' · Offline 100%'
+                  : ` · Falta offline: ${offlineCoverage.missing.join(', ')}`
+                : ''}
             </p>
           </div>
         </div>
@@ -2287,47 +2658,27 @@ export function StudioStage({
                           ))}
                         </div>
 
-                        {rawEffectRefs.length > 0 && (
-                          <div className="flex flex-wrap items-center gap-0.5 rounded-lg border border-white/[0.07] bg-[#090B10] p-0.5">
-                            {hasSelfPowers && (
-                              <button
-                                type="button"
-                                onClick={() => setEffectMode('powers')}
-                                className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                                  effectMode === 'powers' ||
-                                  (!hasImpactEffects && effectMode === 'all')
-                                    ? 'bg-orange-600 text-white'
-                                    : 'text-slate-400 hover:text-slate-100'
-                                }`}
-                              >
-                                Poderes
-                              </button>
-                            )}
-                            {hasImpactEffects && (
-                              <button
-                                type="button"
-                                onClick={() => setEffectMode('all')}
-                                className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                                  effectMode === 'all'
-                                    ? 'bg-orange-600 text-white'
-                                    : 'text-slate-400 hover:text-slate-100'
-                                }`}
-                              >
-                                {hasSelfPowers ? 'Completo' : 'Efeitos'}
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => setEffectMode('base')}
-                              className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                                effectMode === 'base'
-                                  ? 'bg-white/12 text-white'
-                                  : 'text-slate-400 hover:text-slate-100'
-                              }`}
-                            >
-                              Base
-                            </button>
-                          </div>
+                        {combinedTimelineEffectRefs.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setEffectMode((prev) => (prev === 'base' ? 'all' : 'base'))
+                            }
+                            aria-pressed={effectMode !== 'base'}
+                            title={
+                              effectMode === 'base'
+                                ? 'Ativar partículas e impactos'
+                                : 'Ocultar partículas e impactos'
+                            }
+                            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              effectMode !== 'base'
+                                ? 'border-orange-500/60 bg-orange-600 text-white'
+                                : 'border-white/[0.08] bg-[#090B10] text-slate-400 hover:text-slate-100'
+                            }`}
+                          >
+                            <Sparkles className="h-3 w-3" aria-hidden="true" />
+                            <span>Efeitos</span>
+                          </button>
                         )}
 
                         {mediaProfile?.passiveAura && (
@@ -2448,12 +2799,61 @@ export function StudioStage({
                           )}
                         </div>
 
-                        {(loadingEffects || loadingPassiveAura) && (
+                        {/* Battle Scene Preview (Dummy Target + Distance + Combo Sequence) */}
+                        <div className="flex items-center gap-1 rounded-lg border border-white/[0.07] bg-[#090B10] px-1.5 py-0.5">
+                          <button
+                            type="button"
+                            onClick={() => setBattlePreviewEnabled((v) => !v)}
+                            aria-pressed={battlePreviewEnabled}
+                            title="Visualizar alvo inimigo (boneco dummy) para testar alcance de projéteis e impactos"
+                            className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              battlePreviewEnabled
+                                ? 'bg-orange-500/20 text-orange-200'
+                                : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            <Swords className="h-3 w-3" aria-hidden="true" />
+                            <span>Cena Batalha</span>
+                          </button>
+                          {battlePreviewEnabled && (
+                            <>
+                              <input
+                                type="range"
+                                min={120}
+                                max={440}
+                                step={10}
+                                value={battleTargetDistance}
+                                onChange={(e) => setBattleTargetDistance(Number(e.target.value))}
+                                aria-label="Distância do alvo inimigo"
+                                className="w-16 accent-orange-500 cursor-pointer"
+                              />
+                              <span className="font-mono text-[10px] text-slate-400 tabular-nums pr-1">
+                                {battleTargetDistance}px
+                              </span>
+                            </>
+                          )}
+                          {availableComboSequence.length >= 2 && (
+                            <button
+                              type="button"
+                              onClick={handleStartComboPreview}
+                              title={`Testar sequência: ${availableComboSequence.join(' → ')}`}
+                              className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                comboQueue.length > 0
+                                  ? 'bg-rose-500/20 text-rose-200'
+                                  : 'text-slate-300 hover:bg-white/[0.06] hover:text-white'
+                              }`}
+                            >
+                              {comboQueue.length > 0 ? 'Combo...' : 'Combo'}
+                            </button>
+                          )}
+                        </div>
+
+                        {(loadingEffects || loadingCompanionEffects || loadingPassiveAura) && (
                           <span className="text-[11px] text-slate-400 font-mono whitespace-nowrap">
                             {loadingPassiveAura ? 'Carregando aura...' : 'Carregando efeitos...'}
                           </span>
                         )}
-                        {!loadingEffects && effectLoadError && (
+                        {!loadingEffects && !loadingCompanionEffects && effectLoadError && (
                           <span className="text-[11px] text-amber-300 whitespace-nowrap">
                             {effectLoadError}
                           </span>
@@ -2688,82 +3088,83 @@ export function StudioStage({
 
                 {/* Playback & Export Controls */}
                 <div className="space-y-3 border-t border-white/[0.07] p-4">
-                  <div className="flex flex-wrap items-center gap-2.5">
-                    <button
-                      type="button"
-                      onClick={() => {
+                  <div className="space-y-2.5">
+                    <BattleTimelineBar
+                      currentTime={currentTime}
+                      duration={duration}
+                      effectRefs={combinedTimelineEffectRefs}
+                      audioRefs={activeAudioRefs}
+                      videoRefs={activeVideoRefs}
+                      onSeek={(nextT) => {
+                        setComboQueue([]);
                         setIsPlaying(false);
-                        setCurrentTime((t) => Math.max(0, t - 1 / 30));
+                        setCurrentTime(nextT);
                       }}
-                      aria-label="Frame anterior"
-                      className="rounded-lg border border-white/10 bg-[#090B10] p-2 text-slate-300 hover:border-white/25 cursor-pointer"
-                    >
-                      <SkipBack className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        audioCuePlayer.unlock();
-                        setIsPlaying((p) => !p);
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 transition-colors cursor-pointer"
-                    >
-                      {isPlaying ? (
-                        <>
-                          <Pause className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Pausar</span>
-                        </>
-                      ) : (
-                        <>
-                          <Play className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Reproduzir</span>
-                        </>
-                      )}
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsPlaying(false);
-                        setCurrentTime((t) => (duration > 0 ? (t + 1 / 30) % duration : 0));
-                      }}
-                      aria-label="Próximo frame"
-                      className="rounded-lg border border-white/10 bg-[#090B10] p-2 text-slate-300 hover:border-white/25 cursor-pointer"
-                    >
-                      <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-
-                    <input
-                      type="range"
-                      min={0}
-                      max={Math.max(0.01, duration)}
-                      step={0.01}
-                      value={Math.min(currentTime, duration)}
-                      onChange={(e) => {
-                        setIsPlaying(false);
-                        setCurrentTime(Number(e.target.value));
-                      }}
-                      aria-label="Linha do tempo da animação"
-                      className="min-w-[140px] flex-1 accent-orange-500 cursor-pointer"
                     />
 
-                    <span className="font-mono text-xs text-slate-400 tabular-nums">
-                      {currentTime.toFixed(2)}s / {duration.toFixed(2)}s
-                    </span>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setComboQueue([]);
+                            setIsPlaying(false);
+                            setCurrentTime((t) => Math.max(0, t - 1 / 30));
+                          }}
+                          aria-label="Frame anterior"
+                          className="rounded-lg border border-white/10 bg-[#090B10] p-2 text-slate-300 hover:border-white/25 cursor-pointer"
+                        >
+                          <SkipBack className="h-3.5 w-3.5" aria-hidden="true" />
+                        </button>
 
-                    <select
-                      value={speed}
-                      onChange={(e) => setSpeed(Number(e.target.value))}
-                      aria-label="Velocidade da animação"
-                      className="rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 font-mono text-xs text-slate-200 cursor-pointer"
-                    >
-                      <option value={0.25}>0.25x</option>
-                      <option value={0.5}>0.5x</option>
-                      <option value={1}>1.0x</option>
-                      <option value={1.5}>1.5x</option>
-                      <option value={2}>2.0x</option>
-                    </select>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            audioCuePlayer.unlock();
+                            setIsPlaying((p) => !p);
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-500 transition-colors cursor-pointer"
+                        >
+                          {isPlaying ? (
+                            <>
+                              <Pause className="h-3.5 w-3.5" aria-hidden="true" />
+                              <span>Pausar</span>
+                            </>
+                          ) : (
+                            <>
+                              <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                              <span>Reproduzir</span>
+                            </>
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setComboQueue([]);
+                            setIsPlaying(false);
+                            setCurrentTime((t) => (duration > 0 ? (t + 1 / 30) % duration : 0));
+                          }}
+                          aria-label="Próximo frame"
+                          className="rounded-lg border border-white/10 bg-[#090B10] p-2 text-slate-300 hover:border-white/25 cursor-pointer"
+                        >
+                          <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
+                        </button>
+                      </div>
+
+                      <select
+                        value={speed}
+                        onChange={(e) => setSpeed(Number(e.target.value))}
+                        aria-label="Velocidade da animação"
+                        className="rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 font-mono text-xs text-slate-200 cursor-pointer"
+                      >
+                        <option value={0.25}>0.25x</option>
+                        <option value={0.5}>0.5x</option>
+                        <option value={1}>1.0x</option>
+                        <option value={1.5}>1.5x</option>
+                        <option value={2}>2.0x</option>
+                      </select>
+                    </div>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-3">
@@ -3062,7 +3463,10 @@ export function StudioStage({
                         const active = anim === selectedAnim && stageMode === 'player';
                         const eff = skeleton ? resolveEffectiveAnimationName(skeleton, anim) : anim;
                         const dur = skeleton ? getAnimationDuration(skeleton, eff) : 0;
-                        const effRefs = animEffectMap.get(anim) || [];
+                        const effRefs = [
+                          ...(companionEffectRefsMap.get(anim) || []),
+                          ...(animEffectMap.get(anim) || []),
+                        ];
                         const audioRefs = animAudioMap.get(anim) || [];
                         const videoRefs = animVideoMap.get(anim) || [];
                         const hasPowers = effRefs.some((r) => r.isSelfOrScreen);
@@ -3094,7 +3498,7 @@ export function StudioStage({
                               setPan({ x: 0, y: 0 });
                               setStageMode('player');
                               setIsPlaying(true);
-                              setEffectMode(hasPowers ? 'powers' : hasImpacts ? 'all' : 'base');
+                              setEffectMode((prev) => (prev === 'powers' ? 'all' : prev));
                               openDetachedPlayer();
                             }}
                             className={`flex w-full items-center gap-2.5 px-2.5 py-2 text-left text-xs transition-colors cursor-pointer rounded-lg ${
@@ -3295,9 +3699,6 @@ export function StudioStage({
                                     type="button"
                                     onClick={() => {
                                       audioCuePlayer.unlock();
-                                      const effRefs = animEffectMap.get(matchedAnim) || [];
-                                      const hasP = effRefs.some((r) => r.isSelfOrScreen);
-                                      const hasI = !hasP && effRefs.length > 0;
                                       setSelectedAnim(matchedAnim);
                                       setCurrentTime(0);
                                       animTimeRef.current = 0;
@@ -3309,7 +3710,7 @@ export function StudioStage({
                                       setPan({ x: 0, y: 0 });
                                       setStageMode('player');
                                       setIsPlaying(true);
-                                      setEffectMode(hasP ? 'powers' : hasI ? 'all' : 'base');
+                                      setEffectMode((prev) => (prev === 'powers' ? 'all' : prev));
                                       openDetachedPlayer();
                                     }}
                                     className="font-mono text-[10px] text-orange-400 hover:underline cursor-pointer shrink-0"
@@ -3550,416 +3951,58 @@ export function StudioStage({
         </div>
       )}
 
-      {showCompleteExportModal && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="complete-char-export-title"
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
-          onClick={(e) => {
-            if (e.target === e.currentTarget && !completeExportProgress) {
-              setShowCompleteExportModal(false);
-            }
-          }}
-        >
-          <div className="w-full max-w-lg rounded-xl border border-white/10 bg-[#11141C] p-5 space-y-4 max-h-[92vh] overflow-y-auto shadow-2xl">
-            <div className="flex items-start justify-between gap-3 border-b border-white/[0.07] pb-3.5">
-              <div>
-                <h3
-                  id="complete-char-export-title"
-                  className="font-display text-base font-semibold text-slate-50"
-                >
-                  Exportar personagem ({mediaProfile?.displayName || ninja.name || ninja.id})
-                </h3>
-                <p className="mt-0.5 font-mono text-xs text-slate-400 tabular-nums">
-                  {frames.length} frames · {animNames.length} animações ·{' '}
-                  {completeEffectPlan.uniqueSpineIds.length} efeitos
-                </p>
-              </div>
-              <button
-                type="button"
-                disabled={Boolean(completeExportProgress)}
-                onClick={() => setShowCompleteExportModal(false)}
-                aria-label="Fechar"
-                className="rounded-lg p-1.5 text-slate-400 hover:bg-white/[0.06] hover:text-white disabled:opacity-40 cursor-pointer"
-              >
-                <X className="h-4 w-4" aria-hidden="true" />
-              </button>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <label className="block space-y-1.5">
-                <span className="font-medium text-slate-300">Camadas de efeitos</span>
-                <select
-                  disabled={Boolean(completeExportProgress)}
-                  value={completeEffectScope}
-                  onChange={(e) => setCompleteEffectScope(e.target.value as EffectIncludeScope)}
-                  className="w-full rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs text-slate-100 focus:border-orange-500 focus:outline-none"
-                >
-                  <option value="powers">Com poderes (recomendado)</option>
-                  <option value="all">Completo (poderes + impactos)</option>
-                  <option value="base">Somente personagem</option>
-                </select>
-              </label>
-
-              <div className="divide-y divide-white/[0.06] rounded-lg border border-white/[0.08] bg-[#090B10]">
-                <label className="flex items-start gap-2.5 p-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    disabled={Boolean(completeExportProgress)}
-                    checked={completeIncludeOriginals}
-                    onChange={(e) => setCompleteIncludeOriginals(e.target.checked)}
-                    className="mt-0.5 accent-orange-500"
-                  />
-                  <div>
-                    <div className="font-medium text-slate-100">Arquivos originais e frames</div>
-                    <div className="text-[11px] text-slate-400">
-                      Esqueleto Spine, folhas originais e frames individuais em PNG.
-                    </div>
-                  </div>
-                </label>
-
-                <label className="flex items-start gap-2.5 p-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    disabled={Boolean(completeExportProgress)}
-                    checked={completeIncludeEffects}
-                    onChange={(e) => setCompleteIncludeEffects(e.target.checked)}
-                    className="mt-0.5 accent-orange-500"
-                  />
-                  <div>
-                    <div className="font-medium text-slate-100">Partículas, combate e instruções</div>
-                    <div className="text-[11px] text-slate-400">
-                      Pacotes de partículas, roteiro de animações e ficha completa de skills/perseguições em JSON.
-                    </div>
-                  </div>
-                </label>
-
-                <label className="flex items-start gap-2.5 p-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    disabled={Boolean(completeExportProgress)}
-                    checked={completeIncludeAnimPngs}
-                    onChange={(e) => setCompleteIncludeAnimPngs(e.target.checked)}
-                    className="mt-0.5 accent-orange-500"
-                  />
-                  <div>
-                    <div className="font-medium text-slate-100">Sequências PNG e spritesheets</div>
-                    <div className="text-[11px] text-slate-400">
-                      Todas as animações renderizadas em passagem única ({completeExportFps} FPS) com efeitos compostos.
-                    </div>
-                  </div>
-                </label>
-
-                <div className="p-3 space-y-2">
-                  <label className="flex items-start gap-2.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      disabled={Boolean(completeExportProgress)}
-                      checked={completeIncludeAnimGifs}
-                      onChange={(e) => setCompleteIncludeAnimGifs(e.target.checked)}
-                      className="mt-0.5 accent-orange-500"
-                    />
-                    <div>
-                      <div className="font-medium text-slate-100">GIFs animados</div>
-                      <div className="text-[11px] text-slate-400">
-                        Um arquivo GIF pronto para cada animação.
-                      </div>
-                    </div>
-                  </label>
-                  {completeIncludeAnimGifs && (
-                    <div className="flex items-center justify-between gap-2 pl-6">
-                      <span className="text-[11px] text-slate-400">Fundo dos GIFs</span>
-                      <select
-                        disabled={Boolean(completeExportProgress)}
-                        value={completeGifBg}
-                        onChange={(e) =>
-                          setCompleteGifBg(
-                            e.target.value as 'transparent' | 'dark' | 'light' | 'chroma'
-                          )
-                        }
-                        className="rounded-md border border-white/10 bg-[#11141C] px-2 py-1 text-[11px] text-slate-200"
-                      >
-                        <option value="transparent">Transparente</option>
-                        <option value="dark">Escuro</option>
-                        <option value="light">Claro</option>
-                        <option value="chroma">Chroma verde</option>
-                      </select>
-                    </div>
-                  )}
-                </div>
-
-                {(completeIncludeAnimPngs || completeIncludeAnimGifs) && (
-                  <div className="grid grid-cols-2 gap-2.5 p-3 bg-white/[0.015]">
-                    <label className="space-y-1">
-                      <span className="block text-[11px] text-slate-400">Taxa de quadros</span>
-                      <select
-                        disabled={Boolean(completeExportProgress)}
-                        value={completeExportFps}
-                        onChange={(e) =>
-                          setCompleteExportFps(Number(e.target.value) as 24 | 15 | 12)
-                        }
-                        className="w-full rounded-md border border-white/10 bg-[#11141C] px-2 py-1.5 text-[11px] text-slate-200 focus:border-orange-500 focus:outline-none"
-                      >
-                        <option value={24}>24 FPS (Original)</option>
-                        <option value={15}>15 FPS (Mais rápido)</option>
-                        <option value={12}>12 FPS (Ultra rápido)</option>
-                      </select>
-                    </label>
-                    <label className="space-y-1">
-                      <span className="block text-[11px] text-slate-400">Resolução máxima</span>
-                      <select
-                        disabled={Boolean(completeExportProgress)}
-                        value={completeExportMaxRes}
-                        onChange={(e) =>
-                          setCompleteExportMaxRes(Number(e.target.value) as 2048 | 1024 | 512)
-                        }
-                        className="w-full rounded-md border border-white/10 bg-[#11141C] px-2 py-1.5 text-[11px] text-slate-200 focus:border-orange-500 focus:outline-none"
-                      >
-                        <option value={2048}>Original (até 2048px)</option>
-                        <option value={1024}>Média (até 1024px)</option>
-                        <option value={512}>Compacta (até 512px)</option>
-                      </select>
-                    </label>
-                  </div>
-                )}
-
-                {mediaProfile?.passiveAura && (
-                  <label className="flex items-start gap-2.5 p-3 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      disabled={Boolean(completeExportProgress)}
-                      checked={completeIncludePassiveAura}
-                      onChange={(e) => setCompleteIncludePassiveAura(e.target.checked)}
-                      className="mt-0.5 accent-orange-500"
-                    />
-                    <div>
-                      <div className="font-medium text-slate-100">
-                        Aura passiva ({mediaProfile.passiveAura.label})
-                      </div>
-                      <div className="text-[11px] text-slate-400">
-                        Inclui o pacote de aura e compõe automaticamente no idle.
-                      </div>
-                    </div>
-                  </label>
-                )}
-
-                <label className="flex items-start gap-2.5 p-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    disabled={Boolean(completeExportProgress)}
-                    checked={completeIncludeSkillIcons}
-                    onChange={(e) => setCompleteIncludeSkillIcons(e.target.checked)}
-                    className="mt-0.5 accent-orange-500"
-                  />
-                  <div>
-                    <div className="font-medium text-slate-100">
-                      Ícones das habilidades ({skillIconCount})
-                    </div>
-                    <div className="text-[11px] text-slate-400">
-                      Ícones de skills ativas e passivas em PNG.
-                    </div>
-                  </div>
-                </label>
-
-                <label className="flex items-start gap-2.5 p-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    disabled={Boolean(completeExportProgress)}
-                    checked={completeIncludeVideosAndAudio}
-                    onChange={(e) => setCompleteIncludeVideosAndAudio(e.target.checked)}
-                    className="mt-0.5 accent-orange-500"
-                  />
-                  <div>
-                    <div className="font-medium text-slate-100">Vídeos e áudios</div>
-                    <div className="text-[11px] text-slate-400">
-                      {mediaProfile?.videos.length || 0} vídeo(s) MP4 e {mediaProfile?.voices.length || 0} voz(es)/efeitos MP3.
-                    </div>
-                  </div>
-                </label>
-
-                {ninja.kind !== 'effect' && (
-                  <label className="flex items-start gap-2.5 p-3 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      disabled={Boolean(completeExportProgress)}
-                      checked={completeIncludeArtworks}
-                      onChange={(e) => setCompleteIncludeArtworks(e.target.checked)}
-                      className="mt-0.5 accent-orange-500"
-                    />
-                    <div>
-                      <div className="font-medium text-slate-100">
-                        Artes oficiais do ninja (PNG)
-                      </div>
-                      <div className="text-[11px] text-slate-400">
-                        Arte completa, meio corpo, retratos, avatar, close-up, expressões e arte do nome em <span className="font-mono">artes/</span>.
-                      </div>
-                    </div>
-                  </label>
-                )}
-              </div>
-            </div>
-
-            {ninjaCheckpoint && !completeExportProgress && (
-              <div className="rounded-lg border border-amber-500/35 bg-amber-950/20 p-3 text-xs space-y-2">
-                <div className="flex items-center justify-between gap-2 text-amber-100">
-                  <span className="font-medium">
-                    Progresso salvo encontrado ({ninjaCheckpoint.completedAnims.length}/
-                    {ninjaCheckpoint.totalAnims} animações prontas)
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void clearExportCheckpoint(ninjaCheckpoint.jobId).then(() =>
-                        setNinjaCheckpoint(null)
-                      );
-                    }}
-                    className="text-[11px] text-amber-300/80 hover:text-amber-100 underline cursor-pointer"
-                  >
-                    Limpar
-                  </button>
-                </div>
-                <p className="text-[11px] text-amber-200/80">
-                  Ao clicar em <span className="font-semibold">Retomar ZIP</span>, o app continua exatamente da animação onde parou.
-                </p>
-              </div>
-            )}
-
-            {termuxExportResult && !completeExportProgress && (
-              <div className="rounded-lg border border-emerald-500/35 bg-emerald-950/20 p-3 text-xs space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5 font-semibold text-emerald-200">
-                    <Terminal className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
-                    <span>Script Termux baixado</span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setTermuxExportResult(null)}
-                    aria-label="Fechar aviso Termux"
-                    className="text-emerald-300/70 hover:text-white cursor-pointer"
-                  >
-                    <X className="h-3.5 w-3.5" aria-hidden="true" />
-                  </button>
-                </div>
-                <p className="text-[11px] text-emerald-100/85">
-                  Abra o Termux e rode o comando abaixo. Ele detecta automaticamente seu backup{' '}
-                  <span className="font-mono">.zip</span> em <span className="font-mono">Downloads</span>,
-                  usa todos os núcleos da CPU (não para em segundo plano) e salva{' '}
-                  <span className="font-mono text-emerald-200">{termuxExportResult.zipFilename}</span>{' '}
-                  idêntico ao navegador em <span className="font-mono">Downloads</span>:
-                </p>
-                <div className="flex items-center gap-2 rounded-md border border-white/10 bg-[#090B10] px-2.5 py-2">
-                  <code className="flex-1 overflow-x-auto font-mono text-[11px] text-emerald-300 whitespace-nowrap">
-                    {termuxExportResult.command}
-                  </code>
-                  <button
-                    type="button"
-                    onClick={handleCopyTermuxCommand}
-                    className="inline-flex shrink-0 items-center gap-1 rounded bg-emerald-600/25 px-2 py-1 text-[11px] font-medium text-emerald-200 hover:bg-emerald-600/40 cursor-pointer"
-                  >
-                    {copiedTermuxExportCmd ? (
-                      <>
-                        <Check className="h-3 w-3" aria-hidden="true" />
-                        <span>Copiado</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3 w-3" aria-hidden="true" />
-                        <span>Copiar</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {completeExportProgress && (
-              <div className="space-y-1.5 rounded-lg border border-white/[0.08] bg-[#090B10] p-3">
-                <div className="flex items-center justify-between text-xs font-mono tabular-nums">
-                  <span className="truncate text-slate-200">{completeExportProgress.message}</span>
-                  <span className="ml-2 shrink-0 text-orange-400">
-                    {completeExportProgress.percent}%
-                  </span>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.08]">
-                  <div
-                    className="h-full bg-orange-500 transition-all duration-150"
-                    style={{ width: `${completeExportProgress.percent}%` }}
-                  />
-                </div>
-                <p className="text-[11px] text-slate-400">
-                  Progresso salvo automaticamente a cada animação concluída.
-                </p>
-              </div>
-            )}
-
-            {completeExportError && (
-              <div
-                role="alert"
-                className="rounded-lg border border-red-500/30 bg-red-950/25 px-3 py-2 text-xs text-red-200"
-              >
-                {completeExportError}
-              </div>
-            )}
-
-            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-              {completeExportProgress ? (
-                <button
-                  type="button"
-                  onClick={() => completeExportAbortRef.current?.abort()}
-                  className="rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-2 text-xs font-semibold text-red-200 hover:bg-red-950/60 cursor-pointer"
-                >
-                  Cancelar
-                </button>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setShowCompleteExportModal(false)}
-                    className="rounded-lg border border-white/10 bg-[#090B10] px-3.5 py-2 text-xs font-medium text-slate-300 hover:border-white/25 cursor-pointer"
-                  >
-                    Fechar
-                  </button>
-                  <button
-                    type="button"
-                    disabled={
-                      !completeIncludeOriginals &&
-                      !completeIncludeEffects &&
-                      !completeIncludeAnimPngs &&
-                      !completeIncludeAnimGifs &&
-                      !completeIncludeVideosAndAudio &&
-                      !completeIncludeSkillIcons &&
-                      !completeIncludeArtworks
-                    }
-                    onClick={handleDownloadTermuxCharacterExport}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/40 px-3.5 py-2 text-xs font-semibold text-emerald-200 hover:border-emerald-400/70 hover:bg-emerald-900/50 disabled:opacity-40 transition-colors cursor-pointer"
-                  >
-                    <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Extrair pelo Termux (.sh)</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={
-                      !completeIncludeOriginals &&
-                      !completeIncludeEffects &&
-                      !completeIncludeAnimPngs &&
-                      !completeIncludeAnimGifs &&
-                      !completeIncludeVideosAndAudio &&
-                      !completeIncludeSkillIcons &&
-                      !completeIncludeArtworks
-                    }
-                    onClick={() => void handleRunCompleteCharacterExport(true)}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-4 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 transition-colors cursor-pointer"
-                  >
-                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>{ninjaCheckpoint ? 'Retomar ZIP' : 'Baixar ZIP'}</span>
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <StudioExportModal
+        open={showCompleteExportModal}
+        ninja={ninja}
+        mediaProfile={mediaProfile}
+        framesCount={frames.length}
+        animNamesCount={animNames.length}
+        uniqueEffectsCount={completeEffectPlan.uniqueSpineIds.length}
+        skillIconCount={skillIconCount}
+        activeExportPreset={activeExportPreset}
+        onApplyPreset={applyExportPreset}
+        showAdvanced={showAdvancedExportOptions}
+        onToggleAdvanced={() => setShowAdvancedExportOptions((v) => !v)}
+        effectScope={completeEffectScope}
+        onEffectScopeChange={setCompleteEffectScope}
+        includeOriginals={completeIncludeOriginals}
+        onIncludeOriginalsChange={setCompleteIncludeOriginals}
+        includeEffects={completeIncludeEffects}
+        onIncludeEffectsChange={setCompleteIncludeEffects}
+        includeAnimPngs={completeIncludeAnimPngs}
+        onIncludeAnimPngsChange={setCompleteIncludeAnimPngs}
+        includeAnimGifs={completeIncludeAnimGifs}
+        onIncludeAnimGifsChange={setCompleteIncludeAnimGifs}
+        gifBg={completeGifBg}
+        onGifBgChange={setCompleteGifBg}
+        exportFps={completeExportFps}
+        onExportFpsChange={setCompleteExportFps}
+        exportMaxRes={completeExportMaxRes}
+        onExportMaxResChange={setCompleteExportMaxRes}
+        includePassiveAura={completeIncludePassiveAura}
+        onIncludePassiveAuraChange={setCompleteIncludePassiveAura}
+        includeSkillIcons={completeIncludeSkillIcons}
+        onIncludeSkillIconsChange={setCompleteIncludeSkillIcons}
+        includeVideosAndAudio={completeIncludeVideosAndAudio}
+        onIncludeVideosAndAudioChange={setCompleteIncludeVideosAndAudio}
+        includeArtworks={completeIncludeArtworks}
+        onIncludeArtworksChange={setCompleteIncludeArtworks}
+        ninjaCheckpoint={ninjaCheckpoint}
+        onClearCheckpoint={() => {
+          if (!ninjaCheckpoint) return;
+          void clearExportCheckpoint(ninjaCheckpoint.jobId).then(() => setNinjaCheckpoint(null));
+        }}
+        termuxExportResult={termuxExportResult}
+        onDismissTermuxResult={() => setTermuxExportResult(null)}
+        copiedTermuxCmd={copiedTermuxExportCmd}
+        onCopyTermuxCmd={handleCopyTermuxCommand}
+        progress={completeExportProgress}
+        error={completeExportError}
+        onClose={() => setShowCompleteExportModal(false)}
+        onCancelExport={() => completeExportAbortRef.current?.abort()}
+        onRunTermuxExport={handleDownloadTermuxCharacterExport}
+        onRunBrowserExport={() => void handleRunCompleteCharacterExport(true)}
+      />
     </section>
   );
 }

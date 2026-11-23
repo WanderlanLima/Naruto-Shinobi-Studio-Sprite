@@ -345,6 +345,7 @@ export interface CompositeSpineLayer {
   duration: number;
   layer: 'behind' | 'front';
   loop: boolean;
+  isSelfOrScreen?: boolean;
 }
 
 export interface SpineSkeleton {

@@ -456,7 +456,8 @@ export function extractSpineEffectRefs(
 
     for (const ev of anim.events) {
       if (!ev.string) continue;
-      const cmdMatches = ev.string.matchAll(/\{([A-Za-z0-9_]+):([^}]+)\}/g);
+      // Support both closed {...} and malformed unclosed {DISPLAYONFIGHTER:... at end of string
+      const cmdMatches = ev.string.matchAll(/\{([A-Za-z0-9_]+):([^}]+)(?:\}|$)/g);
       for (const m of cmdMatches) {
         const cmdType = m[1];
         const body = m[2];
@@ -506,6 +507,33 @@ export function extractSpineEffectRefs(
   }
 
   return refs;
+}
+
+/**
+ * Finds the animation inside a companion particle skeleton (`_ground`, `_effect`, `_highteffect`)
+ * that corresponds to the character's current animation (never falling back to an unrelated anim).
+ */
+export function findMatchingCompanionAnimName(
+  companionSkeleton: SpineSkeleton | null | undefined,
+  animName: string,
+  effectiveAnim?: string
+): string | null {
+  if (!companionSkeleton?.animations || !animName) return null;
+  const available = Object.keys(companionSkeleton.animations);
+  if (available.length === 0) return null;
+
+  const candidates: string[] = [];
+  if (effectiveAnim) candidates.push(effectiveAnim);
+  if (!candidates.includes(animName)) candidates.push(animName);
+
+  for (const cand of candidates) {
+    const exact = available.find((a) => a === cand);
+    if (exact && hasVisibleAnimationContent(companionSkeleton, exact)) return exact;
+    const candLow = cand.trim().toLowerCase();
+    const ci = available.find((a) => a.trim().toLowerCase() === candLow);
+    if (ci && hasVisibleAnimationContent(companionSkeleton, ci)) return ci;
+  }
+  return null;
 }
 
 export function extractSpineAudioRefs(
@@ -719,6 +747,9 @@ function sampleLinear(
 ): number {
   if (!frames || frames.length === 0) return defaultVal;
   const firstTime = frames[0].time || 0;
+  if (t < firstTime - 1e-5) {
+    return defaultVal;
+  }
   if (t <= firstTime) {
     const v = frames[0][field];
     return typeof v === 'number' ? v : defaultVal;
@@ -747,6 +778,7 @@ function sampleAngle(
 ): number {
   if (!frames || frames.length === 0) return 0;
   const firstTime = frames[0].time || 0;
+  if (t < firstTime - 1e-5) return 0;
   if (t <= firstTime) return frames[0].angle || 0;
   for (let i = 0; i < frames.length - 1; i++) {
     const a = frames[i];
@@ -839,6 +871,7 @@ function sampleHexRgbaTimeline<T extends { time?: number; curve?: unknown }>(
   if (!frames || frames.length === 0) return null;
 
   const firstTime = frames[0].time || 0;
+  if (time < firstTime - 1e-5) return null;
   if (time <= firstTime) return parseHexRgba(getHex(frames[0]));
 
   for (let i = 0; i < frames.length - 1; i++) {
@@ -1328,10 +1361,145 @@ function drawSkeletonAtTime(
   return drawnSlots;
 }
 
+export interface BattlePreviewOptions {
+  enabled: boolean;
+  /** World-space X distance from ninja feet (0,0) to enemy dummy (e.g. 120..480) */
+  targetDistance: number;
+  /** Show ground line, feet anchor crosshair, and distance guide */
+  showGuides?: boolean;
+}
+
 export interface RenderSpineFrameOptions {
   fillRatio?: number;
   maxAutoFitScale?: number;
   followFramePose?: boolean;
+  battlePreview?: BattlePreviewOptions;
+}
+
+function drawBattlePreviewGuidesAndDummy(
+  ctx: CanvasRenderingContext2D,
+  targetDistance: number,
+  impactActive: boolean,
+  showGuides: boolean
+) {
+  ctx.save();
+
+  // Ground line at y = 0 (Spine world floor)
+  if (showGuides) {
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.28)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-260, 0);
+    ctx.lineTo(targetDistance + 220, 0);
+    ctx.stroke();
+
+    // Subtle distance ticks between ninja (0) and dummy (targetDistance)
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.22)';
+    ctx.lineWidth = 1;
+    const step = 60;
+    for (let x = step; x < targetDistance - 15; x += step) {
+      ctx.beginPath();
+      ctx.moveTo(x, -5);
+      ctx.lineTo(x, 5);
+      ctx.stroke();
+    }
+
+    // Trajectory guide dashed line from ninja chest to dummy chest
+    ctx.save();
+    ctx.setLineDash([6, 6]);
+    ctx.strokeStyle = impactActive ? 'rgba(249, 115, 22, 0.55)' : 'rgba(148, 163, 184, 0.2)';
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    ctx.moveTo(28, 62);
+    ctx.lineTo(targetDistance - 24, 62);
+    ctx.stroke();
+    ctx.restore();
+
+    // Ninja feet anchor crosshair at (0, 0)
+    ctx.strokeStyle = 'rgba(249, 115, 22, 0.9)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(-10, 0);
+    ctx.lineTo(10, 0);
+    ctx.moveTo(0, -10);
+    ctx.lineTo(0, 10);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(249, 115, 22, 0.22)';
+    ctx.beginPath();
+    ctx.arc(0, 0, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Enemy tactical dummy at (targetDistance, 0)
+  ctx.save();
+  ctx.translate(targetDistance, 0);
+
+  // Ground shadow
+  ctx.fillStyle = impactActive ? 'rgba(244, 63, 94, 0.35)' : 'rgba(15, 23, 42, 0.55)';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 34, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  const bodyFill = impactActive ? 'rgba(244, 63, 94, 0.28)' : 'rgba(100, 116, 139, 0.22)';
+  const bodyStroke = impactActive ? 'rgba(251, 113, 133, 0.95)' : 'rgba(148, 163, 184, 0.65)';
+
+  // Post / stand
+  ctx.fillStyle = bodyFill;
+  ctx.strokeStyle = bodyStroke;
+  ctx.lineWidth = 2;
+
+  // Base pole
+  ctx.beginPath();
+  ctx.rect(-5, 0, 10, 34);
+  ctx.fill();
+  ctx.stroke();
+
+  // Torso (training straw dummy silhouette)
+  ctx.beginPath();
+  ctx.roundRect(-20, 34, 40, 56, 8);
+  ctx.fill();
+  ctx.stroke();
+
+  // Crossbar arms
+  ctx.beginPath();
+  ctx.roundRect(-34, 72, 68, 10, 4);
+  ctx.fill();
+  ctx.stroke();
+
+  // Head
+  ctx.beginPath();
+  ctx.arc(0, 108, 17, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Bullseye target mark on chest
+  ctx.strokeStyle = impactActive ? 'rgba(253, 186, 116, 0.95)' : 'rgba(249, 115, 22, 0.72)';
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.arc(0, 62, 11, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(0, 62, 4, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Impact flash shockwave ring when hit VFX is active
+  if (impactActive) {
+    ctx.strokeStyle = 'rgba(251, 113, 133, 0.85)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(0, 62, 42, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Flip Y locally to render crisp upright label under dummy
+  ctx.scale(1, -1);
+  ctx.font = '600 12px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = impactActive ? 'rgba(253, 164, 175, 0.95)' : 'rgba(148, 163, 184, 0.85)';
+  ctx.fillText(impactActive ? 'IMPACTO' : `ALVO (${Math.round(targetDistance)}px)`, 0, 22);
+
+  ctx.restore();
+  ctx.restore();
 }
 
 export function renderSpineFrameToCanvas(
@@ -1355,23 +1523,45 @@ export function renderSpineFrameToCanvas(
 
   const fillRatio = options?.fillRatio ?? 0.86;
   const maxAutoFitScale = options?.maxAutoFitScale ?? 4.0;
+  const battlePreview = options?.battlePreview?.enabled ? options.battlePreview : null;
+  const targetDistance = battlePreview ? Math.max(80, battlePreview.targetDistance) : 0;
+
+  let effectiveBounds = autoFitBounds || null;
+  if (battlePreview && effectiveBounds) {
+    const minX = Math.min(effectiveBounds.minX, -95);
+    const maxX = Math.max(effectiveBounds.maxX, targetDistance + 95);
+    const minY = Math.min(effectiveBounds.minY, -34);
+    const maxY = Math.max(effectiveBounds.maxY, 175);
+    const width = Math.max(240, maxX - minX);
+    const height = Math.max(180, maxY - minY);
+    effectiveBounds = {
+      minX,
+      maxX,
+      minY,
+      maxY,
+      width,
+      height,
+      centerX: (minX + maxX) / 2,
+      centerY: (minY + maxY) / 2,
+    };
+  }
 
   let effectiveScale: number;
   let anchorX: number;
   let anchorY: number;
 
-  if (autoFitBounds) {
+  if (effectiveBounds) {
     const fitScale = Math.min(
-      (canvasWidth * fillRatio) / autoFitBounds.width,
-      (canvasHeight * fillRatio) / autoFitBounds.height
+      (canvasWidth * fillRatio) / effectiveBounds.width,
+      (canvasHeight * fillRatio) / effectiveBounds.height
     );
     const baseScale = Math.min(maxAutoFitScale, Math.max(0.05, fitScale));
     effectiveScale = baseScale * zoom;
 
-    let targetCenterX = autoFitBounds.centerX;
-    let targetCenterY = autoFitBounds.centerY;
+    let targetCenterX = effectiveBounds.centerX;
+    let targetCenterY = effectiveBounds.centerY;
 
-    if (options?.followFramePose && zoom > 1.0) {
+    if (options?.followFramePose && zoom > 1.0 && !battlePreview) {
       const frameAcc = {
         minX: Infinity,
         maxX: -Infinity,
@@ -1410,8 +1600,8 @@ export function renderSpineFrameToCanvas(
         const frameCx = (frameAcc.minX + frameAcc.maxX) / 2;
         const frameCy = (frameAcc.minY + frameAcc.maxY) / 2;
         const blend = Math.min(1, (zoom - 1.0) / 0.35);
-        targetCenterX = autoFitBounds.centerX + (frameCx - autoFitBounds.centerX) * blend;
-        targetCenterY = autoFitBounds.centerY + (frameCy - autoFitBounds.centerY) * blend;
+        targetCenterX = effectiveBounds.centerX + (frameCx - effectiveBounds.centerX) * blend;
+        targetCenterY = effectiveBounds.centerY + (frameCy - effectiveBounds.centerY) * blend;
       }
     }
 
@@ -1419,11 +1609,11 @@ export function renderSpineFrameToCanvas(
     anchorY = canvasHeight / 2 + targetCenterY * effectiveScale + panY;
   } else {
     const skelBounds = skeleton.skeleton || {};
-    const skelW = Math.max(80, skelBounds.width || 160);
+    const skelW = Math.max(80, (skelBounds.width || 160) + (battlePreview ? targetDistance + 120 : 0));
     const skelH = Math.max(80, skelBounds.height || 160);
     const baseScale = Math.min((canvasWidth * 0.72) / skelW, (canvasHeight * 0.72) / skelH);
     effectiveScale = Math.min(maxAutoFitScale, Math.max(0.15, baseScale)) * zoom;
-    anchorX = canvasWidth / 2 + panX;
+    anchorX = canvasWidth / 2 - (battlePreview ? (targetDistance * effectiveScale) / 2 : 0) + panX;
     anchorY = canvasHeight * 0.76 + panY;
   }
 
@@ -1434,12 +1624,35 @@ export function renderSpineFrameToCanvas(
   ctx.translate(anchorX, anchorY);
   ctx.scale(effectiveScale, -effectiveScale);
 
-  const renderLayer = (layer: CompositeSpineLayer) => {
-    if (time < layer.startTime) return;
+  const isLayerActiveAtTime = (layer: CompositeSpineLayer): boolean => {
+    if (time < layer.startTime) return false;
     const elapsed = time - layer.startTime;
-    if (!layer.loop && elapsed > layer.duration) return;
+    if (!layer.loop && elapsed > layer.duration) return false;
+    return true;
+  };
+
+  if (battlePreview) {
+    const impactActive = compositeLayers.some(
+      (layer) => layer.isSelfOrScreen === false && isLayerActiveAtTime(layer)
+    );
+    drawBattlePreviewGuidesAndDummy(
+      ctx,
+      targetDistance,
+      impactActive,
+      battlePreview.showGuides !== false
+    );
+  }
+
+  const renderLayer = (layer: CompositeSpineLayer) => {
+    if (!isLayerActiveAtTime(layer)) return;
+    const elapsed = time - layer.startTime;
     const localT =
       layer.loop && layer.duration > 0 ? elapsed % layer.duration : elapsed;
+    const shiftToTarget = Boolean(battlePreview && layer.isSelfOrScreen === false);
+    if (shiftToTarget) {
+      ctx.save();
+      ctx.translate(targetDistance, 0);
+    }
     drawnSlots += drawSkeletonAtTime(
       ctx,
       layer.skeleton,
@@ -1447,6 +1660,9 @@ export function renderSpineFrameToCanvas(
       localT,
       layer.regionCanvasMap
     );
+    if (shiftToTarget) {
+      ctx.restore();
+    }
   };
 
   for (const layer of compositeLayers) {

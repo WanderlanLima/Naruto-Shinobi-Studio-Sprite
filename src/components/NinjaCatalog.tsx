@@ -1,21 +1,41 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Check,
+  CheckSquare,
   ChevronLeft,
   ChevronRight,
   Clapperboard,
-  Download,
   Image as ImageIcon,
+  Plus,
   Search,
+  Sparkles,
+  Star,
+  Terminal,
+  X,
 } from 'lucide-react';
-import type { NinjaEntry } from '../types/sprite';
+import type { ChaseStateCode, NinjaEntry } from '../types/sprite';
 import { extractRegionToCanvas, loadImageElement, parseAtlas } from '../utils/atlasParser';
 import {
   fetchNinjaBundle,
   getNinjaThumbUrl,
+  loadStaticNinjaSkillsPack,
   resolveAssetFetchUrl,
+  resolveFallbackPassiveAura,
   resolveStaticNinjaThumbUrl,
 } from '../utils/remoteClient';
-import { useOfflineZipState } from '../utils/offlineZipStore';
+import {
+  getNinjaOfflineCoverage,
+  useOfflineZipState,
+  type NinjaOfflineCoverage,
+} from '../utils/offlineZipStore';
+import {
+  createCustomTag,
+  deleteCustomTag,
+  setBulkNinjaTag,
+  toggleNinjaFavorite,
+  useNinjaCollections,
+} from '../utils/ninjaCollectionsStore';
+import { TermuxBatchExportModal } from './TermuxBatchExportModal';
 
 interface NinjaCatalogProps {
   ninjas: NinjaEntry[];
@@ -36,8 +56,61 @@ interface NinjaCatalogProps {
   onSelectNinja: (ninja: NinjaEntry) => void;
   onOpenSourceSettings: () => void;
   sourceSettingsOpen?: boolean;
-  onOpenBatchZip: (list: NinjaEntry[]) => void;
   headerExtra?: ReactNode;
+}
+
+type ElementFilter = 'all' | 'fire' | 'lightning' | 'wind' | 'earth' | 'water';
+type ChaseFilter = 'all' | ChaseStateCode;
+type CollectionFilter = 'all' | 'favorites' | 'exported' | 'not_exported' | `tag:${string}`;
+
+interface CatalogCombatMeta {
+  elementKey: Exclude<ElementFilter, 'all'> | null;
+  elementLabel: string | null;
+  chaseStates: Set<ChaseStateCode>;
+}
+
+const ELEMENT_OPTIONS: Array<{ id: ElementFilter; label: string }> = [
+  { id: 'all', label: 'Elemento: Todos' },
+  { id: 'fire', label: 'Fogo' },
+  { id: 'lightning', label: 'Raio' },
+  { id: 'wind', label: 'Vento' },
+  { id: 'earth', label: 'Terra' },
+  { id: 'water', label: 'Água' },
+];
+
+const CHASE_OPTIONS: Array<{ id: ChaseFilter; label: string }> = [
+  { id: 'all', label: 'Perseguição: Todas' },
+  { id: 'fall', label: 'Queda' },
+  { id: 'popup', label: 'Flutuação' },
+  { id: 'launcher', label: 'Voo Alto' },
+  { id: 'back', label: 'Repulsão' },
+];
+
+function normalizeElementKey(raw?: string | null): {
+  key: Exclude<ElementFilter, 'all'>;
+  label: string;
+} | null {
+  if (!raw) return null;
+  const low = raw
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (low.includes('fogo') || low.includes('fire') || low.includes('katon') || low.includes('chama')) {
+    return { key: 'fire', label: 'Fogo' };
+  }
+  if (low.includes('raio') || low.includes('relampago') || low.includes('lightning') || low.includes('raiton') || low.includes('trovao')) {
+    return { key: 'lightning', label: 'Raio' };
+  }
+  if (low.includes('vento') || low.includes('wind') || low.includes('futon')) {
+    return { key: 'wind', label: 'Vento' };
+  }
+  if (low.includes('terra') || low.includes('earth') || low.includes('doton')) {
+    return { key: 'earth', label: 'Terra' };
+  }
+  if (low.includes('agua') || low.includes('water') || low.includes('suiton')) {
+    return { key: 'water', label: 'Água' };
+  }
+  return null;
 }
 
 const PAGE_SIZE = 36;
@@ -241,17 +314,33 @@ function NinjaThumbCanvas({
 function NinjaCard({
   ninja,
   isSelected,
+  isFavorite,
+  isExported,
+  selectionMode,
+  isChecked,
+  elementLabel,
+  coverage,
   autoThumbnails,
   offlineGen,
   onSelect,
+  onToggleFavorite,
+  onToggleChecked,
 }: {
   ninja: NinjaEntry;
   isSelected: boolean;
+  isFavorite: boolean;
+  isExported: boolean;
+  selectionMode: boolean;
+  isChecked: boolean;
+  elementLabel: string | null;
+  coverage: NinjaOfflineCoverage | null;
   autoThumbnails: boolean;
   offlineGen: number;
   onSelect: () => void;
+  onToggleFavorite: () => void;
+  onToggleChecked: () => void;
 }) {
-  const cardRef = useRef<HTMLButtonElement | null>(null);
+  const cardRef = useRef<HTMLDivElement | null>(null);
   const directThumbUrl = autoThumbnails
     ? getNinjaThumbUrl(ninja.atlasUrl, ninja.skeletonUrl)
     : null;
@@ -322,16 +411,58 @@ function NinjaCard({
   const displayName = ninja.name || ninja.id;
 
   return (
-    <button
+    <div
       ref={cardRef}
-      type="button"
-      onClick={onSelect}
-      className={`group flex flex-col overflow-hidden rounded-xl border text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 ${
-        isSelected
+      role="button"
+      tabIndex={0}
+      onClick={() => (selectionMode ? onToggleChecked() : onSelect())}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          if (selectionMode) onToggleChecked();
+          else onSelect();
+        }
+      }}
+      className={`group relative flex flex-col overflow-hidden rounded-xl border text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 ${
+        isChecked
+          ? 'border-orange-500 bg-orange-500/[0.08]'
+          : isSelected
           ? 'border-orange-500/80 bg-[#151A25]'
           : 'border-white/[0.07] bg-[#11141C] hover:border-white/20'
       }`}
     >
+      {/* Top-left selection checkbox when in batch selection mode */}
+      {selectionMode && (
+        <div
+          className={`absolute left-2 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-md border transition-colors ${
+            isChecked
+              ? 'border-orange-500 bg-orange-600 text-white'
+              : 'border-white/25 bg-[#090B10]/80 text-transparent'
+          }`}
+          aria-hidden="true"
+        >
+          <Check className="h-3.5 w-3.5" />
+        </div>
+      )}
+
+      {/* Top-right favorite star toggle */}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleFavorite();
+        }}
+        aria-label={isFavorite ? `Remover ${displayName} dos favoritos` : `Favoritar ${displayName}`}
+        aria-pressed={isFavorite}
+        className={`absolute right-1.5 top-1.5 z-20 flex h-8 w-8 items-center justify-center rounded-lg transition-colors cursor-pointer ${
+          isFavorite
+            ? 'bg-[#090B10]/75 text-amber-400 hover:bg-[#090B10]'
+            : 'bg-[#090B10]/55 text-slate-500 opacity-85 hover:text-amber-300 group-hover:opacity-100'
+        }`}
+      >
+        <Star className={`h-3.5 w-3.5 ${isFavorite ? 'fill-amber-400' : ''}`} />
+      </button>
+
       <div
         className={`sprite-checkerboard relative flex h-40 sm:h-44 w-full items-center justify-center overflow-hidden border-b border-white/[0.06] px-2.5 pt-2.5 ${
           resolvedNameArt ? 'pb-11' : 'pb-2.5'
@@ -384,7 +515,7 @@ function NinjaCard({
         <div className="flex items-center gap-1.5 text-[11px] text-slate-400 truncate tabular-nums">
           <span className="truncate font-mono text-slate-500">{ninja.id}</span>
           <span aria-hidden="true">·</span>
-          <span className="shrink-0">{KIND_LABELS[kind]}</span>
+          <span className="shrink-0">{elementLabel || KIND_LABELS[kind]}</span>
           {ninja.hasVideo && (
             <>
               <span aria-hidden="true">·</span>
@@ -392,8 +523,33 @@ function NinjaCard({
             </>
           )}
         </div>
+
+        {(isExported || coverage) && (
+          <div className="flex items-center gap-1.5 text-[10px] truncate tabular-nums pt-0.5">
+            {isExported && <span className="shrink-0 text-emerald-400">Exportado</span>}
+            {isExported && coverage && (
+              <span className="text-slate-600" aria-hidden="true">
+                ·
+              </span>
+            )}
+            {coverage && (
+              <span
+                className={`truncate ${coverage.complete ? 'text-slate-400' : 'text-amber-400'}`}
+                title={
+                  coverage.complete
+                    ? '100% presente no backup offline'
+                    : `Falta no backup offline: ${coverage.missing.join(', ')}`
+                }
+              >
+                {coverage.complete
+                  ? 'Offline 100%'
+                  : `Falta: ${coverage.missing.slice(0, 2).join(', ')}`}
+              </span>
+            )}
+          </div>
+        )}
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -415,37 +571,132 @@ export function NinjaCatalog({
   onPageChange,
   onSelectNinja,
   onOpenSourceSettings,
-  onOpenBatchZip,
   headerExtra,
 }: NinjaCatalogProps) {
   const sectionRef = useRef<HTMLElement | null>(null);
   const offlineZip = useOfflineZipState();
+  const collections = useNinjaCollections();
+
+  // Smart combat & collection filters
+  const [collectionFilter, setCollectionFilter] = useState<CollectionFilter>('all');
+  const [elementFilter, setElementFilter] = useState<ElementFilter>('all');
+  const [chaseFilter, setChaseFilter] = useState<ChaseFilter>('all');
+  const [onlyPassiveAura, setOnlyPassiveAura] = useState(false);
+
+  // Inline custom tag creation
+  const [creatingTag, setCreatingTag] = useState(false);
+  const [newTagName, setNewTagName] = useState('');
+
+  // Multi-select + Termux batch modal
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(() => new Set());
+  const [batchModalNinjas, setBatchModalNinjas] = useState<NinjaEntry[] | null>(null);
+  const [batchModalLabel, setBatchModalLabel] = useState('Seleção');
+
+  // Combat metadata index loaded once from static pack
+  const [combatIndex, setCombatIndex] = useState<Map<string, CatalogCombatMeta>>(() => new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadStaticNinjaSkillsPack().then((pack) => {
+      if (cancelled || !pack) return;
+      const map = new Map<string, CatalogCombatMeta>();
+      for (const [key, entry] of pack.ninjasLower.entries()) {
+        const elRaw =
+          entry.combatProfile?.natureLabel ||
+          entry.combatProfile?.nature ||
+          Object.values(entry.skills || {}).flatMap((s) => s.elements || [])[0] ||
+          null;
+        const normEl = normalizeElementKey(elRaw);
+        const chases = new Set<ChaseStateCode>();
+        const addStates = (arr?: ChaseStateCode[]) => {
+          if (!arr) return;
+          for (const st of arr) chases.add(st);
+        };
+        for (const sk of Object.values(entry.skills || {})) {
+          addStates(sk.chaseTriggers);
+          addStates(sk.causesChaseStates);
+        }
+        for (const p of entry.passives || []) {
+          addStates(p.chaseTriggers);
+          addStates(p.causesChaseStates);
+        }
+        for (const init of entry.combatProfile?.chaseComboSummary?.initiators || []) {
+          addStates(init.causesStates);
+        }
+        for (const ch of entry.combatProfile?.chaseComboSummary?.chasers || []) {
+          addStates(ch.requiresStates);
+          addStates(ch.causesStates);
+        }
+        map.set(key, {
+          elementKey: normEl?.key || null,
+          elementLabel: normEl?.label || null,
+          chaseStates: chases,
+        });
+      }
+      setCombatIndex(map);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   if (lastThumbOfflineGeneration !== offlineZip.generation) {
     lastThumbOfflineGeneration = offlineZip.generation;
     thumbnailCache.clear();
     inFlightRequests.clear();
   }
 
+  const favoriteSet = useMemo(() => new Set(collections.favorites), [collections.favorites]);
+
   const counts = useMemo(() => {
     let character = 0;
     let summon_skin = 0;
     let effect = 0;
     let withVideo = 0;
+    let withAura = 0;
     for (const n of ninjas) {
       const k = getSpineKind(n);
       if (k === 'character') character++;
       else if (k === 'summon_skin') summon_skin++;
       else effect++;
       if (n.hasVideo) withVideo++;
+      if (resolveFallbackPassiveAura(n)) withAura++;
     }
-    return { all: ninjas.length, character, summon_skin, effect, withVideo };
-  }, [ninjas]);
+    return {
+      all: ninjas.length,
+      character,
+      summon_skin,
+      effect,
+      withVideo,
+      withAura,
+      favorites: collections.favorites.length,
+      exported: Object.keys(collections.exported).length,
+    };
+  }, [ninjas, collections.favorites.length, collections.exported]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = ninjas.filter((n) => {
       if (kindFilter !== 'all' && getSpineKind(n) !== kindFilter) return false;
       if (onlyWithVideo && !n.hasVideo) return false;
+      if (onlyPassiveAura && !resolveFallbackPassiveAura(n)) return false;
+
+      if (collectionFilter === 'favorites' && !favoriteSet.has(n.id)) return false;
+      if (collectionFilter === 'exported' && !collections.exported[n.id]) return false;
+      if (collectionFilter === 'not_exported' && collections.exported[n.id]) return false;
+      if (collectionFilter.startsWith('tag:')) {
+        const tid = collectionFilter.slice(4);
+        const assigned = collections.assignments[n.id];
+        if (!assigned || !assigned.includes(tid)) return false;
+      }
+
+      if (elementFilter !== 'all' || chaseFilter !== 'all') {
+        const meta = combatIndex.get(n.id.toLowerCase()) || combatIndex.get(n.code.toLowerCase());
+        if (elementFilter !== 'all' && meta?.elementKey !== elementFilter) return false;
+        if (chaseFilter !== 'all' && (!meta || !meta.chaseStates.has(chaseFilter))) return false;
+      }
+
       if (
         q &&
         !n.id.toLowerCase().includes(q) &&
@@ -469,7 +720,21 @@ export function NinjaCatalog({
       list.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
     }
     return list;
-  }, [ninjas, kindFilter, onlyWithVideo, search, sortBy]);
+  }, [
+    ninjas,
+    kindFilter,
+    onlyWithVideo,
+    onlyPassiveAura,
+    collectionFilter,
+    favoriteSet,
+    collections.exported,
+    collections.assignments,
+    elementFilter,
+    chaseFilter,
+    combatIndex,
+    search,
+    sortBy,
+  ]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
@@ -478,13 +743,71 @@ export function NinjaCatalog({
     return filtered.slice(start, start + PAGE_SIZE);
   }, [filtered, safePage]);
 
-  const isFilteredSubset = filtered.length > 0 && filtered.length < ninjas.length;
+  const activeCollectionLabel = useMemo(() => {
+    if (collectionFilter === 'favorites') return 'Favoritos';
+    if (collectionFilter === 'exported') return 'Já exportados';
+    if (collectionFilter === 'not_exported') return 'Falta exportar';
+    if (collectionFilter.startsWith('tag:')) {
+      const tid = collectionFilter.slice(4);
+      return collections.tags.find((t) => t.id === tid)?.name || 'Lista';
+    }
+    return 'Filtrados';
+  }, [collectionFilter, collections.tags]);
 
   const handlePageChange = (nextPage: number, scrollTop = false) => {
     onPageChange(nextPage);
     if (scrollTop && sectionRef.current) {
       sectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
+  };
+
+  const toggleChecked = (id: string) => {
+    setCheckedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleCreateTagSubmit = () => {
+    const created = createCustomTag(newTagName);
+    if (created) {
+      setCollectionFilter(`tag:${created.id}`);
+      onPageChange(1);
+    }
+    setNewTagName('');
+    setCreatingTag(false);
+  };
+
+  const hasExtraFilters =
+    collectionFilter !== 'all' ||
+    elementFilter !== 'all' ||
+    chaseFilter !== 'all' ||
+    onlyPassiveAura;
+
+  const resetAllFilters = () => {
+    onSearchChange('');
+    onOnlyWithVideoChange(false);
+    onKindFilterChange('all');
+    setCollectionFilter('all');
+    setElementFilter('all');
+    setChaseFilter('all');
+    setOnlyPassiveAura(false);
+    onPageChange(1);
+  };
+
+  const openBatchForChecked = () => {
+    const picked = ninjas.filter((n) => checkedIds.has(n.id));
+    if (picked.length === 0) return;
+    setBatchModalLabel('Selecionados');
+    setBatchModalNinjas(picked);
+  };
+
+  const openBatchForFiltered = () => {
+    if (filtered.length === 0) return;
+    setBatchModalLabel(activeCollectionLabel);
+    setBatchModalNinjas(filtered);
   };
 
   if (isLoading && ninjas.length === 0) {
@@ -538,7 +861,7 @@ export function NinjaCatalog({
   return (
     <section ref={sectionRef} className="space-y-5">
       {/* Header Row */}
-      <div className="flex flex-col gap-4 border-b border-white/[0.07] pb-4">
+      <div className="flex flex-col gap-3.5 border-b border-white/[0.07] pb-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="font-display text-xl sm:text-2xl font-bold tracking-tight text-slate-50">
@@ -566,22 +889,40 @@ export function NinjaCatalog({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {isFilteredSubset && (
-              <button
-                type="button"
-                onClick={() => onOpenBatchZip(filtered)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#11141C] px-3 py-2 text-xs font-medium text-slate-200 hover:border-orange-500/60 hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums"
-              >
-                <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Exportar filtrados ({filtered.length})</span>
-              </button>
-            )}
             {headerExtra}
+            <button
+              type="button"
+              onClick={() => {
+                setSelectionMode((v) => {
+                  if (v) setCheckedIds(new Set());
+                  return !v;
+                });
+              }}
+              className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                selectionMode
+                  ? 'border-orange-500/70 bg-orange-500/15 text-orange-200'
+                  : 'border-white/[0.08] bg-[#11141C] text-slate-300 hover:border-white/20 hover:text-white'
+              }`}
+            >
+              <CheckSquare className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>{selectionMode ? 'Sair da seleção' : 'Selecionar'}</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={filtered.length === 0}
+              onClick={openBatchForFiltered}
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-white/[0.1] bg-[#11141C] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-orange-500/50 hover:text-white disabled:opacity-40 transition-colors cursor-pointer whitespace-nowrap tabular-nums"
+              title="Gerar 1 único script Termux para exportar os ninjas filtrados em sequência"
+            >
+              <Terminal className="h-3.5 w-3.5 text-orange-400" aria-hidden="true" />
+              <span>Lote Termux ({filtered.length})</span>
+            </button>
           </div>
         </div>
 
-        {/* Unified Filter & Search Toolbar */}
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        {/* Row 1: Category Tabs + Search + Sort */}
+        <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex w-full sm:w-fit items-center gap-1 overflow-x-auto rounded-lg border border-white/[0.08] bg-[#11141C] p-1">
               {(
@@ -610,26 +951,10 @@ export function NinjaCatalog({
                 </button>
               ))}
             </div>
-
-            {counts.withVideo > 0 && (
-              <button
-                type="button"
-                onClick={() => onOnlyWithVideoChange(!onlyWithVideo)}
-                aria-pressed={onlyWithVideo}
-                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
-                  onlyWithVideo
-                    ? 'border-cyan-500/60 bg-cyan-500/15 text-cyan-200'
-                    : 'border-white/[0.08] bg-[#11141C] text-slate-300 hover:border-white/20 hover:text-slate-100'
-                }`}
-              >
-                <Clapperboard className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Com vídeo ({counts.withVideo})</span>
-              </button>
-            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <div className="relative flex-1 min-w-[200px] sm:w-64 sm:flex-initial">
+            <div className="relative flex-1 min-w-[190px] sm:w-64 sm:flex-initial">
               <Search
                 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
                 aria-hidden="true"
@@ -659,40 +984,329 @@ export function NinjaCatalog({
             </select>
           </div>
         </div>
+
+        {/* Row 2: Collections / Favorites / Exported & Smart Combat Filters */}
+        <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
+          {/* Interactive Collection Filter Strip */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            {(
+              [
+                { id: 'all' as CollectionFilter, label: 'Todas listas' },
+                {
+                  id: 'favorites' as CollectionFilter,
+                  label: `Favoritos (${counts.favorites})`,
+                },
+                {
+                  id: 'exported' as CollectionFilter,
+                  label: `Exportados (${counts.exported})`,
+                },
+                {
+                  id: 'not_exported' as CollectionFilter,
+                  label: 'Falta exportar',
+                },
+              ] as const
+            ).map((btn) => (
+              <button
+                key={btn.id}
+                type="button"
+                onClick={() => {
+                  setCollectionFilter(btn.id);
+                  onPageChange(1);
+                }}
+                aria-pressed={collectionFilter === btn.id}
+                className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors cursor-pointer whitespace-nowrap tabular-nums ${
+                  collectionFilter === btn.id
+                    ? 'border-orange-500/60 bg-orange-500/15 text-orange-200'
+                    : 'border-white/[0.07] bg-[#0E1118] text-slate-400 hover:border-white/20 hover:text-slate-200'
+                }`}
+              >
+                {btn.label}
+              </button>
+            ))}
+
+            {collections.tags.map((tag) => {
+              const filterId: CollectionFilter = `tag:${tag.id}`;
+              const tagCount = Object.values(collections.assignments).filter((list) =>
+                list.includes(tag.id)
+              ).length;
+              const active = collectionFilter === filterId;
+              return (
+                <div key={tag.id} className="inline-flex items-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCollectionFilter(active ? 'all' : filterId);
+                      onPageChange(1);
+                    }}
+                    aria-pressed={active}
+                    className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors cursor-pointer whitespace-nowrap tabular-nums ${
+                      active
+                        ? 'border-orange-500/60 bg-orange-500/15 text-orange-200'
+                        : 'border-white/[0.07] bg-[#0E1118] text-slate-400 hover:border-white/20 hover:text-slate-200'
+                    }`}
+                  >
+                    {tag.name} {tagCount > 0 ? `(${tagCount})` : ''}
+                  </button>
+                  {!tag.builtIn && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (active) setCollectionFilter('all');
+                        deleteCustomTag(tag.id);
+                      }}
+                      aria-label={`Excluir lista ${tag.name}`}
+                      className="ml-0.5 rounded p-1 text-slate-500 hover:text-rose-400 cursor-pointer"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+
+            {creatingTag ? (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleCreateTagSubmit();
+                }}
+                className="inline-flex items-center gap-1"
+              >
+                <input
+                  type="text"
+                  value={newTagName}
+                  onChange={(e) => setNewTagName(e.target.value)}
+                  placeholder="Nome da lista..."
+                  autoFocus
+                  maxLength={28}
+                  className="w-32 rounded-lg border border-orange-500/50 bg-[#0C0F16] px-2.5 py-1 text-xs text-slate-100 focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  className="rounded-lg bg-orange-600 px-2 py-1 text-xs font-medium text-white hover:bg-orange-500 cursor-pointer"
+                >
+                  Criar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreatingTag(false);
+                    setNewTagName('');
+                  }}
+                  className="rounded-lg px-1.5 py-1 text-xs text-slate-400 hover:text-slate-200 cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </form>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setCreatingTag(true)}
+                className="inline-flex items-center gap-1 rounded-lg border border-dashed border-white/15 px-2.5 py-1.5 text-xs text-slate-400 hover:border-white/30 hover:text-slate-200 cursor-pointer whitespace-nowrap"
+              >
+                <Plus className="h-3 w-3" />
+                <span>Nova lista</span>
+              </button>
+            )}
+          </div>
+
+          {/* Smart Combat Filters (Element, Chase, Aura, Video) */}
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={elementFilter}
+              onChange={(e) => {
+                setElementFilter(e.target.value as ElementFilter);
+                onPageChange(1);
+              }}
+              aria-label="Filtrar por elemento"
+              className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium focus:border-orange-500 focus:outline-none cursor-pointer ${
+                elementFilter !== 'all'
+                  ? 'border-orange-500/60 bg-orange-500/15 text-orange-200'
+                  : 'border-white/[0.08] bg-[#11141C] text-slate-300'
+              }`}
+            >
+              {ELEMENT_OPTIONS.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={chaseFilter}
+              onChange={(e) => {
+                setChaseFilter(e.target.value as ChaseFilter);
+                onPageChange(1);
+              }}
+              aria-label="Filtrar por tipo de perseguição"
+              className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium focus:border-orange-500 focus:outline-none cursor-pointer ${
+                chaseFilter !== 'all'
+                  ? 'border-orange-500/60 bg-orange-500/15 text-orange-200'
+                  : 'border-white/[0.08] bg-[#11141C] text-slate-300'
+              }`}
+            >
+              {CHASE_OPTIONS.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+
+            {counts.withAura > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setOnlyPassiveAura((v) => !v);
+                  onPageChange(1);
+                }}
+                aria-pressed={onlyPassiveAura}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer tabular-nums ${
+                  onlyPassiveAura
+                    ? 'border-amber-500/60 bg-amber-500/15 text-amber-200'
+                    : 'border-white/[0.08] bg-[#11141C] text-slate-300 hover:border-white/20'
+                }`}
+              >
+                <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Com aura ({counts.withAura})</span>
+              </button>
+            )}
+
+            {counts.withVideo > 0 && (
+              <button
+                type="button"
+                onClick={() => onOnlyWithVideoChange(!onlyWithVideo)}
+                aria-pressed={onlyWithVideo}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer tabular-nums ${
+                  onlyWithVideo
+                    ? 'border-cyan-500/60 bg-cyan-500/15 text-cyan-200'
+                    : 'border-white/[0.08] bg-[#11141C] text-slate-300 hover:border-white/20'
+                }`}
+              >
+                <Clapperboard className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Com vídeo ({counts.withVideo})</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Batch Selection Action Bar */}
+        {selectionMode && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-orange-500/35 bg-orange-500/[0.07] px-3.5 py-2.5 text-xs">
+            <div className="flex flex-wrap items-center gap-2 tabular-nums">
+              <span className="font-semibold text-orange-200">
+                {checkedIds.size} selecionado(s)
+              </span>
+              <span className="text-slate-500" aria-hidden="true">
+                ·
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setCheckedIds((prev) => {
+                    const next = new Set(prev);
+                    for (const item of pageItems) next.add(item.id);
+                    return next;
+                  });
+                }}
+                className="text-slate-300 underline-offset-2 hover:text-white hover:underline cursor-pointer"
+              >
+                Marcar página ({pageItems.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setCheckedIds(new Set(filtered.map((n) => n.id)))}
+                className="text-slate-300 underline-offset-2 hover:text-white hover:underline cursor-pointer"
+              >
+                Marcar filtrados ({filtered.length})
+              </button>
+              {checkedIds.size > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setCheckedIds(new Set())}
+                  className="text-slate-400 hover:text-slate-200 cursor-pointer"
+                >
+                  Limpar
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {checkedIds.size > 0 && (
+                <select
+                  defaultValue=""
+                  onChange={(e) => {
+                    const tid = e.target.value;
+                    if (!tid) return;
+                    setBulkNinjaTag(Array.from(checkedIds), tid, true);
+                    e.target.value = '';
+                  }}
+                  aria-label="Adicionar selecionados a uma lista"
+                  className="rounded-lg border border-white/15 bg-[#0C0F16] px-2.5 py-1.5 text-xs text-slate-200 cursor-pointer"
+                >
+                  <option value="">+ Adicionar à lista...</option>
+                  {collections.tags.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              <button
+                type="button"
+                disabled={checkedIds.size === 0}
+                onClick={openBatchForChecked}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-40 cursor-pointer"
+              >
+                <Terminal className="h-3.5 w-3.5" />
+                <span>Exportar via Termux ({checkedIds.size})</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Grid */}
       {pageItems.length === 0 ? (
         <div className="rounded-xl border border-white/[0.07] bg-[#11141C] p-10 text-center space-y-3">
           <p className="text-sm text-slate-400">
-            Nenhum item encontrado para "{search}".
+            Nenhum personagem corresponde aos filtros ativos{search ? ` para "${search}"` : ''}.
           </p>
-          {(search || onlyWithVideo || kindFilter !== 'all') && (
+          {(search || onlyWithVideo || kindFilter !== 'all' || hasExtraFilters) && (
             <button
               type="button"
-              onClick={() => {
-                onSearchChange('');
-                onOnlyWithVideoChange(false);
-                onKindFilterChange('all');
-              }}
+              onClick={resetAllFilters}
               className="rounded-lg border border-white/10 px-3.5 py-1.5 text-xs font-medium text-slate-200 hover:border-white/25 cursor-pointer"
             >
-              Limpar filtros
+              Limpar todos os filtros
             </button>
           )}
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-          {pageItems.map((ninja) => (
-            <NinjaCard
-              key={`${offlineZip.generation}:${ninja.id}`}
-              ninja={ninja}
-              isSelected={ninja.id === selectedNinjaId}
-              autoThumbnails={autoThumbnails}
-              offlineGen={offlineZip.generation}
-              onSelect={() => onSelectNinja(ninja)}
-            />
-          ))}
+          {pageItems.map((ninja) => {
+            const combatMeta =
+              combatIndex.get(ninja.id.toLowerCase()) || combatIndex.get(ninja.code.toLowerCase());
+            const coverage = offlineZip.active ? getNinjaOfflineCoverage(ninja) : null;
+            return (
+              <NinjaCard
+                key={`${offlineZip.generation}:${ninja.id}`}
+                ninja={ninja}
+                isSelected={ninja.id === selectedNinjaId}
+                isFavorite={favoriteSet.has(ninja.id)}
+                isExported={Boolean(collections.exported[ninja.id])}
+                selectionMode={selectionMode}
+                isChecked={checkedIds.has(ninja.id)}
+                elementLabel={combatMeta?.elementLabel || null}
+                coverage={coverage}
+                autoThumbnails={autoThumbnails}
+                offlineGen={offlineZip.generation}
+                onSelect={() => onSelectNinja(ninja)}
+                onToggleFavorite={() => toggleNinjaFavorite(ninja.id)}
+                onToggleChecked={() => toggleChecked(ninja.id)}
+              />
+            );
+          })}
         </div>
       )}
 
@@ -724,6 +1338,14 @@ export function NinjaCatalog({
           </div>
         </div>
       )}
+
+      {/* Batch Termux Export Modal */}
+      <TermuxBatchExportModal
+        open={Boolean(batchModalNinjas && batchModalNinjas.length > 0)}
+        ninjas={batchModalNinjas || []}
+        sourceLabel={batchModalLabel}
+        onClose={() => setBatchModalNinjas(null)}
+      />
     </section>
   );
 }
