@@ -110,9 +110,20 @@ export function buildAnimationEventsTimelineMs(
   return { hits, particles, sounds, videos };
 }
 
+export interface FrameEmitterPoint {
+  frame: number;
+  timeMs: number;
+  /** Pixel X relative to feet pivot (+X right) */
+  x: number;
+  /** Pixel Y relative to feet pivot (-Y up, +Y down) */
+  y: number;
+  bone: string;
+  source: 'bone' | 'overlay' | 'bounds';
+}
+
 /**
  * Generates a standard Phaser 3 / TexturePacker JSON Hash + Godot/Unity compatible
- * spritesheet metadata file (`<anim>_spritesheet.json`).
+ * spritesheet metadata file (`<anim>_spritesheet.json` or `<anim>.json`).
  */
 export function buildGameEngineSpritesheetJson(params: {
   characterId: string;
@@ -128,6 +139,8 @@ export function buildGameEngineSpritesheetJson(params: {
   durationSec: number;
   anchor: GameEngineAnchorMetrics;
   events: AnimationEventsTimelineMs;
+  emitterPoints?: FrameEmitterPoint[];
+  emitterBone?: string | null;
 }): string {
   const sheetW = params.cols * params.cellW;
   const sheetH = params.rows * params.cellH;
@@ -175,7 +188,7 @@ export function buildGameEngineSpritesheetJson(params: {
     {
       frames,
       animations: {
-        [params.animName]: frameOrder,
+        [params.safeAnimName]: frameOrder,
       },
       meta: {
         app: 'Shinobi Sprite Studio',
@@ -185,7 +198,9 @@ export function buildGameEngineSpritesheetJson(params: {
         scale: '1',
         characterId: params.characterId,
         animation: params.animName,
+        slug: params.safeAnimName,
         fps: params.fps,
+        frameDurationMs,
         durationMs: Math.round(params.durationSec * 1000),
         frameCount: params.frameCount,
         grid: {
@@ -203,9 +218,127 @@ export function buildGameEngineSpritesheetJson(params: {
           note: 'Coordenadas dos pes do ninja (origem Spine 0,0) na celula para alinhamento no chao em Phaser, Godot e Unity.',
         },
         eventsMs: params.events,
+        ...(params.emitterPoints && params.emitterPoints.length > 0
+          ? {
+              emitterBone: params.emitterBone || params.emitterPoints[0]?.bone || undefined,
+              emitterNote:
+                'Posicao por frame da mao/arma/ponto de disparo em pixels relativos ao pivo dos pes (+x direita, -y acima dos pes).',
+              emitterPoints: params.emitterPoints,
+            }
+          : {}),
       },
     },
     null,
     2
   );
 }
+
+export interface MultiAtlasPageSpec {
+  imageFilename: string;
+  width: number;
+  height: number;
+  cols: number;
+  rows: number;
+  frameIndices: number[];
+}
+
+/**
+ * Generates a Phaser 3 MultiAtlas JSON (`this.load.multiatlas`) when a 1:1 spritesheet
+ * is split across multiple <= 2048x2048 PNG pages.
+ */
+export function buildPhaserMultiAtlasJson(params: {
+  characterId: string;
+  animName: string;
+  safeAnimName: string;
+  pages: MultiAtlasPageSpec[];
+  frameCount: number;
+  cellW: number;
+  cellH: number;
+  fps: number;
+  durationSec: number;
+  anchor: GameEngineAnchorMetrics;
+  events: AnimationEventsTimelineMs;
+  emitterPoints?: FrameEmitterPoint[];
+  emitterBone?: string | null;
+}): string {
+  const frameDurationMs =
+    params.frameCount > 0 && params.durationSec > 0
+      ? Math.round((params.durationSec * 1000) / params.frameCount)
+      : Math.round(1000 / Math.max(1, params.fps));
+
+  const frameOrder: string[] = [];
+  for (let f = 0; f < params.frameCount; f++) {
+    frameOrder.push(`${params.safeAnimName}_${String(f).padStart(3, '0')}.png`);
+  }
+
+  const textures = params.pages.map((page) => ({
+    image: page.imageFilename,
+    format: 'RGBA8888',
+    size: { w: page.width, h: page.height },
+    scale: 1,
+    frames: page.frameIndices.map((globalFrameIdx, localIdx) => {
+      const col = localIdx % page.cols;
+      const row = Math.floor(localIdx / page.cols);
+      return {
+        filename: `${params.safeAnimName}_${String(globalFrameIdx).padStart(3, '0')}.png`,
+        rotated: false,
+        trimmed: false,
+        sourceSize: { w: params.cellW, h: params.cellH },
+        spriteSourceSize: { x: 0, y: 0, w: params.cellW, h: params.cellH },
+        frame: {
+          x: col * params.cellW,
+          y: row * params.cellH,
+          w: params.cellW,
+          h: params.cellH,
+        },
+        pivot: { x: params.anchor.anchorX, y: params.anchor.anchorY },
+        duration: frameDurationMs,
+      };
+    }),
+  }));
+
+  return JSON.stringify(
+    {
+      textures,
+      animations: {
+        [params.safeAnimName]: frameOrder,
+      },
+      meta: {
+        app: 'Shinobi Sprite Studio',
+        format: 'RGBA8888',
+        multiatlas: true,
+        images: params.pages.map((p) => p.imageFilename),
+        scale: '1',
+        characterId: params.characterId,
+        animation: params.animName,
+        slug: params.safeAnimName,
+        fps: params.fps,
+        frameDurationMs,
+        durationMs: Math.round(params.durationSec * 1000),
+        frameCount: params.frameCount,
+        cellWidth: params.cellW,
+        cellHeight: params.cellH,
+        anchor: {
+          x: params.anchor.anchorX,
+          y: params.anchor.anchorY,
+          yBottomLeft: params.anchor.anchorYBottom,
+          pivotPxX: params.anchor.pivotPxX,
+          pivotPxY: params.anchor.pivotPxY,
+          note: 'Coordenadas dos pes do ninja (origem Spine 0,0) na celula para alinhamento no chao em Phaser, Godot e Unity.',
+        },
+        eventsMs: params.events,
+        ...(params.emitterPoints && params.emitterPoints.length > 0
+          ? {
+              emitterBone: params.emitterBone || params.emitterPoints[0]?.bone || undefined,
+              emitterNote:
+                'Posicao por frame da mao/arma/ponto de disparo em pixels relativos ao pivo dos pes (+x direita, -y acima dos pes).',
+              emitterPoints: params.emitterPoints,
+            }
+          : {}),
+      },
+    },
+    null,
+    2
+  );
+}
+

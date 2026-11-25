@@ -1,6 +1,6 @@
 import { Archive, Download, Film, Grid } from 'lucide-react';
 
-export type WorkspaceTab = 'ninjas' | 'studio' | 'backup';
+export type WorkspaceTab = 'ninjas' | 'studio' | 'game_export' | 'backup';
 export type TopBarActionIcon = 'export' | 'studio' | 'backup' | 'catalog';
 
 interface TopBarProps {
@@ -15,6 +15,7 @@ interface TopBarProps {
 const NAV_ITEMS: Array<{ id: WorkspaceTab; label: string }> = [
   { id: 'ninjas', label: 'Catálogo' },
   { id: 'studio', label: 'Estúdio' },
+  { id: 'game_export', label: 'Para o jogo' },
   { id: 'backup', label: 'Backup' },
 ];
 

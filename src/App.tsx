@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Archive, ArrowRight, ChevronDown, Globe, HardDrive, SlidersHorizontal, WifiOff, X } from 'lucide-react';
+import { GameExportView } from './components/GameExportView';
 import { NinjaCatalog } from './components/NinjaCatalog';
 import { OfflineBackupView } from './components/OfflineBackupView';
 import { OfflineIndicator, PWAInstallAction } from './components/PWAInstallBanner';
@@ -410,7 +411,7 @@ export default function App() {
           disabled: !studioExportPayload?.frames.length,
           onClick: () => setStudioCompleteExportSignal((v) => v + 1),
         }
-      : activeTab === 'backup'
+      : activeTab === 'backup' || activeTab === 'game_export'
       ? {
           label: 'Ir ao catálogo',
           icon: 'catalog',
@@ -841,6 +842,13 @@ export default function App() {
             openCompleteExportSignal={studioCompleteExportSignal}
             onBackToCatalog={handleBackToCatalog}
             onLoadedFramesChange={handleLoadedFramesChange}
+          />
+        )}
+
+        {activeTab === 'game_export' && (
+          <GameExportView
+            ninjas={activeCatalog?.ninjas || []}
+            isOfflineMode={isOfflineMode}
           />
         )}
 

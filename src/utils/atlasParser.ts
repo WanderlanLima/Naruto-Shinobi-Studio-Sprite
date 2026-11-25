@@ -2448,4 +2448,154 @@ export async function sliceImageUrlToZip(
   return entries.length;
 }
 
+export interface SampledEmitterPoint {
+  /** Pixel X offset relative to character feet pivot (Phaser screen space: +X right) */
+  x: number;
+  /** Pixel Y offset relative to character feet pivot (Phaser screen space: -Y up, +Y down) */
+  y: number;
+  /** Name of the detected bone or fallback source label */
+  bone: string;
+  /** How the point was determined */
+  source: 'bone' | 'overlay' | 'bounds';
+}
+
+function scoreAttackEmitterBoneName(name: string): number {
+  const low = name.trim().toLowerCase();
+  if (!low || low === 'root' || low === 'no_corpo' || /^l\d+$/.test(low) || low === 'di') {
+    return 0;
+  }
+  if (/(weapon|wuqi|guadian|muzzle|emit|shoot|firepoint|sword|jian|dao|blade|kunai|staff|bow|shuriken|fan|spear|gun)/i.test(low)) {
+    return 100;
+  }
+  if (/(r_?hand|hand_?r|right_?hand|youshou|front_?hand|hand_?f)/i.test(low)) {
+    return 90;
+  }
+  if (/(hand|shou|fist|quan|palm|claw|arm_?r|r_?arm|right_?arm)/i.test(low)) {
+    return 78;
+  }
+  if (/(atk|attack|hitpoint|cast|point|eff)/i.test(low)) {
+    return 56;
+  }
+  return 0;
+}
+
+/**
+ * Finds the best candidate hand/weapon/emitter bone on a Spine skeleton for spawning projectiles.
+ * Returns null for frame-baked skeletons (e.g. `vdfno_*` with only root/no_corpo/L0..Ln).
+ */
+export function detectAttackEmitterBoneName(
+  skeleton: SpineSkeleton | null | undefined
+): string | null {
+  if (!skeleton?.bones?.length) return null;
+  let bestName: string | null = null;
+  let bestScore = 0;
+  for (const b of skeleton.bones) {
+    const score = scoreAttackEmitterBoneName(b.name);
+    if (score > bestScore) {
+      bestScore = score;
+      bestName = b.name;
+    }
+  }
+  return bestName;
+}
+
+/**
+ * Samples the world-space projectile/strike origin at a given animation time and converts it
+ * to Phaser pixel coordinates relative to the character's feet pivot (0, 0).
+ */
+export function sampleAttackEmitterPointAtTime(
+  skeleton: SpineSkeleton,
+  animName: string,
+  time: number,
+  regionCanvasMap: Map<string, SpriteRegionSource>,
+  worldToPixelScale = 1,
+  facing: 'right' | 'left' = 'right',
+  preferredBoneName?: string | null
+): SampledEmitterPoint {
+  const anim = skeleton.animations?.[animName];
+  const boneMap = buildBoneMap(skeleton);
+  const getWorldMatrix = createWorldMatrixResolver(boneMap, anim, time);
+  const scale = Number.isFinite(worldToPixelScale) && worldToPixelScale > 0 ? worldToPixelScale : 1;
+
+  const boneName =
+    preferredBoneName !== undefined ? preferredBoneName : detectAttackEmitterBoneName(skeleton);
+
+  if (boneName && boneMap.has(boneName)) {
+    const wm = getWorldMatrix(boneName);
+    if (Number.isFinite(wm.tx) && Number.isFinite(wm.ty)) {
+      return {
+        x: Math.round(wm.tx * scale),
+        y: Math.round(-wm.ty * scale),
+        bone: boneName,
+        source: 'bone',
+      };
+    }
+  }
+
+  // Fallback 1: check active foreground/weapon overlay slots (e.g. L1..L10 on frame-baked vdfno_* skeletons)
+  const slotsDef = skeleton.slots || [];
+  const skinAttachments = getDefaultSkinAttachments(skeleton);
+  let bestOverlay: { wx: number; wy: number; slotName: string; reach: number } | null = null;
+  for (const slot of slotsDef) {
+    if (!/^l[1-9]\d*$/i.test(slot.bone) && !/(eff|atk|weapon|wuqi|hand|shou)/i.test(slot.name)) {
+      continue;
+    }
+    const attachmentName = resolveSlotAttachmentAtTime(slot.name, slot.attachment, anim, time);
+    if (!attachmentName) continue;
+    if (sampleSlotAlpha(slot, anim, time) <= 0.05) continue;
+    const attInfo = skinAttachments[slot.name]?.[attachmentName];
+    const regionKey = attInfo?.path || attInfo?.name || attachmentName;
+    if (!regionCanvasMap.has(regionKey)) continue;
+    const wm = getWorldMatrix(slot.bone);
+    const wx = wm.a * (attInfo?.x || 0) + wm.c * (attInfo?.y || 0) + wm.tx;
+    const wy = wm.b * (attInfo?.x || 0) + wm.d * (attInfo?.y || 0) + wm.ty;
+    if (!Number.isFinite(wx) || !Number.isFinite(wy)) continue;
+    const reach = facing === 'left' ? -wx : wx;
+    if (!bestOverlay || reach > bestOverlay.reach) {
+      bestOverlay = { wx, wy, slotName: slot.bone || slot.name, reach };
+    }
+  }
+  if (bestOverlay) {
+    return {
+      x: Math.round(bestOverlay.wx * scale),
+      y: Math.round(-bestOverlay.wy * scale),
+      bone: bestOverlay.slotName,
+      source: 'overlay',
+    };
+  }
+
+  // Fallback 2: forward strike edge of visible frame bounds at chest/hand height (~60%)
+  const frameAcc = {
+    minX: Infinity,
+    maxX: -Infinity,
+    minY: Infinity,
+    maxY: -Infinity,
+  };
+  accumulateSkeletonBoundsAtTime(skeleton, animName, regionCanvasMap, time, frameAcc, {
+    maxSlotSpan: 2400,
+  });
+  if (Number.isFinite(frameAcc.minX) && Number.isFinite(frameAcc.minY)) {
+    const spanX = frameAcc.maxX - frameAcc.minX;
+    const spanY = frameAcc.maxY - frameAcc.minY;
+    const wx =
+      facing === 'left'
+        ? frameAcc.minX + spanX * 0.12
+        : frameAcc.maxX - spanX * 0.12;
+    const wy = frameAcc.minY + spanY * 0.6;
+    return {
+      x: Math.round(wx * scale),
+      y: Math.round(-wy * scale),
+      bone: 'bounds_strike_edge',
+      source: 'bounds',
+    };
+  }
+
+  return {
+    x: facing === 'left' ? -36 : 36,
+    y: -64,
+    bone: 'default_chest',
+    source: 'bounds',
+  };
+}
+
 

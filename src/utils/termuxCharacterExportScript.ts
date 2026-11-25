@@ -1136,9 +1136,7 @@ export function buildTermuxCharacterExportScript(params: TermuxCharacterExportPa
     '            blended = Image.alpha_composite(dst_roi, src_img)',
     '        canvas_img.paste(blended, (x0, y0))',
     '',
-    'def render_spine_frame_pil(cw: int, ch: int, skeleton, anim_name: str, t: float, region_imgs, bounds, layers) -> Image.Image:',
-    '    fill_ratio = 0.86',
-    '    max_scale = 4.0',
+    'def render_spine_frame_pil(cw: int, ch: int, skeleton, anim_name: str, t: float, region_imgs, bounds, layers, fill_ratio: float = 0.86, max_scale: float = 4.0) -> Image.Image:',
     '    fit_scale = min((cw * fill_ratio) / bounds["width"], (ch * fill_ratio) / bounds["height"])',
     '    eff_scale = min(max_scale, max(0.05, fit_scale))',
     '    anchor_x = cw / 2.0 - bounds["centerX"] * eff_scale',
@@ -2308,4 +2306,46 @@ export function downloadTermuxCharacterExportScript(params: TermuxCharacterExpor
     zipFilename,
     command: buildTermuxCharacterRunCommand(scriptFilename),
   };
+}
+
+/**
+ * Extracts the reusable Python Spine parser/renderer + offline ZIP asset index core
+ * (everything before `export_single_character`) so the Phaser 3 Game Exporter reuses
+ * the exact same engine with zero duplication.
+ */
+export function extractSharedTermuxSpinePythonCore(): string {
+  const dummy = buildTermuxCharacterExportScript({
+    ninja: {
+      id: 'template',
+      code: '0',
+      name: 'template',
+      width: 160,
+      height: 160,
+      offsetX: 0,
+      offsetY: 0,
+      atlasUrl: 'https://naruto.jotagame.com/acervo/asset/spine/template.atlas',
+      skeletonUrl: 'https://naruto.jotagame.com/acervo/asset/spine/template.json',
+    },
+    skeleton: null,
+    mediaProfile: null,
+    effectScope: 'all',
+    includeOriginalAndFrames: false,
+    includeLinkedEffects: true,
+    includeAnimPngsAndSheets: true,
+    includeAnimGifs: false,
+    includePassiveAura: false,
+    includeVideosAndAudio: true,
+    includeSkillIcons: false,
+    includeCharacterArtworks: false,
+    gifBg: 'transparent',
+    fps: 24,
+    maxResolution: 2048,
+  });
+
+  const pyStart = "python3 - \"${1:-}\" << 'SHINOBI_PY_EOF'\n";
+  const cutMarker = '\ndef export_single_character(';
+  const sIdx = dummy.scriptText.indexOf(pyStart);
+  const eIdx = dummy.scriptText.indexOf(cutMarker, sIdx);
+  if (sIdx < 0 || eIdx < 0) return '';
+  return dummy.scriptText.slice(sIdx + pyStart.length, eIdx);
 }
