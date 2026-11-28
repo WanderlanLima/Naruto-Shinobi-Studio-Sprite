@@ -70,6 +70,7 @@ import { audioCuePlayer } from '../utils/audioCuePlayer';
 import {
   buildCharacterCombatJson,
   buildCharacterInstructionsJson,
+  buildExportDocumentationMarkdown,
   collectCharacterEffectPlan,
   collectCharacterSkillIconFiles,
   exportCompleteCharacterZip,
@@ -2285,6 +2286,22 @@ export function StudioStage({
     try {
       const extraFiles: Array<{ path: string; data: Uint8Array | string }> = [];
       if (skeleton) {
+        const regionSizes = new Map<string, { width: number; height: number }>();
+        if (atlasText) {
+          for (const page of parseAtlas(atlasText)) {
+            for (const reg of page.regions) {
+              regionSizes.set(reg.name, {
+                width: reg.origWidth || reg.width,
+                height: reg.origHeight || reg.height,
+              });
+            }
+          }
+        }
+        if (regionSizes.size === 0) {
+          for (const f of frames) {
+            regionSizes.set(f.name, { width: f.width, height: f.height });
+          }
+        }
         extraFiles.push({
           path: 'animacoes_instrucoes.json',
           data: buildCharacterInstructionsJson(
@@ -2293,7 +2310,8 @@ export function StudioStage({
             'all',
             undefined,
             undefined,
-            mediaProfile
+            mediaProfile,
+            { regionSizes }
           ),
         });
       }
@@ -2318,6 +2336,10 @@ export function StudioStage({
           extraFiles.push({ path: ic.path, data: bytes });
         }
       }
+      extraFiles.push({
+        path: 'DOCUMENTACAO_EXPORTACAO.md',
+        data: buildExportDocumentationMarkdown('complete'),
+      });
       await exportFramesAsZip(`${ninja.id}_todos_frames.zip`, frames, {
         atlasText,
         atlasName: `${ninja.id}.atlas`,

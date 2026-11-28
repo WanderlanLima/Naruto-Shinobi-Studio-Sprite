@@ -3,6 +3,7 @@ import type {
   NinjaBaseStats,
   NinjaChaseComboLink,
   NinjaCombatProfile,
+  NinjaMediaProfile,
   NinjaPassiveInfo,
   NinjaSkillInfo,
   SkillTargetType,
@@ -97,6 +98,7 @@ export function normalizeChaseFlag(flag: unknown): ChaseStateCode | null {
   return null;
 }
 
+
 function detectChaseStateFromTerm(termRaw: string): ChaseStateCode | null {
   const t = termRaw
     .trim()
@@ -104,11 +106,17 @@ function detectChaseStateFromTerm(termRaw: string): ChaseStateCode | null {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
 
+  if (/\bnao\b|\bimune\b/.test(t)) return null;
+
   if (
     t === 'derrubar' ||
     t === 'derrubado' ||
+    t === 'derrubados' ||
     t === 'queda' ||
     t === 'caido' ||
+    t === 'derrota' ||
+    t === 'fall' ||
+    t === 'knockdown' ||
     t.includes('derrub')
   ) {
     return 'fall';
@@ -117,6 +125,8 @@ function detectChaseStateFromTerm(termRaw: string): ChaseStateCode | null {
     t === 'flutuacao baixa' ||
     t === 'flutuacao pequena' ||
     t === 'flutuacao menor' ||
+    t === 'flutuacao' ||
+    t === 'popup' ||
     t.includes('flutuacao baixa') ||
     t.includes('flutuacao pequena') ||
     t.includes('flutuacao menor')
@@ -126,6 +136,8 @@ function detectChaseStateFromTerm(termRaw: string): ChaseStateCode | null {
   if (
     t === 'flutuacao alta' ||
     t === 'grande flutuacao' ||
+    t === 'da fu kong' ||
+    t === 'launcher' ||
     t.includes('flutuacao alta') ||
     t.includes('grande flutuacao')
   ) {
@@ -134,21 +146,42 @@ function detectChaseStateFromTerm(termRaw: string): ChaseStateCode | null {
   if (
     t === 'empurrao' ||
     t === 'empurrado' ||
+    t === 'empurrar' ||
     t === 'repelir' ||
     t === 'repelido' ||
     t === 'repelimento' ||
     t === 'repulsao' ||
+    t === 'recuar' ||
+    t === 'recuo' ||
+    t === 'back' ||
+    t === 'knockback' ||
     t.includes('empurr') ||
-    t.includes('repel')
+    t.includes('repel') ||
+    t.includes('recu')
   ) {
     return 'back';
   }
   return null;
 }
 
+function stripChaseTriggerAndNegationClauses(plain: string): string {
+  // Remove parenthetical explanatory tooltips like "(não pode repelir, dura 2 rodadas)"
+  let cleaned = plain.replace(/\([^)]{0,120}\)/g, ' ');
+  // Remove leading chase trigger clauses like "Persegue inimigos repelidos," / "Persegue alvos (Repelimento):" / "persegue após [Flutuação Pequena],"
+  cleaned = cleaned.replace(
+    /\b(?:persegue|segue)\s+(?:ap[oó]s\s+(?:\[[^\]]+\]|[^,;:.]{2,40})|(?:os?\s+)?(?:inimigos?|alvos?|unidades?)\s+(?:em\s+|com\s+|sob\s+)?(?:derrubad[oa]s?|ca[ií]d[oa]s?|repelid[oa]s?|empurrad[oa]s?|arremessad[oa]s?\s+(?:ao|para\s+o)\s+alto|em\s+flutua[çc][ãa]o[^,;:.]*|\[[^\]]+\]))[,;:\s-]*/gi,
+    ' '
+  );
+  // Remove "causa/inflige X no [estado]" or negated phrases like "não pode repelir" / "não pode ser repelido"
+  cleaned = cleaned.replace(/\bn[ãa]o\s+(?:pode|podem|causa)\s+[^.;,]{1,40}/gi, ' ');
+  return cleaned;
+}
+
 /**
  * Extracts which combo/chase states (fall, popup, launcher, back) a skill INFLICTS on targets,
- * carefully excluding the trigger clause of chase skills (e.g. "repele [empurrado] para causar [Derrubar]" -> causes ['fall']).
+ * supporting both bracketed terms ("[Flutuação Pequena]", "[Recuar]", "[Derrota]") and natural
+ * unbracketed PT-BR phrasing ("e arremessa ao alto", "e repele", "Derruba o alvo"), while
+ * excluding chase-trigger prefixes and negations.
  */
 export function extractCausedChaseStates(
   descPlain: string,
@@ -157,18 +190,18 @@ export function extractCausedChaseStates(
   if (!descPlain) return [];
   const caused = new Set<ChaseStateCode>();
 
-  // 1) Explicit result clauses: "para causar [X]", "e causa [X]", "causando [X]", "inflige [X]"
+  // 1) Explicit result clauses with brackets: "para causar [X]", "e causa [X]", "causando [X]", "infligir [X]"
   const resultClauseRegex =
-    /(?:para\s+causar|causa(?:ndo)?|inflig(?:e|ir|indo)|gera(?:ndo)?|provoca(?:ndo)?|arremessa(?:ndo)?|lança(?:ndo)?)\s*(?:o\s+|um\s+|uma\s+|efeito\s+de\s+|estado\s+de\s+)?\[([^\]]{2,32})\]/gi;
+    /(?:para\s+causar|causa(?:ndo)?|inflig(?:e|ir|indo)|gera(?:ndo)?|provoca(?:ndo)?|arremessa(?:ndo)?|lan[çc]a(?:ndo)?)\s*(?:o\s+|um\s+|uma\s+|efeito\s+de\s+|estado\s+de\s+)?\[([^\]]{2,36})\]/gi;
   let match: RegExpExecArray | null;
   while ((match = resultClauseRegex.exec(descPlain)) !== null) {
     const st = detectChaseStateFromTerm(match[1]);
     if (st) caused.add(st);
   }
 
-  // 2) For non-chase skills (no trigger), any bracketed chase state in description is inflicted by the skill
+  // 2) For non-chase skills, any bracketed chase state in description is inflicted by the skill
   if (knownTriggers.length === 0) {
-    const bracketRegex = /\[([^\]]{2,32})\]/g;
+    const bracketRegex = /\[([^\]]{2,36})\]/g;
     while ((match = bracketRegex.exec(descPlain)) !== null) {
       const st = detectChaseStateFromTerm(match[1]);
       if (st) caused.add(st);
@@ -176,7 +209,7 @@ export function extractCausedChaseStates(
   } else if (caused.size === 0) {
     // Fallback for chase skills whose phrasing omits "causar" before the second bracket
     const foundInOrder: ChaseStateCode[] = [];
-    const bracketRegex = /\[([^\]]{2,32})\]/g;
+    const bracketRegex = /\[([^\]]{2,36})\]/g;
     while ((match = bracketRegex.exec(descPlain)) !== null) {
       const st = detectChaseStateFromTerm(match[1]);
       if (st) foundInOrder.push(st);
@@ -188,6 +221,50 @@ export function extractCausedChaseStates(
     } else if (foundInOrder.length === 1 && !knownTriggers.includes(foundInOrder[0])) {
       caused.add(foundInOrder[0]);
     }
+  }
+
+  // 3) Natural unbracketed PT-BR combat phrases on stripped non-trigger text
+  const stripped = stripChaseTriggerAndNegationClauses(descPlain)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  if (/\b(?:flutuacao\s+alta|grande\s+flutuacao)\b/.test(stripped)) {
+    caused.add('launcher');
+  }
+  if (
+    /\bflutuacao\s+(?:baixa|pequena|menor)\b/.test(stripped) ||
+    /\b(?:arremessa|arremessar|arremessando|lanca|lancar|lancando|joga|jogar|jogando)\s+(?:os?\s+(?:alvos?|inimigos?)\s+)?(?:para\s+o\s+|ao\s+)?alto\b/.test(
+      stripped
+    )
+  ) {
+    // Only add popup if launcher wasn't explicitly specified right alongside
+    if (!/\b(?:flutuacao\s+alta|grande\s+flutuacao)\b/.test(stripped)) {
+      caused.add('popup');
+    }
+  }
+  if (
+    /\b(?:repele|repelir|repelindo|empurra|empurrar|empurrando)\b/.test(stripped) ||
+    /\b(?:causa(?:ndo)?|inflig\w+|provoca(?:ndo)?)\s+(?:[a-z]+\s+){0,2}(?:empurrao|repulsao|repelimento|recuo)\b/.test(
+      stripped
+    ) ||
+    /\bfaz\s+recuar\b/.test(stripped)
+  ) {
+    // Guard against "repele [empurrado] para causar [Derrubar]" where "repele" is describing the chase trigger
+    const isTriggerRepele =
+      knownTriggers.length > 0 &&
+      /\brepele\s*\[/.test(descPlain.toLowerCase()) &&
+      caused.size > 0;
+    if (!isTriggerRepele) {
+      caused.add('back');
+    }
+  }
+  if (
+    /\b(?:derruba|derrubar|derrubando)\b/.test(stripped) ||
+    /\b(?:causa(?:ndo)?|inflig\w+|provoca(?:ndo)?)\s+(?:a\s+)?queda\b/.test(stripped) ||
+    /\bdeixa(?:ndo)?\s+(?:o\s+alvo\s+|os\s+alvos\s+)?caido\b/.test(stripped)
+  ) {
+    caused.add('fall');
   }
 
   return Array.from(caused);
@@ -483,3 +560,164 @@ export function buildNinjaCombatProfile(
     },
   };
 }
+
+function normalizeChaseStateList(list: unknown): ChaseStateCode[] {
+  if (!Array.isArray(list)) return [];
+  const out: ChaseStateCode[] = [];
+  for (const item of list) {
+    const norm = normalizeChaseFlag(item);
+    if (norm && !out.includes(norm)) out.push(norm);
+  }
+  return out;
+}
+
+/**
+ * Re-evaluates and enriches `causesChaseStates` and `combatProfile.chaseComboSummary`
+ * on a NinjaMediaProfile (including pre-baked profiles from `ninja-skills.json`),
+ * ensuring attacks, skills, ultimates and continuing chases never retain `null` or missing
+ * caused states when present in their kit description.
+ */
+export function enrichNinjaMediaProfileCombatData(
+  profile: NinjaMediaProfile | null | undefined
+): NinjaMediaProfile | null | undefined {
+  if (!profile) return profile;
+
+  const enrichedSkills: Record<string, NinjaSkillInfo> = {};
+  for (const [slot, sk] of Object.entries(profile.skills || {})) {
+    if (!sk) continue;
+    const triggers = normalizeChaseStateList(sk.chaseTriggers);
+    const existingCaused = normalizeChaseStateList(sk.causesChaseStates);
+    const plainText = stripHtmlTags(sk.descPlain || sk.desc || sk.descShort || sk.descInBattle || '');
+    const parsedCaused = extractCausedChaseStates(plainText, triggers);
+    const mergedCaused = Array.from(new Set<ChaseStateCode>([...existingCaused, ...parsedCaused]));
+
+    const nextSkill: NinjaSkillInfo = { ...sk };
+    if (triggers.length > 0) {
+      nextSkill.chaseTriggers = triggers;
+      nextSkill.chaseTriggerLabels = triggers.map((c) => CHASE_STATE_LABELS[c]);
+    } else {
+      delete nextSkill.chaseTriggers;
+      delete nextSkill.chaseTriggerLabels;
+    }
+
+    if (mergedCaused.length > 0) {
+      nextSkill.causesChaseStates = mergedCaused;
+      nextSkill.causesChaseStateLabels = mergedCaused.map((c) => CHASE_STATE_LABELS[c]);
+    } else {
+      delete nextSkill.causesChaseStates;
+      delete nextSkill.causesChaseStateLabels;
+    }
+
+    enrichedSkills[slot] = nextSkill;
+  }
+
+  const enrichedPassives: NinjaPassiveInfo[] = (profile.passives || []).map((p) => {
+    const triggers = normalizeChaseStateList(p.chaseTriggers);
+    const existingCaused = normalizeChaseStateList(p.causesChaseStates);
+    const plainText = stripHtmlTags(p.descPlain || p.desc || '');
+    const parsedCaused = extractCausedChaseStates(plainText, triggers);
+    const mergedCaused = Array.from(new Set<ChaseStateCode>([...existingCaused, ...parsedCaused]));
+
+    const nextPassive: NinjaPassiveInfo = { ...p };
+    if (triggers.length > 0) {
+      nextPassive.chaseTriggers = triggers;
+      nextPassive.chaseTriggerLabels = triggers.map((c) => CHASE_STATE_LABELS[c]);
+    } else {
+      delete nextPassive.chaseTriggers;
+      delete nextPassive.chaseTriggerLabels;
+    }
+
+    if (mergedCaused.length > 0) {
+      nextPassive.causesChaseStates = mergedCaused;
+      nextPassive.causesChaseStateLabels = mergedCaused.map((c) => CHASE_STATE_LABELS[c]);
+    } else {
+      delete nextPassive.causesChaseStates;
+      delete nextPassive.causesChaseStateLabels;
+    }
+
+    return nextPassive;
+  });
+
+  const initiators: NinjaChaseComboLink[] = [];
+  const chasers: NinjaChaseComboLink[] = [];
+
+  for (const [slot, sk] of Object.entries(enrichedSkills)) {
+    const hasTrigger = Boolean(sk.chaseTriggers && sk.chaseTriggers.length > 0);
+    const hasCaused = Boolean(sk.causesChaseStates && sk.causesChaseStates.length > 0);
+    if (hasTrigger) {
+      chasers.push({
+        slot,
+        skillId: sk.id,
+        skillName: sk.name,
+        requiresStates: sk.chaseTriggers,
+        requiresStateLabels: sk.chaseTriggerLabels,
+        ...(hasCaused
+          ? {
+              causesStates: sk.causesChaseStates,
+              causesStateLabels: sk.causesChaseStateLabels,
+            }
+          : {}),
+        ...(sk.appliedEffects && sk.appliedEffects.length > 0
+          ? { appliedEffects: sk.appliedEffects }
+          : {}),
+      });
+    } else if (hasCaused) {
+      initiators.push({
+        slot,
+        skillId: sk.id,
+        skillName: sk.name,
+        causesStates: sk.causesChaseStates,
+        causesStateLabels: sk.causesChaseStateLabels,
+        ...(sk.appliedEffects && sk.appliedEffects.length > 0
+          ? { appliedEffects: sk.appliedEffects }
+          : {}),
+      });
+    }
+  }
+
+  for (const p of enrichedPassives) {
+    const hasTrigger = Boolean(p.chaseTriggers && p.chaseTriggers.length > 0);
+    const hasCaused = Boolean(p.causesChaseStates && p.causesChaseStates.length > 0);
+    if (hasTrigger) {
+      chasers.push({
+        slot: 'passive',
+        skillId: p.id,
+        skillName: p.name,
+        requiresStates: p.chaseTriggers,
+        requiresStateLabels: p.chaseTriggerLabels,
+        ...(hasCaused
+          ? {
+              causesStates: p.causesChaseStates,
+              causesStateLabels: p.causesChaseStateLabels,
+            }
+          : {}),
+        ...(p.appliedEffects && p.appliedEffects.length > 0
+          ? { appliedEffects: p.appliedEffects }
+          : {}),
+      });
+    }
+  }
+
+  const nextProfile: NinjaMediaProfile = {
+    ...profile,
+    skills: enrichedSkills,
+    passives: enrichedPassives,
+    ...(profile.combatProfile || initiators.length > 0 || chasers.length > 0
+      ? {
+          combatProfile: {
+            ...(profile.combatProfile || {
+              heroCode: profile.heroCode || profile.ninjaId || '',
+              name: profile.displayName || profile.ninjaId || '',
+            }),
+            chaseComboSummary: {
+              initiators,
+              chasers,
+            },
+          },
+        }
+      : {}),
+  };
+
+  return nextProfile;
+}
+

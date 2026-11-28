@@ -19,7 +19,10 @@ import {
   Upload,
 } from 'lucide-react';
 import type { NinjaEntry } from '../types/sprite';
-import type { ParsedEffectAsset } from '../utils/completeCharacterExporter';
+import {
+  buildExportDocumentationMarkdown,
+  type ParsedEffectAsset,
+} from '../utils/completeCharacterExporter';
 import {
   buildGameExportForNinja,
   downloadSplitGameExportZips,
@@ -445,9 +448,12 @@ export function GameExportView({ ninjas, isOfflineMode }: GameExportViewProps) {
         const mergedIndex = mergeGameRootIndex(existingRepoIndex, accumulatedIndexEntries);
         const indexBytes = new TextEncoder().encode(JSON.stringify(mergedIndex, null, 2));
 
+        const docBytes = new TextEncoder().encode(buildExportDocumentationMarkdown('game'));
+
         const filesToCommit: GameExportFile[] = [
           ...built.files,
           { path: 'index.json', bytes: indexBytes },
+          { path: 'DOCUMENTACAO_EXPORTACAO.md', bytes: docBytes },
         ];
 
         const uploadRes = await uploadFilesBatchToGitHub(
@@ -576,13 +582,21 @@ export function GameExportView({ ninjas, isOfflineMode }: GameExportViewProps) {
 
       const rootIndex = mergeGameRootIndex(null, indexEntries);
       const indexBytes = new TextEncoder().encode(JSON.stringify(rootIndex, null, 2));
+      const docBytes = new TextEncoder().encode(buildExportDocumentationMarkdown('game'));
       allFiles.push({ path: 'index.json', bytes: indexBytes });
+      allFiles.push({ path: 'DOCUMENTACAO_EXPORTACAO.md', bytes: docBytes });
       setFileRecords((prev) => [
         ...prev,
         {
           path: 'index.json',
           repoPath: 'index.json',
           size: indexBytes.byteLength,
+          status: 'uploaded',
+        },
+        {
+          path: 'DOCUMENTACAO_EXPORTACAO.md',
+          repoPath: 'DOCUMENTACAO_EXPORTACAO.md',
+          size: docBytes.byteLength,
           status: 'uploaded',
         },
       ]);

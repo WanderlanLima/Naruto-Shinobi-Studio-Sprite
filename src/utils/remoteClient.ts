@@ -18,6 +18,7 @@ import {
   extractSpineShowFeatureRefs,
   extractSpineVideoRefs,
 } from './atlasParser';
+import { enrichNinjaMediaProfileCombatData } from './combatMechanicsParser';
 import {
   getOfflineMediaProfile,
   getOfflineOrigin,
@@ -472,7 +473,7 @@ function mergeStaticSkillsIntoProfile(
     }
   }
 
-  return {
+  return enrichNinjaMediaProfileCombatData({
     ...profile,
     heroCode: profile.heroCode || entry.heroCode,
     displayName: profile.displayName || entry.displayName,
@@ -483,7 +484,7 @@ function mergeStaticSkillsIntoProfile(
     videos: mergedVideos,
     soundUrlMap: mergedSoundUrlMap,
     videoUrlMap: mergedVideoUrlMap,
-  };
+  })!;
 }
 
 export async function readStaticPackFileBytes(relPath: string): Promise<Uint8Array | null> {
@@ -1757,12 +1758,12 @@ export async function fetchNinjaMediaProfile(
         return v;
       });
 
-      const finalOfflineProfile: NinjaMediaProfile = {
+      const finalOfflineProfile: NinjaMediaProfile = enrichNinjaMediaProfileCombatData({
         ...baseProfile,
         passiveAura: baseProfile.passiveAura ?? resolveFallbackPassiveAura(ninja),
         // Always attach animation timing AFTER merging ninja-skills-pack & offline ZIP probes
         videos: attachVideoAnimTiming(normalizedVideos),
-      };
+      })!;
 
       return finalOfflineProfile;
     }
@@ -1790,11 +1791,11 @@ export async function fetchNinjaMediaProfile(
         if (resp.ok && contentType.includes('application/json')) {
           backendStatus = 'available';
           const data = (await resp.json()) as NinjaMediaProfile;
-          return {
+          return enrichNinjaMediaProfileCombatData({
             ...data,
             passiveAura: data.passiveAura ?? resolveFallbackPassiveAura(ninja),
             videos: attachVideoAnimTiming(data.videos || []),
-          };
+          })!;
         }
         if (!contentType.includes('application/json')) {
           backendStatus = 'static';
@@ -1811,10 +1812,10 @@ export async function fetchNinjaMediaProfile(
     if (staticEntry || skillsPack) {
       fallbackProfile = mergeStaticSkillsIntoProfile(fallbackProfile, staticEntry, skillsPack);
     }
-    return {
+    return enrichNinjaMediaProfileCombatData({
       ...fallbackProfile,
       videos: attachVideoAnimTiming(fallbackProfile.videos || []),
-    };
+    })!;
   })();
 
   if (mediaProfileCache.size >= 40) {

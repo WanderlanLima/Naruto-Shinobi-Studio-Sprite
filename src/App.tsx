@@ -780,7 +780,7 @@ export default function App() {
                   >
                     <button
                       type="button"
-                      disabled={quickMounting || offlineZip.restoring}
+                      disabled={quickMounting || (offlineZip.restoring && !offlineZip.active)}
                       onClick={() => void handleActivateOfflineSource()}
                       className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 font-medium transition-colors whitespace-nowrap cursor-pointer ${
                         offlineZip.active || offlineZip.restoring
@@ -794,10 +794,10 @@ export default function App() {
                       <span>
                         {quickMounting
                           ? 'Abrindo...'
-                          : offlineZip.restoring
-                          ? 'Restaurando...'
                           : offlineZip.active
                           ? 'Offline'
+                          : offlineZip.restoring
+                          ? 'Restaurando...'
                           : isOfflineMode
                           ? 'Offline (reconectar)'
                           : 'Offline'}

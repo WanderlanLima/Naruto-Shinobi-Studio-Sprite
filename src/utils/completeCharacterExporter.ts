@@ -4,6 +4,8 @@ import type {
   CompositeSpineLayer,
   NinjaEntry,
   NinjaMediaProfile,
+  ScreenEffectFraming,
+  SkeletonBlendSummary,
   SpineCommandEffectRef,
   SpineSkeleton,
   SpriteRegionSource,
@@ -11,24 +13,36 @@ import type {
 import {
   buildRegionSpriteMap,
   canvasToPngBlob,
+  computeAttackImpactMetrics,
   computeCompositeAnimationWorldBounds,
   computeNativeExportCellSize,
+  computeScreenEffectFraming,
   computeStripLayout,
+  detectSkeletonBlendModes,
+  detectVideoResumeAfterMs,
   downloadBlob,
   extractRegionToPngBlob,
   extractSpineAudioRefs,
+  extractSpineChoreographyCues,
   extractSpineEffectRefs,
+  extractSpineHitRefs,
   extractSpineVideoRefs,
   findMatchingCompanionAnimName,
   getAnimationDuration,
   getCompositeAnimationDuration,
+  isFullscreenEffectRef,
   loadImageElement,
   parseAtlas,
+  parseMp4DurationMs,
   renderSpineFrameToCanvas,
   resolveEffectiveAnimationName,
   writeQuantizedGifFrame,
+  type RegionSizeLookup,
 } from './atlasParser';
-import { CHASE_SYSTEM_LEGEND } from './combatMechanicsParser';
+import {
+  CHASE_SYSTEM_LEGEND,
+  enrichNinjaMediaProfileCombatData,
+} from './combatMechanicsParser';
 import {
   buildExportJobId,
   buildExportOptionsFingerprint,
@@ -342,24 +356,303 @@ export function collectCharacterEffectPlan(
   };
 }
 
+export function buildScreenFramingMapFromEffectBundles(
+  effectBundles?: Map<string, ParsedEffectAsset | null>,
+  effectRefsByAnim?: Iterable<SpineCommandEffectRef[]>
+): Map<string, ScreenEffectFraming> {
+  const screenFramingByKey = new Map<string, ScreenEffectFraming>();
+  if (!effectBundles) return screenFramingByKey;
+
+  const processRef = (ref: SpineCommandEffectRef) => {
+    if (ref.tela !== 5 && !isFullscreenEffectRef(ref)) return;
+    const keyExact = `${ref.spineId}::${ref.animName}`;
+    const keyLower = keyExact.toLowerCase();
+    if (screenFramingByKey.has(keyLower)) return;
+    const eff = effectBundles.get(ref.spineId);
+    if (!eff) return;
+    const availAnims = Object.keys(eff.skeleton.animations || {});
+    const targetLower = ref.animName.trim().toLowerCase();
+    const effAnimName =
+      (eff.skeleton.animations?.[ref.animName] ? ref.animName : undefined) ||
+      availAnims.find((a) => a.trim().toLowerCase() === targetLower) ||
+      availAnims[0];
+    if (!effAnimName) return;
+    const framing = computeScreenEffectFraming(
+      eff.skeleton,
+      effAnimName,
+      eff.regionCanvasMap
+    );
+    if (framing) {
+      screenFramingByKey.set(keyExact, framing);
+      screenFramingByKey.set(keyLower, framing);
+    }
+  };
+
+  if (effectRefsByAnim) {
+    for (const refs of effectRefsByAnim) {
+      for (const ref of refs) processRef(ref);
+    }
+  }
+  return screenFramingByKey;
+}
+
+export function buildEffectBlendMapFromBundles(
+  effectBundles?: Map<string, ParsedEffectAsset | null>
+): Map<string, SkeletonBlendSummary> {
+  const out = new Map<string, SkeletonBlendSummary>();
+  if (!effectBundles) return out;
+  for (const [sid, eff] of effectBundles.entries()) {
+    if (!eff?.skeleton) continue;
+    const whole = detectSkeletonBlendModes(eff.skeleton);
+    out.set(sid, whole);
+    out.set(sid.toLowerCase(), whole);
+    for (const animName of Object.keys(eff.skeleton.animations || {})) {
+      const perAnim = detectSkeletonBlendModes(eff.skeleton, animName);
+      const k = `${sid}::${animName}`;
+      out.set(k, perAnim);
+      out.set(k.toLowerCase(), perAnim);
+    }
+  }
+  return out;
+}
+
+function detectSkeletonFacingDirection(skeleton: SpineSkeleton): 'right' | 'left' {
+  const root =
+    (skeleton.bones || []).find((b) => b.name.toLowerCase() === 'root') || skeleton.bones?.[0];
+  if (root && typeof root.scaleX === 'number' && root.scaleX < 0) {
+    return 'left';
+  }
+  return 'right';
+}
+
+export function buildExportDocumentationMarkdown(mode: 'complete' | 'game'): string {
+  const isGame = mode === 'game';
+  const lines = [
+    '# Documentação Completa da Exportação — Shinobi Sprite Studio',
+    '',
+    isGame
+      ? '> Modo: **Exportar para o Jogo (Phaser 3 / MultiAtlas)** — otimizado por papéis de gameplay, slugs ASCII minúsculos, MultiAtlas <= 2048px e arquivos <= 20 MB.'
+      : '> Modo: **Exportação Completa do Personagem** — inclui esqueleto Spine original, frames fatiados, composições PNG/Spritesheet/GIF, partículas, áudios, vídeos, ícones e artes.',
+    '',
+    '---',
+    '',
+    '## 1. Estrutura de Pastas e Arquivos',
+    '',
+    ...(isGame
+      ? [
+          '```text',
+          'index.json                         # Índice global dos personagens exportados',
+          'DOCUMENTACAO_EXPORTACAO.md         # Este guia completo de esquemas e física 2D',
+          'characters/<id>/',
+          '  character.json                   # Manifesto principal (dimensões, facing, roles, effects, audio, icons, artwork)',
+          '  animacoes_instrucoes.json        # Timeline mestre (schema v2) com eventos ms, câmera, tela, hitEvents e alcances',
+          '  combate_e_habilidades.json       # Stats base, skills, passivas, chakra/raiva e combos de perseguição (chase)',
+          '  anims/<slug>.png (+ _p0/_p1...)  # Spritesheets 1:1 (split automático se > 2048px)',
+          '  anims/<slug>.json                # Phaser JSON Hash ou MultiAtlas + anchor + eventsMs + emitterPoints',
+          '  anims/<slug>.gif                 # Opcional (se habilitado)',
+          '  effects/<spineId>/<anim>.png     # Spritesheets isolados das partículas/VFX referenciadas',
+          '  effects/<spineId>/<anim>.json    # Metadados Phaser + meta.blendMode (additive/multiply/screen/normal)',
+          '  audio/<sfx>.mp3                  # Efeitos sonoros referenciados nas animações',
+          '  audio/voice_<chave>.mp3          # Falas/vozes do ninja (quando disponíveis)',
+          '  video/<cutscene>.mp4             # Cutscenes MP4 de Ultimate / Recrutamento',
+          '  icons/*.png                      # Ícones das skills e passivas em qualidade máxima',
+          '  artes/avatar.png                 # Ícone/avatar de retrato (smallpic)',
+          '  artes/portrait.png               # Retrato de meio corpo/batalha (halfpic)',
+          '```',
+        ]
+      : [
+          '```text',
+          '<characterId>/',
+          '  DOCUMENTACAO_EXPORTACAO.md       # Este guia completo de esquemas e física 2D',
+          '  <characterId>.atlas              # Atlas Spine original do personagem',
+          '  <characterId>.json               # Esqueleto Spine original completo (ossos, slots, skins, @CMD)',
+          '  <page>.png / .webp               # Folhas originais do atlas',
+          '  frames/*.png                     # Regiões individuais fatiadas sem rotação',
+          '  animacoes_instrucoes.json        # Timeline mestre (schema v2) com eventos ms, câmera, tela, hitEvents e alcances',
+          '  combate_e_habilidades.json       # Stats base, skills, passivas, chakra/raiva e combos de perseguição (chase)',
+          '  animacoes/<anim>/',
+          '    frames/<anim>_000.png ...      # Sequência de frames PNG da animação composta',
+          '    <anim>_spritesheet.png         # Spritesheet em grade da animação',
+          '    <anim>_spritesheet.json        # Metadados TexturePacker/Phaser/Godot/Unity + anchor + eventsMs',
+          '    <anim>.gif                     # Preview animado (opcional)',
+          '  particulas/<spineId>/            # Pacote Spine original + frames das partículas/aura passiva',
+          '  videos/*.mp4                     # Cutscenes MP4 de Ultimate / Recrutamento',
+          '  audios/animacoes/*.mp3           # SFX das animações',
+          '  audios/vozes/*.mp3               # Vozes do personagem',
+          '  icones_skills/*.png              # Ícones das habilidades e passivas',
+          '  artes/*.png                      # Splash art, retrato, avatar, expressões e nomes PT',
+          '```',
+        ]),
+    '',
+    '---',
+    '',
+    '## 2. Sistema de Coordenadas, Pivô (`anchor`) e Direção (`facing`)',
+    '',
+    '- **Origem do esqueleto Spine (`0, 0`)**: Fica exatamente nos **pés do ninja no chão**.',
+    '  - No JSON Spine bruto: `+X` = frente/direita, `+Y` = **para cima**.',
+    '  - Nos spritesheets/frames exportados (Canvas / Phaser / Godot / TexturePacker): `+X` = direita, `+Y` = **para baixo**.',
+    '- **Alinhamento no chão (`meta.anchor`)**:',
+    '  - Use `originX = meta.anchor.x` e `originY = meta.anchor.y` (Phaser `sprite.setOrigin(anchor.x, anchor.y)` ou Godot `offset`).',
+    '  - Para Unity Sprite Pivot (origem inferior-esquerda): use `meta.anchor.yBottomLeft`.',
+    '  - Em pixel exato dentro da célula: `(meta.anchor.pivotPxX, meta.anchor.pivotPxY)`.',
+    '- **Direção nativa (`facing`)**: `"right"` ou `"left"` (derivada de `root.scaleX`).',
+    '  - Se `facing === "left"`, inverta horizontalmente (`flipX = true`) quando o lutador estiver no lado esquerdo olhando para a direita, e espelhe `impactCenterX` (`-impactCenterX`) e `emitterPoints[i].x`.',
+    '',
+    '---',
+    '',
+    '## 3. Alcance de Impacto, Pontos de Disparo e `hitEvents`',
+    '',
+    '- **`impactMs`**: Instante (ms) do golpe principal (prioriza `{HIT:... final=1}` -> último `{HIT:...}` -> VFX de alvo -> pós-cutscene).',
+    '- **`impactReachPx`**: Alcance horizontal líquido (px Spine) à frente dos pés do ninja próximo a `impactMs`, somando slots de ataque do ninja + efeitos de ataque na janela e **ignorando** slots de fundo/aura/sombra/linhas de velocidade.',
+    '- **`impactCenterX`**: Centro horizontal (px Spine no sistema nativo) da área de impacto à frente do personagem.',
+    '- **`emitterPoints[]`** (em ataques/skills/ultimates do export para jogo): Posição por frame da mão/arma/ponto de emissão em pixels relativos ao pivô dos pes (`+X` direita, `-Y` acima dos pés) para originar projéteis com precisão.',
+    '- **`eventsMs.hitEvents[]`**: Lista ordenada de todos os eventos `{HIT:...}` do Spine:',
+    '  - `timeMs`: Momento do hit.',
+    '  - `damagePercent` (`p`): Percentual de dano deste hit dentro do combo (soma tipicamente 100%).',
+    '  - `hurtAnim`: Animação de reação sugerida no alvo (`hurt1`, `hurt2`, `behit`, `popup`, `fall`).',
+    '  - `blowup` / `velocity`: Impulso/arremesso (`{ x, y }`) aplicado ao alvo.',
+    '  - `target`: Alvo (`"target"` / `"all"` / custom).',
+    '  - `final`: `true` se for o golpe finalizador da sequência.',
+    '',
+    '---',
+    '',
+    '## 4. Partículas, Espaço de Posicionamento, `blendMode` e Tela (`tela=5`)',
+    '',
+    'Cada efeito em `eventsMs.hits[]`, `eventsMs.particles[]` e `animations[].effects[]` traz:',
+    '- **`space`** (`"self"` | `"target"` | `"screen"` | `"world"`):',
+    '  - `"self"`: Ancorar nos pés/pivô do próprio atacante (seguindo `facing`).',
+    '  - `"target"`: Ancorar nos pés/centro de cada alvo listado em `targets` (ex.: `["targets"]`, `["self"]`, etc.).',
+    '  - `"screen"`: Efeito de câmera/tela inteira (`tela >= 5` ou `quanping`/`tips`/`beijing`). Não acoplar ao pivô local do ninja.',
+    '  - `"world"`: Coordenada global de arena/batalha.',
+    '- **`layer`**: `"behind"` (desenhar atrás do personagem) ou `"front"` (desenhar à frente).',
+    '- **`blendMode` / `blendModes` / `usesAdditive`**:',
+    '  - Muitos VFX (~40% dos slots no acervo) usam **`additive`** (brilho de chakra, fogo, raio) ou **`multiply`** (sombras/escurecimento) / **`screen`**.',
+    '  - No Phaser 3: quando `blendMode === "additive"` (ou `usesAdditive === true`), aplique `sprite.setBlendMode(Phaser.BlendModes.ADD)`. Para `"multiply"`, use `MULTIPLY`; para `"screen"`, use `SCREEN`. Sem isso, partículas brilhantes ficam opacas/escuras.',
+    '- **Enquadramento para `tela === 5`** (`referenceViewport` + `focalBounds`):',
+    '  - `referenceViewport: { width, height }` define a resolução lógica de design do efeito.',
+    '  - `focalBounds: { minX, minY, maxX, maxY }` delimita o núcleo visual principal do efeito (ignorando linhas de velocidade periféricas) para escalar/centralizar corretamente em qualquer proporção de tela.',
+    '',
+    '---',
+    '',
+    '## 5. Sincronização de Cutscenes MP4 (`eventsMs.videos[]`)',
+    '',
+    'Quando uma Ultimate dispara vídeo (`PLAYVEDIO`):',
+    '1. **`timeMs`**: Instante em que a cutscene MP4 inicia.',
+    '2. **`durationMs`**: Duração real lida do átomo `mvhd` do MP4.',
+    '3. **`resumeAfterMs`**: Instante da timeline pós-vídeo onde a animação/explosão retoma após o bloco estático de espera.',
+    '- **Regra no motor 2D**: Ao atingir `timeMs`, congele/oculte a cena de batalha, reproduza `<key>.mp4` por `durationMs` e então salte/retome a animação em `resumeAfterMs`.',
+    '',
+    '---',
+    '',
+    '## 6. Coreografia Completa `@CMD` (`cameraCues`, `screenCues`, `movementCues`, `phaseCues`)',
+    '',
+    'Todos os comandos de direção embutidos nas trilhas de eventos do Spine são extraídos em `eventsMs`:',
+    '- **`cameraCues[]`**:',
+    '  - `type: "camera"`: Zoom/enquadramento (`center`, `scale`, `durationFrames`).',
+    '  - `type: "rock"`: Tremor de câmera / screen-shake (`hStrength`, `vStrength`).',
+    '- **`screenCues[]`**:',
+    '  - `type: "flash"`: Flash de tela (`color`, `alpha`, `durationMs`).',
+    '  - `type: "changebg"`: Troca/escurecimento de cenário.',
+    '  - `type: "onlyparters"` / `"showall"`: Ocultar lutadores não participantes durante o golpe e restaurar depois.',
+    '  - `type: "scenetransform"` / `"transform"`: Filtros de cor/matriz (`colorMatrix`, `hbsc`, `onlyBg`, `effectName`, `targets`, `durationMs`).',
+    '  - `type: "showfeature"` / `"hide"` / `"showring"`: Retrato/cut-in especial de habilidade (`files`, `mainFile`) e remoção (`cleanup`).',
+    '- **`movementCues[]`**:',
+    '  - `type: "move"`: Deslocamento/dash/teleporte até `destType` com offset `(dispX, dispY)` em `durationFrames`.',
+    '  - `type: "play"`: Sub-animação encadeada (`animName`, `loop`).',
+    '  - `type: "attach"` / `"detach"`: Prender/soltar alvo ou parte a um `bone` (`hurtAnim`, `apy`, `direction`, `durationFrames`).',
+    '  - `type: "onebyone"`: Execução sequencial sobre múltiplos `targets`.',
+    '- **`phaseCues[]`**:',
+    '  - Marcadores de ciclo de turno (`preact`, `next`, `postact`, `pretargetact`, `posttargetact`, `end`, `call`, `pause`, `plano`, `label` como `a0..a4` ou `fim`).',
+    '',
+    '---',
+    '',
+    '## 7. Combate, Atributos e Combos de Perseguição (`combate_e_habilidades.json`)',
+    '',
+    '- **`combatProfile`**: Código, elemento (`natureLabel`), papel (`combatRoleLabel`), raridade (`quality`, `star`/`maxStar`), `teamId`, `baseStats` (HP, ataque, defesa, taxas de crescimento, crítico, bloqueio, perfuração, roubo de vida, controle, cura, bônus de esotérica) e `chakraAnger`.',
+    '- **`chaseComboSummary`**: Separação explícita entre `initiators` (skills que geram estado `popup` / `fall` / `launcher` / `back`) e `chasers` (perseguições que exigem `chaseTriggers` e encadeiam `causesChaseStates`).',
+    '- **`skills` e `passives`**: Contêm `targetType`, `damageCategories`, `elements`, `chaseTriggers`, `causesChaseStates`, `appliedEffects`, `effectDescs` e `iconFile` apontando para o ícone exportado.',
+    '',
+  ];
+  return lines.join('\n');
+}
+
 export function buildCharacterInstructionsJson(
   ninjaId: string,
   skeleton: SpineSkeleton,
   scope: EffectIncludeScope,
   effectBundles?: Map<string, ParsedEffectAsset | null>,
   missingEffects?: string[],
-  mediaProfile?: NinjaMediaProfile | null
+  mediaProfile?: NinjaMediaProfile | null,
+  extraMeta?: {
+    regionSizes?: RegionSizeLookup | null;
+    videoDurationsMs?: Map<string, number> | null;
+    iconDir?: string;
+    animAudioDir?: string;
+    voiceAudioDir?: string;
+    voiceFilePrefix?: string;
+    videoDir?: string;
+    formatVoiceName?: (category: string, key: string) => string;
+    formatSoundName?: (cleanName: string) => string;
+    formatVideoName?: (videoKey: string) => string;
+  }
 ): string {
+  const enrichedProfile = enrichNinjaMediaProfileCombatData(mediaProfile) ?? null;
   const animNames = getSortedAnimationNames(skeleton);
+  const iconDir = (extraMeta?.iconDir || 'icones_skills').replace(/\/+$/, '');
+  const animAudioDir = (extraMeta?.animAudioDir || 'audios/animacoes').replace(/\/+$/, '');
+  const voiceAudioDir = (extraMeta?.voiceAudioDir || 'audios/vozes').replace(/\/+$/, '');
+  const voiceFilePrefix = extraMeta?.voiceFilePrefix || '';
+  const videoDir = (extraMeta?.videoDir || 'videos').replace(/\/+$/, '');
+
+  const effectSizeBundles = new Map<
+    string,
+    { skeleton: SpineSkeleton; regionSizes: RegionSizeLookup }
+  >();
+  if (effectBundles) {
+    for (const [sid, eff] of effectBundles.entries()) {
+      if (eff) {
+        effectSizeBundles.set(sid, {
+          skeleton: eff.skeleton,
+          regionSizes: eff.regionCanvasMap,
+        });
+      }
+    }
+  }
+
+  const effectBlendByKey = buildEffectBlendMapFromBundles(effectBundles);
+  const facing = detectSkeletonFacingDirection(skeleton);
+
+  const allRefsByAnim = new Map<string, SpineCommandEffectRef[]>();
+  for (const animName of animNames) {
+    allRefsByAnim.set(animName, extractSpineEffectRefs(skeleton, animName));
+  }
+  const screenFramingByKey = buildScreenFramingMapFromEffectBundles(
+    effectBundles,
+    allRefsByAnim.values()
+  );
+
+  const lookupVideoDurationMs = (key: string, source: string): number | undefined => {
+    const map = extraMeta?.videoDurationsMs;
+    if (!map) return undefined;
+    return (
+      map.get(key) ??
+      map.get(key.toLowerCase()) ??
+      map.get(source) ??
+      map.get(source.toLowerCase())
+    );
+  };
+
   const animations = animNames.map((animName) => {
     const effectiveAnim = resolveEffectiveAnimationName(skeleton, animName);
     const baseDurationSec = Number(getAnimationDuration(skeleton, effectiveAnim).toFixed(4));
-    const allRefs = extractSpineEffectRefs(skeleton, animName);
+    const allRefs = allRefsByAnim.get(animName) || [];
     const filteredRefs = filterEffectRefsByScope(allRefs, scope);
     const audioRefs = extractSpineAudioRefs(skeleton, animName);
+    const hitRefs = extractSpineHitRefs(skeleton, animName);
+    const choreography = extractSpineChoreographyCues(skeleton, animName);
     const videoRefs = [...extractSpineVideoRefs(skeleton, animName)];
     const seenAnimVideoKeys = new Set(videoRefs.map((v) => v.resolvedName.toLowerCase()));
-    for (const mv of mediaProfile?.videos || []) {
+    for (const mv of enrichedProfile?.videos || []) {
       if (mv.kind !== 'ultimate' || !mv.animName) continue;
       const mvAnimLow = mv.animName.toLowerCase();
       if (mvAnimLow !== animName.toLowerCase() && mvAnimLow !== effectiveAnim.toLowerCase()) {
@@ -407,12 +700,51 @@ export function buildCharacterInstructionsJson(
     }
 
     const skillMeta =
-      mediaProfile?.skills?.[animName] ||
-      mediaProfile?.skills?.[animName.toLowerCase()] ||
-      mediaProfile?.skills?.[effectiveAnim] ||
-      mediaProfile?.skills?.[effectiveAnim.toLowerCase()];
+      enrichedProfile?.skills?.[animName] ||
+      enrichedProfile?.skills?.[animName.toLowerCase()] ||
+      enrichedProfile?.skills?.[effectiveAnim] ||
+      enrichedProfile?.skills?.[effectiveAnim.toLowerCase()];
 
-    const eventsMs = buildAnimationEventsTimelineMs(allRefs, audioRefs, videoRefs);
+    const videoSyncByKey = new Map<
+      string,
+      { durationMs?: number; resumeAfterMs?: number }
+    >();
+    for (const v of videoRefs) {
+      const durationMs = lookupVideoDurationMs(v.resolvedName, v.source);
+      const resumeAfterMs = detectVideoResumeAfterMs(
+        skeleton,
+        animName,
+        v.time,
+        durationMs
+      );
+      const syncObj = {
+        ...(typeof durationMs === 'number' ? { durationMs } : {}),
+        ...(typeof resumeAfterMs === 'number' ? { resumeAfterMs } : {}),
+      };
+      videoSyncByKey.set(v.resolvedName, syncObj);
+      videoSyncByKey.set(v.resolvedName.toLowerCase(), syncObj);
+      videoSyncByKey.set(v.source, syncObj);
+      videoSyncByKey.set(v.source.toLowerCase(), syncObj);
+    }
+
+    const eventsMs = buildAnimationEventsTimelineMs(allRefs, audioRefs, videoRefs, {
+      screenFramingByKey,
+      videoSyncByKey,
+      effectBlendByKey,
+      hitRefs,
+      choreography,
+    });
+
+    const firstVideoResumeMs = eventsMs.videos[0]?.resumeAfterMs;
+    const impactMetrics = extraMeta?.regionSizes
+      ? computeAttackImpactMetrics(skeleton, animName, extraMeta.regionSizes, {
+          effectRefs: allRefs,
+          effectBundles: effectSizeBundles,
+          resumeAfterMs: firstVideoResumeMs,
+          isSkillInProfile: Boolean(skillMeta),
+        })
+      : null;
+
     const safeAnimName = sanitizePathSegment(animName);
 
     return {
@@ -420,54 +752,103 @@ export function buildCharacterInstructionsJson(
       effectiveAnimation: effectiveAnim !== animName ? effectiveAnim : undefined,
       skillLabel: skillMeta ? `${skillMeta.slotLabel}: ${skillMeta.name}` : undefined,
       skillIconFile: skillMeta?.iconUrl
-        ? buildSkillIconRelPathForAnim(skillMeta.animKey, skillMeta.name, skillMeta.iconUrl)
+        ? buildSkillIconRelPathForAnim(skillMeta.animKey, skillMeta.name, skillMeta.iconUrl, iconDir)
         : undefined,
       spritesheetFile: `animacoes/${safeAnimName}/${safeAnimName}_spritesheet.png`,
       spritesheetMetaFile: `animacoes/${safeAnimName}/${safeAnimName}_spritesheet.json`,
       baseDurationSec,
       compositeDurationSec,
+      ...(impactMetrics
+        ? {
+            impactMs: impactMetrics.impactMs,
+            impactReachPx: impactMetrics.impactReachPx,
+            impactCenterX: impactMetrics.impactCenterX,
+          }
+        : {}),
       eventsMs,
-      effects: allRefs.map((ref) => ({
-        spineId: ref.spineId,
-        effectAnim: ref.animName,
-        startTimeSec: Number(ref.startTime.toFixed(4)),
-        layer: ref.layer,
-        isSelfOrScreen: ref.isSelfOrScreen,
-        includedInScope:
-          scope === 'all' || (scope === 'powers' && ref.isSelfOrScreen),
-        loop: ref.loop,
-        rawCommand: ref.rawCommand,
-      })),
+      effects: allRefs.map((ref) => {
+        const framing =
+          ref.tela === 5
+            ? screenFramingByKey.get(`${ref.spineId}::${ref.animName}`) ||
+              screenFramingByKey.get(`${ref.spineId}::${ref.animName}`.toLowerCase())
+            : undefined;
+        const blend =
+          effectBlendByKey.get(`${ref.spineId}::${ref.animName}`) ||
+          effectBlendByKey.get(`${ref.spineId}::${ref.animName}`.toLowerCase()) ||
+          effectBlendByKey.get(ref.spineId) ||
+          effectBlendByKey.get(ref.spineId.toLowerCase());
+        return {
+          spineId: ref.spineId,
+          effectAnim: ref.animName,
+          startTimeSec: Number(ref.startTime.toFixed(4)),
+          layer: ref.layer,
+          isSelfOrScreen: ref.isSelfOrScreen,
+          ...(ref.space ? { space: ref.space } : {}),
+          ...(ref.targets && ref.targets.length > 0 ? { targets: ref.targets } : {}),
+          ...(blend
+            ? {
+                blendMode: blend.primaryBlendMode,
+                blendModes: blend.blendModes,
+                usesAdditive: blend.usesAdditive,
+              }
+            : {}),
+          includedInScope:
+            scope === 'all' || (scope === 'powers' && ref.isSelfOrScreen),
+          loop: ref.loop,
+          ...(typeof ref.tela === 'number' ? { tela: ref.tela } : {}),
+          ...(typeof ref.cena === 'number' ? { cena: ref.cena } : {}),
+          ...(framing
+            ? {
+                referenceViewport: framing.referenceViewport,
+                focalBounds: framing.focalBounds,
+              }
+            : {}),
+          rawCommand: ref.rawCommand,
+        };
+      }),
       videos:
         videoRefs.length > 0
-          ? videoRefs.map((v) => ({
-              key: v.resolvedName,
-              source: v.source,
-              startTimeSec: Number(v.time.toFixed(4)),
-              careforward: v.careforward,
-              file: `videos/${sanitizePathSegment(v.resolvedName)}.mp4`,
-            }))
+          ? videoRefs.map((v) => {
+              const sync = videoSyncByKey.get(v.resolvedName);
+              return {
+                key: v.resolvedName,
+                source: v.source,
+                startTimeSec: Number(v.time.toFixed(4)),
+                ...(typeof sync?.durationMs === 'number' ? { durationMs: sync.durationMs } : {}),
+                ...(typeof sync?.resumeAfterMs === 'number'
+                  ? { resumeAfterMs: sync.resumeAfterMs }
+                  : {}),
+                careforward: v.careforward,
+                file: `${videoDir}/${extraMeta?.formatVideoName ? extraMeta.formatVideoName(v.resolvedName) : sanitizePathSegment(v.resolvedName)}.mp4`,
+              };
+            })
           : undefined,
       sounds:
         audioRefs.length > 0
-          ? audioRefs.map((s) => ({
-              soundName: s.soundName,
-              timeSec: Number(s.time.toFixed(4)),
-              file: `audios/animacoes/${sanitizePathSegment(s.soundName.replace(/\.mp3$/i, ''))}.mp3`,
-            }))
+          ? audioRefs.map((s) => {
+              const cleanSound = s.soundName.replace(/\.mp3$/i, '');
+              const formattedSound = extraMeta?.formatSoundName
+                ? extraMeta.formatSoundName(cleanSound)
+                : sanitizePathSegment(cleanSound);
+              return {
+                soundName: s.soundName,
+                timeSec: Number(s.time.toFixed(4)),
+                file: `${animAudioDir}/${formattedSound}.mp3`,
+              };
+            })
           : undefined,
     };
   });
 
   const skillsWithIconFile =
-    mediaProfile?.skills && Object.keys(mediaProfile.skills).length > 0
+    enrichedProfile?.skills && Object.keys(enrichedProfile.skills).length > 0
       ? Object.fromEntries(
-          Object.entries(mediaProfile.skills).map(([k, sk]) => [
+          Object.entries(enrichedProfile.skills).map(([k, sk]) => [
             k,
             {
               ...sk,
               iconFile: sk.iconUrl
-                ? buildSkillIconRelPathForAnim(sk.animKey, sk.name, sk.iconUrl)
+                ? buildSkillIconRelPathForAnim(sk.animKey, sk.name, sk.iconUrl, iconDir)
                 : undefined,
             },
           ])
@@ -475,57 +856,93 @@ export function buildCharacterInstructionsJson(
       : undefined;
 
   const passivesWithIconFile =
-    mediaProfile?.passives && mediaProfile.passives.length > 0
-      ? mediaProfile.passives.map((p, idx) => ({
+    enrichedProfile?.passives && enrichedProfile.passives.length > 0
+      ? enrichedProfile.passives.map((p, idx) => ({
           ...p,
           iconFile: p.iconUrl
-            ? buildPassiveIconRelPath(idx, p.name, p.iconUrl)
+            ? buildPassiveIconRelPath(idx, p.name, p.iconUrl, iconDir)
             : undefined,
         }))
       : undefined;
 
   return JSON.stringify(
     {
+      schemaVersion: 'shinobi-instructions-v2',
+      documentationFile: 'DOCUMENTACAO_EXPORTACAO.md',
       characterId: ninjaId,
-      heroCode: mediaProfile?.heroCode,
-      displayName: mediaProfile?.displayName,
+      heroCode: enrichedProfile?.heroCode,
+      displayName: enrichedProfile?.displayName,
+      facing,
+      skeletonStats: {
+        defaultWidth: Math.round(skeleton.skeleton?.width || 0),
+        defaultHeight: Math.round(skeleton.skeleton?.height || 0),
+        fps: Math.round(skeleton.skeleton?.fps || 24),
+        bonesCount: (skeleton.bones || []).length,
+        slotsCount: (skeleton.slots || []).length,
+        totalAnimations: animNames.length,
+      },
+      coordinateSystem: {
+        spineOrigin: 'character_feet_ground_center (0,0)',
+        spineAxes: '+X forward/right, +Y up',
+        spritesheetAxes: '+X right, +Y down (use meta.anchor for Phaser/Godot or meta.anchor.yBottomLeft for Unity)',
+        note: 'Consulte DOCUMENTACAO_EXPORTACAO.md para regras completas de blendMode, space (self/target/screen/world), tela=5, MP4 sync e @CMD.',
+      },
       atlasFile: `${ninjaId}.atlas`,
       skeletonFile: `${ninjaId}.json`,
       combatFile: 'combate_e_habilidades.json',
       effectScope: scope,
       notes:
-        'As definicoes completas de ossos, slots, keyframes e eventos @CMD ficam no arquivo .json (skeleton). As mecanicas de combate, gatilhos de perseguicao (Queda/Flutuacao/Empurrao), efeitos/debuffs aplicados e atributos base ficam em combate_e_habilidades.json (e resumidos abaixo). Icones das skills em qualidade maxima ficam em icones_skills/, particulas em particulas/<spineId>/, videos de ultimate em videos/*.mp4 e vozes/efeitos sonoros em audios/*.mp3.',
+        'As definicoes completas de ossos, slots, keyframes e eventos @CMD ficam no arquivo .json (skeleton) e resumidas em eventsMs (hits, particles, hitEvents, cameraCues, screenCues, movementCues, phaseCues). As mecanicas de combate ficam em combate_e_habilidades.json e a especificacao completa em DOCUMENTACAO_EXPORTACAO.md.',
       chaseSystemLegend: CHASE_SYSTEM_LEGEND,
-      combatProfile: mediaProfile?.combatProfile,
+      combatProfile: enrichedProfile?.combatProfile,
       skills: skillsWithIconFile,
       passives: passivesWithIconFile,
-      passiveAura: mediaProfile?.passiveAura
+      passiveAura: enrichedProfile?.passiveAura
         ? {
-            id: mediaProfile.passiveAura.id,
-            label: mediaProfile.passiveAura.label,
-            folder: `particulas/${sanitizePathSegment(mediaProfile.passiveAura.id)}/`,
-            layers: mediaProfile.passiveAura.layers,
+            id: enrichedProfile.passiveAura.id,
+            label: enrichedProfile.passiveAura.label,
+            folder: `particulas/${sanitizePathSegment(enrichedProfile.passiveAura.id)}/`,
+            layers: enrichedProfile.passiveAura.layers,
           }
         : undefined,
       voices:
-        mediaProfile?.voices && mediaProfile.voices.length > 0
-          ? mediaProfile.voices.map((v) => ({
-              key: v.key,
-              category: v.category,
-              label: v.label,
-              file: `audios/vozes/${sanitizePathSegment(`${v.category}_${v.key}`)}.mp3`,
-            }))
+        enrichedProfile?.voices && enrichedProfile.voices.length > 0
+          ? enrichedProfile.voices.map((v) => {
+              const formattedVoice = extraMeta?.formatVoiceName
+                ? extraMeta.formatVoiceName(v.category, v.key)
+                : sanitizePathSegment(`${voiceFilePrefix}${v.category}_${v.key}`);
+              return {
+                key: v.key,
+                category: v.category,
+                label: v.label,
+                file: `${voiceAudioDir}/${formattedVoice}.mp3`,
+              };
+            })
           : undefined,
       videos:
-        mediaProfile?.videos && mediaProfile.videos.length > 0
-          ? mediaProfile.videos.map((v) => ({
-              key: v.key,
-              label: v.label,
-              kind: v.kind,
-              animName: v.animName,
-              startTimeSec: v.startTime,
-              file: `videos/${sanitizePathSegment(v.key)}.mp4`,
-            }))
+        enrichedProfile?.videos && enrichedProfile.videos.length > 0
+          ? enrichedProfile.videos.map((v) => {
+              const durationMs = lookupVideoDurationMs(v.key, v.key);
+              const resumeAfterMs =
+                v.animName && skeleton?.animations?.[v.animName]
+                  ? detectVideoResumeAfterMs(
+                      skeleton,
+                      v.animName,
+                      typeof v.startTime === 'number' ? v.startTime : 0.25,
+                      durationMs
+                    )
+                  : undefined;
+              return {
+                key: v.key,
+                label: v.label,
+                kind: v.kind,
+                animName: v.animName,
+                startTimeSec: v.startTime,
+                ...(typeof durationMs === 'number' ? { durationMs } : {}),
+                ...(typeof resumeAfterMs === 'number' ? { resumeAfterMs } : {}),
+                file: `${videoDir}/${extraMeta?.formatVideoName ? extraMeta.formatVideoName(v.key) : sanitizePathSegment(v.key)}.mp4`,
+              };
+            })
           : undefined,
       missingEffects: missingEffects && missingEffects.length > 0 ? missingEffects : undefined,
       animations,
@@ -542,21 +959,26 @@ export function buildCharacterInstructionsJson(
  */
 export function buildCharacterCombatJson(
   ninjaId: string,
-  mediaProfile?: NinjaMediaProfile | null
+  mediaProfile?: NinjaMediaProfile | null,
+  options?: { iconDir?: string }
 ): string | null {
-  if (!mediaProfile) return null;
-  const hasSkills = mediaProfile.skills && Object.keys(mediaProfile.skills).length > 0;
-  const hasPassives = mediaProfile.passives && mediaProfile.passives.length > 0;
-  if (!mediaProfile.combatProfile && !hasSkills && !hasPassives) return null;
+  const enrichedProfile = enrichNinjaMediaProfileCombatData(mediaProfile);
+  if (!enrichedProfile) return null;
+  const hasSkills =
+    enrichedProfile.skills && Object.keys(enrichedProfile.skills).length > 0;
+  const hasPassives = enrichedProfile.passives && enrichedProfile.passives.length > 0;
+  if (!enrichedProfile.combatProfile && !hasSkills && !hasPassives) return null;
+
+  const iconDir = (options?.iconDir || 'icones_skills').replace(/\/+$/, '');
 
   const skillsWithIconFile = hasSkills
     ? Object.fromEntries(
-        Object.entries(mediaProfile.skills).map(([k, sk]) => [
+        Object.entries(enrichedProfile.skills).map(([k, sk]) => [
           k,
           {
             ...sk,
             iconFile: sk.iconUrl
-              ? buildSkillIconRelPathForAnim(sk.animKey, sk.name, sk.iconUrl)
+              ? buildSkillIconRelPathForAnim(sk.animKey, sk.name, sk.iconUrl, iconDir)
               : undefined,
           },
         ])
@@ -564,10 +986,10 @@ export function buildCharacterCombatJson(
     : {};
 
   const passivesWithIconFile = hasPassives
-    ? mediaProfile.passives.map((p, idx) => ({
+    ? enrichedProfile.passives.map((p, idx) => ({
         ...p,
         iconFile: p.iconUrl
-          ? buildPassiveIconRelPath(idx, p.name, p.iconUrl)
+          ? buildPassiveIconRelPath(idx, p.name, p.iconUrl, iconDir)
           : undefined,
       }))
     : [];
@@ -575,11 +997,12 @@ export function buildCharacterCombatJson(
   return JSON.stringify(
     {
       schemaVersion: 'shinobi-combat-v1',
+      documentationFile: 'DOCUMENTACAO_EXPORTACAO.md',
       characterId: ninjaId,
-      heroCode: mediaProfile.heroCode,
-      displayName: mediaProfile.displayName,
+      heroCode: enrichedProfile.heroCode,
+      displayName: enrichedProfile.displayName,
       chaseSystemLegend: CHASE_SYSTEM_LEGEND,
-      combatProfile: mediaProfile.combatProfile,
+      combatProfile: enrichedProfile.combatProfile,
       skills: skillsWithIconFile,
       passives: passivesWithIconFile,
     },
@@ -785,20 +1208,24 @@ function sanitizeSkillSlug(name: string): string {
 export function buildSkillIconRelPathForAnim(
   animKey: string,
   skillName: string,
-  iconUrl: string
+  iconUrl: string,
+  iconDir = 'icones_skills'
 ): string {
+  const cleanDir = iconDir.replace(/\/+$/, '');
   const slotPrefix = SKILL_ICON_SLOT_PREFIX[animKey] || sanitizePathSegment(animKey);
   const ext = getUrlImageExt(iconUrl);
-  return `icones_skills/${slotPrefix}_${sanitizeSkillSlug(skillName)}.${ext}`;
+  return `${cleanDir}/${slotPrefix}_${sanitizeSkillSlug(skillName)}.${ext}`;
 }
 
 export function buildPassiveIconRelPath(
   index: number,
   passiveName: string,
-  iconUrl: string
+  iconUrl: string,
+  iconDir = 'icones_skills'
 ): string {
+  const cleanDir = iconDir.replace(/\/+$/, '');
   const ext = getUrlImageExt(iconUrl);
-  return `icones_skills/passiva_${String(index + 1).padStart(2, '0')}_${sanitizeSkillSlug(passiveName)}.${ext}`;
+  return `${cleanDir}/passiva_${String(index + 1).padStart(2, '0')}_${sanitizeSkillSlug(passiveName)}.${ext}`;
 }
 
 export interface SkillIconExportTarget {
@@ -808,9 +1235,11 @@ export interface SkillIconExportTarget {
 }
 
 export function getOrderedSkillIconTargets(
-  mediaProfile: NinjaMediaProfile | null | undefined
+  mediaProfile: NinjaMediaProfile | null | undefined,
+  iconDir = 'icones_skills'
 ): SkillIconExportTarget[] {
   if (!mediaProfile) return [];
+  const cleanDir = iconDir.replace(/\/+$/, '');
   const targets: SkillIconExportTarget[] = [];
   const usedBase = new Set<string>();
 
@@ -831,18 +1260,18 @@ export function getOrderedSkillIconTargets(
     if (!sk?.iconUrl) continue;
     seenKeys.add(key);
     const slotPrefix = SKILL_ICON_SLOT_PREFIX[key] || sanitizePathSegment(key);
-    pushTarget(`icones_skills/${slotPrefix}_${sanitizeSkillSlug(sk.name)}`, sk.iconUrl);
+    pushTarget(`${cleanDir}/${slotPrefix}_${sanitizeSkillSlug(sk.name)}`, sk.iconUrl);
   }
   for (const [key, sk] of Object.entries(skillsMap)) {
     if (seenKeys.has(key) || !sk?.iconUrl) continue;
-    pushTarget(`icones_skills/${sanitizePathSegment(key)}_${sanitizeSkillSlug(sk.name)}`, sk.iconUrl);
+    pushTarget(`${cleanDir}/${sanitizePathSegment(key)}_${sanitizeSkillSlug(sk.name)}`, sk.iconUrl);
   }
 
   const passives = mediaProfile.passives || [];
   passives.forEach((p, idx) => {
     if (!p?.iconUrl) return;
     pushTarget(
-      `icones_skills/passiva_${String(idx + 1).padStart(2, '0')}_${sanitizeSkillSlug(p.name)}`,
+      `${cleanDir}/passiva_${String(idx + 1).padStart(2, '0')}_${sanitizeSkillSlug(p.name)}`,
       p.iconUrl
     );
   });
@@ -853,10 +1282,11 @@ export function getOrderedSkillIconTargets(
 export async function collectCharacterSkillIconFiles(
   mediaProfile: NinjaMediaProfile | null | undefined,
   folderPrefix?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  iconDir = 'icones_skills'
 ): Promise<CollectedCharacterFile[]> {
   throwIfAborted(signal);
-  const targets = getOrderedSkillIconTargets(mediaProfile);
+  const targets = getOrderedSkillIconTargets(mediaProfile, iconDir);
   if (targets.length === 0) return [];
 
   const prefix = folderPrefix ? `${folderPrefix.replace(/\/+$/, '')}/` : '';
@@ -1225,6 +1655,7 @@ export async function collectCharacterMediaFiles(params: {
 }): Promise<{
   files: CollectedCharacterFile[];
   passiveAuraAsset: ParsedEffectAsset | null;
+  videoDurationsMs: Map<string, number>;
 }> {
   throwIfAborted(params.signal);
   const prefix = params.folderPrefix ? `${params.folderPrefix.replace(/\/+$/, '')}/` : '';
@@ -1238,6 +1669,7 @@ export async function collectCharacterMediaFiles(params: {
   };
 
   let passiveAuraAsset: ParsedEffectAsset | null = null;
+  const videoDurationsMs = new Map<string, number>();
   const mediaProfile = params.mediaProfile;
 
   // 1. Passive idle aura raw package (+ sliced frames)
@@ -1326,6 +1758,11 @@ export async function collectCharacterMediaFiles(params: {
       );
       for (const item of results) {
         if (item.buf) {
+          const durMs = parseMp4DurationMs(item.buf);
+          if (typeof durMs === 'number') {
+            videoDurationsMs.set(item.key, durMs);
+            videoDurationsMs.set(item.key.toLowerCase(), durMs);
+          }
           push(`videos/${sanitizePathSegment(item.key)}.mp4`, item.buf);
         }
       }
@@ -1391,7 +1828,11 @@ export async function collectCharacterMediaFiles(params: {
     }
   }
 
-  return { files, passiveAuraAsset };
+  return {
+    files,
+    passiveAuraAsset,
+    videoDurationsMs,
+  };
 }
 
 export async function collectCharacterCompleteFiles(
@@ -1584,6 +2025,7 @@ export async function collectCharacterCompleteFiles(
     getOrderedSkillIconTargets(options.mediaProfile).length > 0;
   const wantArtworks = options.includeCharacterArtworks !== false && baseData.ninja.kind !== 'effect';
 
+  const videoDurationsMs = new Map<string, number>();
   if (wantPassiveAura || wantMediaFiles || wantSkillIcons || wantArtworks) {
     if (checkpointMeta?.completedMedia) {
       // Only reload lightweight passiveAuraAsset for rendering if idle still needs rendering
@@ -1616,6 +2058,9 @@ export async function collectCharacterCompleteFiles(
         effectCache: options.effectCache,
       });
       passiveAuraAsset = mediaResult.passiveAuraAsset;
+      for (const [k, v] of mediaResult.videoDurationsMs.entries()) {
+        videoDurationsMs.set(k, v);
+      }
       for (const mf of mediaResult.files) {
         pushFile(mf.path, mf.data);
       }
@@ -1626,7 +2071,64 @@ export async function collectCharacterCompleteFiles(
     }
   }
 
-  // 3. Export animation instructions JSON + dedicated combat/skills/chase mechanics JSON
+  // Fill any missing MP4 durations locally when offline backup is mounted
+  if (baseData.skeleton?.animations && isOfflineBackupActive()) {
+    const missingVidTargets = new Map<string, string>();
+    for (const animName of plan.animNames) {
+      for (const vRef of extractSpineVideoRefs(baseData.skeleton, animName)) {
+        if (
+          !videoDurationsMs.has(vRef.resolvedName) &&
+          !videoDurationsMs.has(vRef.resolvedName.toLowerCase())
+        ) {
+          const url = resolveMediaVideoUrl(vRef, options.mediaProfile, baseData.ninja.atlasUrl);
+          if (url) missingVidTargets.set(vRef.resolvedName, url);
+        }
+      }
+    }
+    for (const mv of options.mediaProfile?.videos || []) {
+      if (
+        mv.kind === 'ultimate' &&
+        mv.key &&
+        mv.url &&
+        !videoDurationsMs.has(mv.key) &&
+        !videoDurationsMs.has(mv.key.toLowerCase())
+      ) {
+        missingVidTargets.set(mv.key, mv.url);
+      }
+    }
+    for (const [k, url] of missingVidTargets.entries()) {
+      const buf = await readOfflineEntryBytes(url);
+      const durMs = parseMp4DurationMs(buf);
+      if (typeof durMs === 'number') {
+        videoDurationsMs.set(k, durMs);
+        videoDurationsMs.set(k.toLowerCase(), durMs);
+      }
+    }
+  }
+
+  const allEffectRefsByAnim = new Map<string, SpineCommandEffectRef[]>();
+  const effectSizeBundles = new Map<
+    string,
+    { skeleton: SpineSkeleton; regionSizes: RegionSizeLookup }
+  >();
+  for (const [sid, eff] of effectBundles.entries()) {
+    if (eff) {
+      effectSizeBundles.set(sid, { skeleton: eff.skeleton, regionSizes: eff.regionCanvasMap });
+    }
+  }
+  if (baseData.skeleton) {
+    for (const animName of plan.animNames) {
+      allEffectRefsByAnim.set(animName, extractSpineEffectRefs(baseData.skeleton, animName));
+    }
+  }
+  const screenFramingByKey = buildScreenFramingMapFromEffectBundles(
+    effectBundles,
+    allEffectRefsByAnim.values()
+  );
+
+  const effectBlendByKey = buildEffectBlendMapFromBundles(effectBundles);
+
+  // 3. Export animation instructions JSON + dedicated combat/skills/chase mechanics JSON + Documentation
   if (
     baseData.skeleton &&
     (options.includeLinkedEffects ||
@@ -1645,7 +2147,11 @@ export async function collectCharacterCompleteFiles(
         options.effectScope,
         effectBundles,
         missingEffects,
-        options.mediaProfile
+        options.mediaProfile,
+        {
+          regionSizes: baseData.regionCanvasMap,
+          videoDurationsMs,
+        }
       )
     );
   }
@@ -1654,6 +2160,8 @@ export async function collectCharacterCompleteFiles(
   if (combatJson) {
     pushFile('combate_e_habilidades.json', combatJson);
   }
+
+  pushFile('DOCUMENTACAO_EXPORTACAO.md', buildExportDocumentationMarkdown('complete'));
 
   if (options.includeLinkedEffects && options.effectScope !== 'base' && !checkpointMeta?.completedEffects) {
     for (const [spineId, eff] of effectBundles.entries()) {
@@ -1999,9 +2507,33 @@ export async function collectCharacterCompleteFiles(
           if (stripBlob) {
             pushFile(`${animDir}/${safeAnim}_spritesheet.png`, stripBlob);
           }
-          const animAllRefs = extractSpineEffectRefs(baseData.skeleton, animName);
+          const animAllRefs = allEffectRefsByAnim.get(animName) || extractSpineEffectRefs(baseData.skeleton, animName);
           const animAudioRefs = extractSpineAudioRefs(baseData.skeleton, animName);
           const animVideoRefs = extractSpineVideoRefs(baseData.skeleton, animName);
+          const animVidSync = new Map<string, { durationMs?: number; resumeAfterMs?: number }>();
+          for (const vr of animVideoRefs) {
+            const durMs = videoDurationsMs.get(vr.resolvedName) ?? videoDurationsMs.get(vr.resolvedName.toLowerCase()) ?? videoDurationsMs.get(vr.source);
+            const resMs = detectVideoResumeAfterMs(baseData.skeleton, animName, vr.time, durMs);
+            const obj = { ...(typeof durMs === 'number' ? { durationMs: durMs } : {}), ...(typeof resMs === 'number' ? { resumeAfterMs: resMs } : {}) };
+            animVidSync.set(vr.resolvedName, obj);
+            animVidSync.set(vr.resolvedName.toLowerCase(), obj);
+          }
+          const animEvents = buildAnimationEventsTimelineMs(animAllRefs, animAudioRefs, animVideoRefs, {
+            screenFramingByKey,
+            videoSyncByKey: animVidSync,
+            effectBlendByKey,
+            hitRefs: extractSpineHitRefs(baseData.skeleton, animName),
+            choreography: extractSpineChoreographyCues(baseData.skeleton, animName),
+          });
+          const animImpact = computeAttackImpactMetrics(baseData.skeleton, animName, baseData.regionCanvasMap, {
+            effectRefs: animAllRefs,
+            effectBundles: effectSizeBundles,
+            resumeAfterMs: animEvents.videos[0]?.resumeAfterMs,
+            isSkillInProfile: Boolean(
+              options.mediaProfile?.skills?.[animName] ||
+              options.mediaProfile?.skills?.[effectiveAnim]
+            ),
+          });
           const sheetMetaJson = buildGameEngineSpritesheetJson({
             characterId: baseData.ninja.id,
             animName,
@@ -2015,7 +2547,8 @@ export async function collectCharacterCompleteFiles(
             fps,
             durationSec: totalDuration,
             anchor: computeAnimationAnchorMetrics(bounds, stripCellW, stripCellH),
-            events: buildAnimationEventsTimelineMs(animAllRefs, animAudioRefs, animVideoRefs),
+            events: animEvents,
+            impactMetrics: animImpact,
           });
           pushFile(`${animDir}/${safeAnim}_spritesheet.json`, sheetMetaJson);
         }
@@ -2201,9 +2734,33 @@ export async function collectCharacterCompleteFiles(
           if (stripBlob) {
             pushFile(`${animDir}/${safeAnim}_spritesheet.png`, stripBlob);
           }
-          const animAllRefs = extractSpineEffectRefs(baseData.skeleton, animName);
+          const animAllRefs = allEffectRefsByAnim.get(animName) || extractSpineEffectRefs(baseData.skeleton, animName);
           const animAudioRefs = extractSpineAudioRefs(baseData.skeleton, animName);
           const animVideoRefs = extractSpineVideoRefs(baseData.skeleton, animName);
+          const animVidSync = new Map<string, { durationMs?: number; resumeAfterMs?: number }>();
+          for (const vr of animVideoRefs) {
+            const durMs = videoDurationsMs.get(vr.resolvedName) ?? videoDurationsMs.get(vr.resolvedName.toLowerCase()) ?? videoDurationsMs.get(vr.source);
+            const resMs = detectVideoResumeAfterMs(baseData.skeleton, animName, vr.time, durMs);
+            const obj = { ...(typeof durMs === 'number' ? { durationMs: durMs } : {}), ...(typeof resMs === 'number' ? { resumeAfterMs: resMs } : {}) };
+            animVidSync.set(vr.resolvedName, obj);
+            animVidSync.set(vr.resolvedName.toLowerCase(), obj);
+          }
+          const animEvents = buildAnimationEventsTimelineMs(animAllRefs, animAudioRefs, animVideoRefs, {
+            screenFramingByKey,
+            videoSyncByKey: animVidSync,
+            effectBlendByKey,
+            hitRefs: extractSpineHitRefs(baseData.skeleton, animName),
+            choreography: extractSpineChoreographyCues(baseData.skeleton, animName),
+          });
+          const animImpact = computeAttackImpactMetrics(baseData.skeleton, animName, baseData.regionCanvasMap, {
+            effectRefs: animAllRefs,
+            effectBundles: effectSizeBundles,
+            resumeAfterMs: animEvents.videos[0]?.resumeAfterMs,
+            isSkillInProfile: Boolean(
+              options.mediaProfile?.skills?.[animName] ||
+              options.mediaProfile?.skills?.[effectiveAnim]
+            ),
+          });
           const sheetMetaJson = buildGameEngineSpritesheetJson({
             characterId: baseData.ninja.id,
             animName,
@@ -2217,7 +2774,8 @@ export async function collectCharacterCompleteFiles(
             fps,
             durationSec: totalDuration,
             anchor: computeAnimationAnchorMetrics(bounds, layout.cellW, layout.cellH),
-            events: buildAnimationEventsTimelineMs(animAllRefs, animAudioRefs, animVideoRefs),
+            events: animEvents,
+            impactMetrics: animImpact,
           });
           pushFile(`${animDir}/${safeAnim}_spritesheet.json`, sheetMetaJson);
         }

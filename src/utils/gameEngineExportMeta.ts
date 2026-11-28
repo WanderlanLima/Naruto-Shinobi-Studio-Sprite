@@ -1,6 +1,17 @@
 import type {
+  AnimationImpactMetrics,
+  EffectPlacementSpace,
+  ScreenEffectFraming,
+  SkeletonBlendSummary,
   SpineAudioEventRef,
+  SpineBlendModeName,
+  SpineCameraCue,
+  SpineChoreographyCues,
   SpineCommandEffectRef,
+  SpineHitEventRef,
+  SpineMovementCue,
+  SpinePhaseCue,
+  SpineScreenCue,
   SpineVideoEventRef,
 } from '../types/sprite';
 import type { AnimationWorldBounds } from './atlasParser';
@@ -22,13 +33,59 @@ export interface GameEngineAnchorMetrics {
 
 export interface AnimationEventsTimelineMs {
   /** Impact/hit VFX triggered on enemy target (ms) */
-  hits: Array<{ timeMs: number; spineId: string; effectAnim: string }>;
+  hits: Array<{
+    timeMs: number;
+    spineId: string;
+    effectAnim: string;
+    targets?: string[];
+    space?: EffectPlacementSpace;
+    blendMode?: SpineBlendModeName;
+    blendModes?: SpineBlendModeName[];
+    usesAdditive?: boolean;
+  }>;
   /** Self/aura/screen particle VFX triggered on character (ms) */
-  particles: Array<{ timeMs: number; spineId: string; effectAnim: string; layer: 'behind' | 'front' }>;
+  particles: Array<{
+    timeMs: number;
+    spineId: string;
+    effectAnim: string;
+    layer: 'behind' | 'front';
+    tela?: number;
+    cena?: number;
+    targets?: string[];
+    space?: EffectPlacementSpace;
+    blendMode?: SpineBlendModeName;
+    blendModes?: SpineBlendModeName[];
+    usesAdditive?: boolean;
+    referenceViewport?: ScreenEffectFraming['referenceViewport'];
+    focalBounds?: ScreenEffectFraming['focalBounds'];
+  }>;
   /** Audio SFX cue timestamps (ms) */
   sounds: Array<{ timeMs: number; soundName: string }>;
   /** Ultimate / cut-in video cue timestamps (ms) */
-  videos: Array<{ timeMs: number; key: string }>;
+  videos: Array<{
+    timeMs: number;
+    key: string;
+    durationMs?: number;
+    resumeAfterMs?: number;
+  }>;
+  /** Detailed per-hit damage distribution, hurt anim, knockback velocity & final flag */
+  hitEvents?: Array<{
+    timeMs: number;
+    target?: string;
+    damagePercent?: number;
+    hurtAnim?: string;
+    blowup?: number;
+    velocity?: { x?: number; y?: number };
+    final?: boolean;
+  }>;
+  /** Camera zoom/focus and screen-shake cues */
+  cameraCues?: SpineCameraCue[];
+  /** Screen flash, background swap, dim/tint, portrait cut-in cues */
+  screenCues?: SpineScreenCue[];
+  /** Character dash/teleport/sub-animation/target-attach cues */
+  movementCues?: SpineMovementCue[];
+  /** Combat timeline lifecycle markers (PREACT, NEXT, POSTACT, END, pause, label) */
+  phaseCues?: SpinePhaseCue[];
 }
 
 /**
@@ -64,28 +121,78 @@ export function computeAnimationAnchorMetrics(
   };
 }
 
+export interface TimelineEnrichmentMeta {
+  screenFramingByKey?: Map<string, ScreenEffectFraming>;
+  videoSyncByKey?: Map<string, { durationMs?: number; resumeAfterMs?: number }>;
+  effectBlendByKey?: Map<string, SkeletonBlendSummary>;
+  hitRefs?: SpineHitEventRef[];
+  choreography?: SpineChoreographyCues;
+}
+
 export function buildAnimationEventsTimelineMs(
   effectRefs: SpineCommandEffectRef[],
   audioRefs: SpineAudioEventRef[],
-  videoRefs: SpineVideoEventRef[]
+  videoRefs: SpineVideoEventRef[],
+  meta?: TimelineEnrichmentMeta
 ): AnimationEventsTimelineMs {
   const hits: AnimationEventsTimelineMs['hits'] = [];
   const particles: AnimationEventsTimelineMs['particles'] = [];
 
+  const lookupBlend = (spineId: string, animName: string): SkeletonBlendSummary | undefined => {
+    const map = meta?.effectBlendByKey;
+    if (!map) return undefined;
+    return (
+      map.get(`${spineId}::${animName}`) ||
+      map.get(`${spineId}::${animName}`.toLowerCase()) ||
+      map.get(spineId) ||
+      map.get(spineId.toLowerCase())
+    );
+  };
+
   for (const ref of effectRefs) {
     const timeMs = Math.max(0, Math.round(ref.startTime * 1000));
+    const blend = lookupBlend(ref.spineId, ref.animName);
+    const blendMeta = blend
+      ? {
+          blendMode: blend.primaryBlendMode,
+          blendModes: blend.blendModes,
+          usesAdditive: blend.usesAdditive,
+        }
+      : {};
+    const placementMeta = {
+      ...(ref.targets && ref.targets.length > 0 ? { targets: ref.targets } : {}),
+      ...(ref.space ? { space: ref.space } : {}),
+    };
+
     if (ref.isSelfOrScreen) {
+      const framingKey = `${ref.spineId}::${ref.animName}`.toLowerCase();
+      const framing =
+        meta?.screenFramingByKey?.get(`${ref.spineId}::${ref.animName}`) ||
+        meta?.screenFramingByKey?.get(framingKey);
+      const isTela5 = ref.tela === 5;
       particles.push({
         timeMs,
         spineId: ref.spineId,
         effectAnim: ref.animName,
         layer: ref.layer,
+        ...(typeof ref.tela === 'number' ? { tela: ref.tela } : {}),
+        ...(typeof ref.cena === 'number' ? { cena: ref.cena } : {}),
+        ...placementMeta,
+        ...blendMeta,
+        ...(isTela5 && framing
+          ? {
+              referenceViewport: framing.referenceViewport,
+              focalBounds: framing.focalBounds,
+            }
+          : {}),
       });
     } else {
       hits.push({
         timeMs,
         spineId: ref.spineId,
         effectAnim: ref.animName,
+        ...placementMeta,
+        ...blendMeta,
       });
     }
   }
@@ -98,16 +205,52 @@ export function buildAnimationEventsTimelineMs(
     .sort((a, b) => a.timeMs - b.timeMs);
 
   const videos = videoRefs
-    .map((v) => ({
-      timeMs: Math.max(0, Math.round(v.time * 1000)),
-      key: v.resolvedName,
-    }))
+    .map((v) => {
+      const sync =
+        meta?.videoSyncByKey?.get(v.resolvedName) ||
+        meta?.videoSyncByKey?.get(v.resolvedName.toLowerCase()) ||
+        meta?.videoSyncByKey?.get(v.source) ||
+        meta?.videoSyncByKey?.get(v.source.toLowerCase());
+      return {
+        timeMs: Math.max(0, Math.round(v.time * 1000)),
+        key: v.resolvedName,
+        ...(typeof sync?.durationMs === 'number' ? { durationMs: sync.durationMs } : {}),
+        ...(typeof sync?.resumeAfterMs === 'number' ? { resumeAfterMs: sync.resumeAfterMs } : {}),
+      };
+    })
     .sort((a, b) => a.timeMs - b.timeMs);
 
   hits.sort((a, b) => a.timeMs - b.timeMs);
   particles.sort((a, b) => a.timeMs - b.timeMs);
 
-  return { hits, particles, sounds, videos };
+  const hitEvents =
+    meta?.hitRefs && meta.hitRefs.length > 0
+      ? meta.hitRefs.map((h) => ({
+          timeMs: Math.max(0, Math.round(h.time * 1000)),
+          ...(h.target ? { target: h.target } : {}),
+          ...(typeof h.p === 'number' ? { damagePercent: h.p } : {}),
+          ...(h.hurtAnim ? { hurtAnim: h.hurtAnim } : {}),
+          ...(typeof h.blowup === 'number' ? { blowup: h.blowup } : {}),
+          ...(h.velocity ? { velocity: h.velocity } : {}),
+          ...(h.final ? { final: true } : {}),
+        }))
+      : undefined;
+
+  const choreo = meta?.choreography;
+
+  return {
+    hits,
+    particles,
+    sounds,
+    videos,
+    ...(hitEvents && hitEvents.length > 0 ? { hitEvents } : {}),
+    ...(choreo?.cameraCues && choreo.cameraCues.length > 0 ? { cameraCues: choreo.cameraCues } : {}),
+    ...(choreo?.screenCues && choreo.screenCues.length > 0 ? { screenCues: choreo.screenCues } : {}),
+    ...(choreo?.movementCues && choreo.movementCues.length > 0
+      ? { movementCues: choreo.movementCues }
+      : {}),
+    ...(choreo?.phaseCues && choreo.phaseCues.length > 0 ? { phaseCues: choreo.phaseCues } : {}),
+  };
 }
 
 export interface FrameEmitterPoint {
@@ -139,8 +282,10 @@ export function buildGameEngineSpritesheetJson(params: {
   durationSec: number;
   anchor: GameEngineAnchorMetrics;
   events: AnimationEventsTimelineMs;
+  impactMetrics?: AnimationImpactMetrics | null;
   emitterPoints?: FrameEmitterPoint[];
   emitterBone?: string | null;
+  blendSummary?: SkeletonBlendSummary | null;
 }): string {
   const sheetW = params.cols * params.cellW;
   const sheetH = params.rows * params.cellH;
@@ -218,6 +363,20 @@ export function buildGameEngineSpritesheetJson(params: {
           note: 'Coordenadas dos pes do ninja (origem Spine 0,0) na celula para alinhamento no chao em Phaser, Godot e Unity.',
         },
         eventsMs: params.events,
+        ...(params.blendSummary
+          ? {
+              blendMode: params.blendSummary.primaryBlendMode,
+              blendModes: params.blendSummary.blendModes,
+              usesAdditive: params.blendSummary.usesAdditive,
+            }
+          : {}),
+        ...(params.impactMetrics
+          ? {
+              impactMs: params.impactMetrics.impactMs,
+              impactReachPx: params.impactMetrics.impactReachPx,
+              impactCenterX: params.impactMetrics.impactCenterX,
+            }
+          : {}),
         ...(params.emitterPoints && params.emitterPoints.length > 0
           ? {
               emitterBone: params.emitterBone || params.emitterPoints[0]?.bone || undefined,
@@ -258,8 +417,10 @@ export function buildPhaserMultiAtlasJson(params: {
   durationSec: number;
   anchor: GameEngineAnchorMetrics;
   events: AnimationEventsTimelineMs;
+  impactMetrics?: AnimationImpactMetrics | null;
   emitterPoints?: FrameEmitterPoint[];
   emitterBone?: string | null;
+  blendSummary?: SkeletonBlendSummary | null;
 }): string {
   const frameDurationMs =
     params.frameCount > 0 && params.durationSec > 0
@@ -327,6 +488,20 @@ export function buildPhaserMultiAtlasJson(params: {
           note: 'Coordenadas dos pes do ninja (origem Spine 0,0) na celula para alinhamento no chao em Phaser, Godot e Unity.',
         },
         eventsMs: params.events,
+        ...(params.blendSummary
+          ? {
+              blendMode: params.blendSummary.primaryBlendMode,
+              blendModes: params.blendSummary.blendModes,
+              usesAdditive: params.blendSummary.usesAdditive,
+            }
+          : {}),
+        ...(params.impactMetrics
+          ? {
+              impactMs: params.impactMetrics.impactMs,
+              impactReachPx: params.impactMetrics.impactReachPx,
+              impactCenterX: params.impactMetrics.impactCenterX,
+            }
+          : {}),
         ...(params.emitterPoints && params.emitterPoints.length > 0
           ? {
               emitterBone: params.emitterBone || params.emitterPoints[0]?.bone || undefined,
@@ -341,4 +516,5 @@ export function buildPhaserMultiAtlasJson(params: {
     2
   );
 }
+
 

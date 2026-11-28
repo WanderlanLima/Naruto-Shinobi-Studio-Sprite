@@ -461,6 +461,14 @@ function savePersistedPrefs(prefs: PersistedSourcePrefs) {
 function openOfflineSourceDb(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === 'undefined') return Promise.resolve(null);
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (db: IDBDatabase | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(db);
+    };
+    const timer = setTimeout(() => finish(null), 3500);
     try {
       const req = indexedDB.open(OFFLINE_IDB_NAME, 1);
       req.onupgradeneeded = () => {
@@ -469,10 +477,11 @@ function openOfflineSourceDb(): Promise<IDBDatabase | null> {
           db.createObjectStore(OFFLINE_IDB_STORE);
         }
       };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => resolve(null);
+      req.onsuccess = () => finish(req.result);
+      req.onerror = () => finish(null);
+      req.onblocked = () => finish(null);
     } catch {
-      resolve(null);
+      finish(null);
     }
   });
 }
@@ -658,8 +667,12 @@ async function getOpfsBackupDir(create: boolean): Promise<OpfsDirectoryHandleLik
   };
   if (!storage || typeof storage.getDirectory !== 'function') return null;
   try {
-    const root = await storage.getDirectory();
-    return await root.getDirectoryHandle(OPFS_BACKUP_DIR_NAME, { create });
+    const dirTask = (async () => {
+      const root = await storage.getDirectory!();
+      return await root.getDirectoryHandle(OPFS_BACKUP_DIR_NAME, { create });
+    })();
+    const timeoutTask = new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000));
+    return await Promise.race([dirTask, timeoutTask]);
   } catch {
     return null;
   }
@@ -706,9 +719,9 @@ let mountedCatalog: ExtractResponse | null = null;
 let cachedOfflineCatalog: ExtractResponse | null = null;
 let mountedOrigin = 'https://naruto.jotagame.com';
 let strictOfflineMode = initialPrefs.strictOffline;
-// Start restoringPersisted=true when offline preference or saved archives exist to avoid flashing "Reconectar" during startup auto-mount
+// Start restoringPersisted=true only when restoring offline mode (avoids flashing "Reconectar" during startup auto-mount)
 let restoringPersisted =
-  initialPrefs.sourceMode === 'offline' || initialPrefs.savedArchives.length > 0;
+  initialPrefs.sourceMode === 'offline' && !initialPrefs.explicitOnline;
 let initPromise: Promise<void> | null = null;
 let opfsSyncToken = 0;
 let opfsSyncState: OfflineOpfsSyncState = {
@@ -827,7 +840,7 @@ function buildSnapshot(): OfflineZipSnapshot {
     savedArchives: [...savedArchivesMeta],
     canOneClickReauthorize: canReauth,
     needsReconnect,
-    restoring: restoringPersisted,
+    restoring: restoringPersisted && !hasMounted && currentSourceMode === 'offline',
     opfsSync: { ...opfsSyncState },
     hasCatalog: Boolean(effectiveCatalog),
     catalog: effectiveCatalog,
@@ -874,6 +887,9 @@ export function setStrictOfflineMode(enabled: boolean) {
 
 export function setPreferredSourceMode(mode: DataSourceMode) {
   const nextExplicitOnline = mode === 'online';
+  if (mode === 'online' && restoringPersisted) {
+    restoringPersisted = false;
+  }
   if (currentSourceMode === mode && explicitOnlineChoice === nextExplicitOnline) return;
   currentSourceMode = mode;
   explicitOnlineChoice = nextExplicitOnline;
@@ -1520,6 +1536,11 @@ export async function mountBackupZipFiles(
 
     // Stream a permanent zero-permission copy into OPFS in the background so page reloads/reopens never need a click!
     void persistFilesToOpfsInBackground(filesSnapshot, fallbackHandles);
+  }
+
+  // Backup archives are mounted; never leave restoring flag active once mount completes
+  if (mountedArchives.length > 0) {
+    restoringPersisted = false;
   }
 
   emitChange();

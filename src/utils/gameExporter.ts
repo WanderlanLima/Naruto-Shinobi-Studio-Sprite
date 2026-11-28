@@ -1,9 +1,15 @@
 import { GIFEncoder } from 'gifenc';
 import type {
+  AnimationImpactMetrics,
   NinjaEntry,
   NinjaMediaProfile,
+  ScreenEffectFraming,
+  SkeletonBlendSummary,
   SpineAudioEventRef,
+  SpineBlendModeName,
+  SpineChoreographyCues,
   SpineCommandEffectRef,
+  SpineHitEventRef,
   SpineSkeleton,
   SpineVideoEventRef,
   SpriteRegionSource,
@@ -12,24 +18,36 @@ import {
   buildRegionSpriteMap,
   canvasToPngBlob,
   computeAnimationWorldBounds,
+  computeAttackImpactMetrics,
   detectAttackEmitterBoneName,
+  detectSkeletonBlendModes,
+  detectVideoResumeAfterMs,
   downloadBlob,
   extractSpineAudioRefs,
+  extractSpineChoreographyCues,
   extractSpineEffectRefs,
+  extractSpineHitRefs,
   extractSpineVideoRefs,
   findMatchingCompanionAnimName,
   getAnimationDuration,
   hasVisibleAnimationContent,
   loadImageElement,
   parseAtlas,
+  parseMp4DurationMs,
   renderSpineFrameToCanvas,
   resolveEffectiveAnimationName,
   sampleAttackEmitterPointAtTime,
   writeQuantizedGifFrame,
+  type RegionSizeLookup,
 } from './atlasParser';
 import {
   buildCharacterCombatJson,
   buildCharacterInstructionsJson,
+  buildEffectBlendMapFromBundles,
+  buildExportDocumentationMarkdown,
+  buildScreenFramingMapFromEffectBundles,
+  collectCharacterArtworkFiles,
+  collectCharacterSkillIconFiles,
   fetchParsedEffectAsset,
   type ParsedEffectAsset,
 } from './completeCharacterExporter';
@@ -119,10 +137,14 @@ export interface GameCharacterManifestAnim {
   imageFiles: string[];
   gifFile?: string;
   hasEmitterPoints: boolean;
+  impactMs?: number;
+  impactReachPx?: number;
+  impactCenterX?: number;
 }
 
 export interface GameCharacterManifest {
   schemaVersion: 'shinobi-phaser-v1';
+  documentationFile?: 'DOCUMENTACAO_EXPORTACAO.md';
   id: string;
   originalId: string;
   code: string;
@@ -163,10 +185,19 @@ export interface GameCharacterManifest {
     originalAnim: string;
     jsonFile: string;
     imageFiles: string[];
+    blendMode?: SpineBlendModeName;
+    blendModes?: SpineBlendModeName[];
+    usesAdditive?: boolean;
   }>;
   audio: Array<{
     name: string;
     originalName: string;
+    file: string;
+  }>;
+  voices?: Array<{
+    key: string;
+    category: string;
+    label: string;
     file: string;
   }>;
   videos?: Array<{
@@ -174,6 +205,23 @@ export interface GameCharacterManifest {
     originalName: string;
     file: string;
   }>;
+  iconAssets?: string[];
+  artwork?: {
+    avatar?: string;
+    portrait?: string;
+  };
+  passiveAura?: {
+    id: string;
+    label: string;
+  };
+  combatSummary?: {
+    heroCode?: string;
+    natureLabel?: string;
+    combatRoleLabel?: string;
+    quality?: number;
+    star?: number;
+    maxStar?: number;
+  };
   files: string[];
 }
 
@@ -664,6 +712,67 @@ async function fetchBinaryCapped(
   }
 }
 
+async function toUint8Array(data: Blob | ArrayBuffer | Uint8Array | string): Promise<Uint8Array> {
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (typeof data === 'string') return textEncoder.encode(data);
+  return new Uint8Array(await data.arrayBuffer());
+}
+
+function mergeChoreographyCuesForAnims(
+  skeleton: SpineSkeleton,
+  animNames: string[]
+): SpineChoreographyCues {
+  const merged: SpineChoreographyCues = {
+    cameraCues: [],
+    screenCues: [],
+    movementCues: [],
+    phaseCues: [],
+  };
+  const seenCam = new Set<string>();
+  const seenScr = new Set<string>();
+  const seenMov = new Set<string>();
+  const seenPh = new Set<string>();
+
+  for (const animName of animNames) {
+    const cues = extractSpineChoreographyCues(skeleton, animName);
+    for (const c of cues.cameraCues) {
+      const k = JSON.stringify(c);
+      if (!seenCam.has(k)) {
+        seenCam.add(k);
+        merged.cameraCues.push(c);
+      }
+    }
+    for (const s of cues.screenCues) {
+      const k = JSON.stringify(s);
+      if (!seenScr.has(k)) {
+        seenScr.add(k);
+        merged.screenCues.push(s);
+      }
+    }
+    for (const m of cues.movementCues) {
+      const k = JSON.stringify(m);
+      if (!seenMov.has(k)) {
+        seenMov.add(k);
+        merged.movementCues.push(m);
+      }
+    }
+    for (const p of cues.phaseCues) {
+      const k = JSON.stringify(p);
+      if (!seenPh.has(k)) {
+        seenPh.add(k);
+        merged.phaseCues.push(p);
+      }
+    }
+  }
+
+  merged.cameraCues.sort((a, b) => a.timeMs - b.timeMs);
+  merged.screenCues.sort((a, b) => a.timeMs - b.timeMs);
+  merged.movementCues.sort((a, b) => a.timeMs - b.timeMs);
+  merged.phaseCues.sort((a, b) => a.timeMs - b.timeMs);
+  return merged;
+}
+
 async function renderSkeletonAnimationToPhaserFiles(params: {
   characterIdSlug: string;
   skeleton: SpineSkeleton;
@@ -674,6 +783,8 @@ async function renderSkeletonAnimationToPhaserFiles(params: {
   fps: number;
   baseRelDir: string;
   events: ReturnType<typeof buildAnimationEventsTimelineMs>;
+  impactMetrics?: AnimationImpactMetrics | null;
+  blendSummary?: SkeletonBlendSummary | null;
   collectEmitterPoints: boolean;
   facing: 'right' | 'left';
   includeGif: boolean;
@@ -848,6 +959,8 @@ async function renderSkeletonAnimationToPhaserFiles(params: {
         durationSec,
         anchor,
         events: params.events,
+        impactMetrics: params.impactMetrics,
+        blendSummary: params.blendSummary,
         emitterPoints: emitterPoints.length > 0 ? emitterPoints : undefined,
         emitterBone,
       })
@@ -865,6 +978,8 @@ async function renderSkeletonAnimationToPhaserFiles(params: {
         durationSec,
         anchor,
         events: params.events,
+        impactMetrics: params.impactMetrics,
+        blendSummary: params.blendSummary,
         emitterPoints: emitterPoints.length > 0 ? emitterPoints : undefined,
         emitterBone,
       });
@@ -1003,10 +1118,12 @@ export async function buildGameExportForNinja(params: {
     fullMediaProfile
   );
 
-  // Collect all unique effects, audio, and videos ONLY from the selected animations
+  // Collect all unique effects, audio, hits, choreography, and videos ONLY from the selected animations
   const usedEffectRefsByAnim = new Map<string, SpineCommandEffectRef[]>();
   const usedAudioRefsByAnim = new Map<string, SpineAudioEventRef[]>();
   const usedVideoRefsByAnim = new Map<string, SpineVideoEventRef[]>();
+  const usedHitRefsByAnim = new Map<string, SpineHitEventRef[]>();
+  const usedChoreoByAnim = new Map<string, SpineChoreographyCues>();
   const uniqueEffectPairs = new Map<
     string,
     { spineId: string; animName: string; isCompanion?: boolean; explicitUrls?: { atlasUrl: string; skeletonUrl: string } }
@@ -1025,6 +1142,8 @@ export async function buildGameExportForNinja(params: {
     const seenAud = new Set<string>();
     const mergedVideos: SpineVideoEventRef[] = [];
     const seenVid = new Set<string>();
+    const mergedHits: SpineHitEventRef[] = [];
+    const seenHits = new Set<string>();
 
     for (const srcAnim of sel.sourceAnims) {
       for (const ref of extractSpineEffectRefs(skeleton, srcAnim)) {
@@ -1048,11 +1167,21 @@ export async function buildGameExportForNinja(params: {
           mergedVideos.push(vid);
         }
       }
+      for (const h of extractSpineHitRefs(skeleton, srcAnim)) {
+        const key = `${h.time.toFixed(4)}::${h.p ?? ''}::${h.final ? 1 : 0}`;
+        if (!seenHits.has(key)) {
+          seenHits.add(key);
+          mergedHits.push(h);
+        }
+      }
     }
+    mergedHits.sort((a, b) => a.time - b.time);
 
     usedEffectRefsByAnim.set(sel.slug, mergedEffects);
     usedAudioRefsByAnim.set(sel.slug, mergedAudio);
     usedVideoRefsByAnim.set(sel.slug, mergedVideos);
+    usedHitRefsByAnim.set(sel.slug, mergedHits);
+    usedChoreoByAnim.set(sel.slug, mergeChoreographyCuesForAnims(skeleton, sel.sourceAnims));
 
     if (options.includeEffects) {
       for (const ref of mergedEffects) {
@@ -1125,6 +1254,113 @@ export async function buildGameExportForNinja(params: {
     }
   }
 
+  const missingEffects: string[] = [];
+  if (options.includeEffects && uniqueEffectPairs.size > 0) {
+    const uniqueSpines = Array.from(
+      new Set(Array.from(uniqueEffectPairs.values()).map((p) => p.spineId))
+    ).filter((sid) => !effectBundles.has(sid));
+
+    for (let i = 0; i < uniqueSpines.length; i += 4) {
+      throwIfAborted(signal);
+      const batch = uniqueSpines.slice(i, i + 4);
+      const loaded = await Promise.all(
+        batch.map(async (sid) => ({
+          sid,
+          asset: await fetchParsedEffectAsset(ninja.atlasUrl, sid, signal, params.effectCache),
+        }))
+      );
+      for (const { sid, asset } of loaded) {
+        effectBundles.set(sid, asset);
+        if (!asset) missingEffects.push(sid);
+      }
+    }
+  }
+
+  const effectSizeBundles = new Map<
+    string,
+    { skeleton: SpineSkeleton; regionSizes: RegionSizeLookup }
+  >();
+  for (const [sid, eff] of effectBundles.entries()) {
+    if (eff) {
+      effectSizeBundles.set(sid, { skeleton: eff.skeleton, regionSizes: eff.regionCanvasMap });
+    }
+  }
+
+  const rawScreenFraming = buildScreenFramingMapFromEffectBundles(
+    effectBundles,
+    usedEffectRefsByAnim.values()
+  );
+  const slugScreenFraming = new Map<string, ScreenEffectFraming>(rawScreenFraming);
+  for (const [key, framing] of rawScreenFraming.entries()) {
+    const [sid, eanim] = key.split('::');
+    if (sid && eanim) {
+      const sKey = `${toGameSlug(sid, 'effect')}::${toGameSlug(eanim, 'anim')}`;
+      slugScreenFraming.set(sKey, framing);
+      slugScreenFraming.set(sKey.toLowerCase(), framing);
+    }
+  }
+
+  const rawEffectBlendMap = buildEffectBlendMapFromBundles(effectBundles);
+  const slugEffectBlendMap = new Map<string, SkeletonBlendSummary>(rawEffectBlendMap);
+  for (const [key, blend] of rawEffectBlendMap.entries()) {
+    const [sid, eanim] = key.split('::');
+    if (sid && eanim) {
+      const sKey = `${toGameSlug(sid, 'effect')}::${toGameSlug(eanim, 'anim')}`;
+      slugEffectBlendMap.set(sKey, blend);
+      slugEffectBlendMap.set(sKey.toLowerCase(), blend);
+    } else if (sid) {
+      const sSlug = toGameSlug(sid, 'effect');
+      slugEffectBlendMap.set(sSlug, blend);
+      slugEffectBlendMap.set(sSlug.toLowerCase(), blend);
+    }
+  }
+
+  // Preload MP4 videos (or inspect offline headers) so durationMs & resumeAfterMs populate eventsMs
+  const videoDurationsMs = new Map<string, number>();
+  const preloadedVideos: Array<{
+    slug: string;
+    vRef: SpineVideoEventRef;
+    bytes: Uint8Array;
+  }> = [];
+
+  if (options.includeVideos && uniqueVideoRefs.size > 0) {
+    const vidEntries = Array.from(uniqueVideoRefs.entries());
+    params.onStep?.(`${ninja.name || ninja.id} · coletando ${vidEntries.length} vídeo(s) MP4...`);
+    for (const [slug, vRef] of vidEntries) {
+      throwIfAborted(signal);
+      const url = resolveMediaVideoUrl(vRef, fullMediaProfile, ninja.atlasUrl);
+      if (!url) continue;
+      const res = await fetchBinaryCapped(url, MAX_GAME_FILE_BYTES, signal);
+      if (res.skippedTooLarge) {
+        skippedWarnings.push(`Vídeo ${slug}.mp4 excede 20 MB e foi ignorado.`);
+        continue;
+      }
+      if (!res.bytes) continue;
+      const durMs = parseMp4DurationMs(res.bytes);
+      if (typeof durMs === 'number') {
+        videoDurationsMs.set(slug, durMs);
+        videoDurationsMs.set(vRef.resolvedName, durMs);
+        videoDurationsMs.set(vRef.resolvedName.toLowerCase(), durMs);
+        videoDurationsMs.set(vRef.source, durMs);
+        videoDurationsMs.set(vRef.source.toLowerCase(), durMs);
+      }
+      preloadedVideos.push({ slug, vRef, bytes: res.bytes });
+    }
+  } else if (isOfflineBackupActive() && uniqueVideoRefs.size > 0) {
+    for (const [slug, vRef] of uniqueVideoRefs.entries()) {
+      const url = resolveMediaVideoUrl(vRef, fullMediaProfile, ninja.atlasUrl);
+      if (!url) continue;
+      const buf = await readOfflineEntryBytes(url);
+      const durMs = parseMp4DurationMs(buf);
+      if (typeof durMs === 'number') {
+        videoDurationsMs.set(slug, durMs);
+        videoDurationsMs.set(vRef.resolvedName, durMs);
+        videoDurationsMs.set(vRef.resolvedName.toLowerCase(), durMs);
+        videoDurationsMs.set(vRef.source, durMs);
+      }
+    }
+  }
+
   const allFiles: GameExportFile[] = [];
   const usedPaths = new Set<string>();
   const pushFile = (path: string, bytes: Uint8Array) => {
@@ -1149,6 +1385,29 @@ export async function buildGameExportForNinja(params: {
     const effRefs = usedEffectRefsByAnim.get(sel.slug) || [];
     const audRefs = usedAudioRefsByAnim.get(sel.slug) || [];
     const vidRefs = usedVideoRefsByAnim.get(sel.slug) || [];
+    const hitRefs = usedHitRefsByAnim.get(sel.slug) || [];
+    const choreo = usedChoreoByAnim.get(sel.slug);
+
+    const videoSyncByKey = new Map<
+      string,
+      { durationMs?: number; resumeAfterMs?: number }
+    >();
+    for (const v of vidRefs) {
+      const slugKey = toGameSlug(v.resolvedName, 'video');
+      const durMs =
+        videoDurationsMs.get(slugKey) ??
+        videoDurationsMs.get(v.resolvedName) ??
+        videoDurationsMs.get(v.resolvedName.toLowerCase());
+      const resMs = detectVideoResumeAfterMs(skeleton, sel.originalAnim, v.time, durMs);
+      const syncObj = {
+        ...(typeof durMs === 'number' ? { durationMs: durMs } : {}),
+        ...(typeof resMs === 'number' ? { resumeAfterMs: resMs } : {}),
+      };
+      videoSyncByKey.set(slugKey, syncObj);
+      videoSyncByKey.set(v.resolvedName, syncObj);
+      videoSyncByKey.set(v.resolvedName.toLowerCase(), syncObj);
+      videoSyncByKey.set(v.source, syncObj);
+    }
 
     // Remap event names to lowercase slugs so Phaser code can directly look up effects/audio files
     const normalizedEvents = buildAnimationEventsTimelineMs(
@@ -1170,7 +1429,33 @@ export async function buildGameExportForNinja(params: {
             ...v,
             resolvedName: toGameSlug(v.resolvedName, 'video'),
           }))
-        : []
+        : [],
+      {
+        screenFramingByKey: slugScreenFraming,
+        videoSyncByKey,
+        effectBlendByKey: slugEffectBlendMap,
+        hitRefs,
+        choreography: choreo,
+      }
+    );
+
+    const firstVideoResumeMs =
+      vidRefs.length > 0
+        ? videoSyncByKey.get(toGameSlug(vidRefs[0].resolvedName, 'video'))?.resumeAfterMs
+        : undefined;
+    const impactMetrics = computeAttackImpactMetrics(
+      skeleton,
+      sel.originalAnim,
+      regionCanvasMap,
+      {
+        effectRefs: effRefs,
+        effectBundles: effectSizeBundles,
+        resumeAfterMs: firstVideoResumeMs,
+        isSkillInProfile: Boolean(
+          fullMediaProfile?.skills?.[sel.originalAnim] ||
+          fullMediaProfile?.skills?.[sel.effectiveAnim]
+        ),
+      }
     );
 
     const rendered = await renderSkeletonAnimationToPhaserFiles({
@@ -1183,6 +1468,7 @@ export async function buildGameExportForNinja(params: {
       fps,
       baseRelDir: `${charRoot}/anims`,
       events: normalizedEvents,
+      impactMetrics,
       collectEmitterPoints: sel.isCombatAction,
       facing,
       includeGif: options.includeGifs,
@@ -1212,33 +1498,20 @@ export async function buildGameExportForNinja(params: {
       imageFiles: rendered.imageFiles.map((p) => p.slice(charRoot.length + 1)),
       ...(rendered.gifFile ? { gifFile: rendered.gifFile.slice(charRoot.length + 1) } : {}),
       hasEmitterPoints: rendered.hasEmitterPoints,
+      ...(impactMetrics
+        ? {
+            impactMs: impactMetrics.impactMs,
+            impactReachPx: impactMetrics.impactReachPx,
+            impactCenterX: impactMetrics.impactCenterX,
+          }
+        : {}),
     });
   }
 
   // 2. Render ONLY the standalone effects referenced by the exported animations
   const manifestEffects: GameCharacterManifest['effects'] = [];
-  const missingEffects: string[] = [];
 
   if (options.includeEffects && uniqueEffectPairs.size > 0) {
-    const uniqueSpines = Array.from(
-      new Set(Array.from(uniqueEffectPairs.values()).map((p) => p.spineId))
-    ).filter((sid) => !effectBundles.has(sid));
-
-    for (let i = 0; i < uniqueSpines.length; i += 4) {
-      throwIfAborted(signal);
-      const batch = uniqueSpines.slice(i, i + 4);
-      const loaded = await Promise.all(
-        batch.map(async (sid) => ({
-          sid,
-          asset: await fetchParsedEffectAsset(ninja.atlasUrl, sid, signal, params.effectCache),
-        }))
-      );
-      for (const { sid, asset } of loaded) {
-        effectBundles.set(sid, asset);
-        if (!asset) missingEffects.push(sid);
-      }
-    }
-
     const pairs = Array.from(uniqueEffectPairs.values());
     const exportedEffectKeys = new Set<string>();
 
@@ -1266,6 +1539,8 @@ export async function buildGameExportForNinja(params: {
         `${ninja.name || ninja.id} · efeito ${spineSlug}/${animSlug} (${i + 1}/${pairs.length})...`
       );
 
+      const effBlendSummary = detectSkeletonBlendModes(effAsset.skeleton, matchedAnim);
+
       const renderedEff = await renderSkeletonAnimationToPhaserFiles({
         characterIdSlug: spineSlug,
         skeleton: effAsset.skeleton,
@@ -1276,6 +1551,7 @@ export async function buildGameExportForNinja(params: {
         fps,
         baseRelDir: `${charRoot}/effects/${spineSlug}`,
         events: { hits: [], particles: [], sounds: [], videos: [] },
+        blendSummary: effBlendSummary,
         collectEmitterPoints: false,
         facing,
         includeGif: false,
@@ -1292,11 +1568,14 @@ export async function buildGameExportForNinja(params: {
         originalAnim: pair.animName,
         jsonFile: renderedEff.jsonFile.slice(charRoot.length + 1),
         imageFiles: renderedEff.imageFiles.map((p) => p.slice(charRoot.length + 1)),
+        blendMode: effBlendSummary.primaryBlendMode,
+        blendModes: effBlendSummary.blendModes,
+        usesAdditive: effBlendSummary.usesAdditive,
       });
     }
   }
 
-  // 3. Collect ONLY MP3 sounds used by exported animations
+  // 3. Collect ONLY MP3 sounds used by exported animations + character voice clips
   const manifestAudio: GameCharacterManifest['audio'] = [];
   if (options.includeAudio && uniqueSoundNames.size > 0) {
     const soundEntries = Array.from(uniqueSoundNames.entries());
@@ -1329,37 +1608,106 @@ export async function buildGameExportForNinja(params: {
     }
   }
 
-  // 4. Optional MP4 videos (OFF by default)
-  const manifestVideos: NonNullable<GameCharacterManifest['videos']> = [];
-  if (options.includeVideos && uniqueVideoRefs.size > 0) {
-    const vidEntries = Array.from(uniqueVideoRefs.entries());
-    params.onStep?.(`${ninja.name || ninja.id} · coletando ${vidEntries.length} vídeo(s) MP4...`);
-    for (const [slug, vRef] of vidEntries) {
+  const manifestVoices: NonNullable<GameCharacterManifest['voices']> = [];
+  if (options.includeAudio && fullMediaProfile?.voices && fullMediaProfile.voices.length > 0) {
+    const voices = fullMediaProfile.voices;
+    for (let i = 0; i < voices.length; i += 6) {
       throwIfAborted(signal);
-      const url = resolveMediaVideoUrl(vRef, fullMediaProfile, ninja.atlasUrl);
-      if (!url) continue;
-      const res = await fetchBinaryCapped(url, MAX_GAME_FILE_BYTES, signal);
-      if (res.skippedTooLarge) {
-        skippedWarnings.push(`Vídeo ${slug}.mp4 excede 20 MB e foi ignorado.`);
-        continue;
+      const batch = voices.slice(i, i + 6);
+      const fetched = await Promise.all(
+        batch.map(async (v) => {
+          const res = await fetchBinaryCapped(v.url, MAX_GAME_FILE_BYTES, signal);
+          return { v, res };
+        })
+      );
+      for (const { v, res } of fetched) {
+        if (!res.bytes) continue;
+        const slug = toGameSlug(`voice_${v.category}_${v.key}`, 'voice');
+        const relFile = `audio/${slug}.mp3`;
+        pushFile(`${charRoot}/${relFile}`, res.bytes);
+        manifestVoices.push({
+          key: v.key,
+          category: v.category,
+          label: v.label,
+          file: relFile,
+        });
       }
-      if (!res.bytes) continue;
-      const relFile = `video/${slug}.mp4`;
-      pushFile(`${charRoot}/${relFile}`, res.bytes);
-      manifestVideos.push({
-        name: slug,
-        originalName: vRef.resolvedName,
-        file: relFile,
+    }
+  }
+
+  // 4. Optional MP4 videos (pushed from preloaded buffer)
+  const manifestVideos: NonNullable<GameCharacterManifest['videos']> = [];
+  for (const item of preloadedVideos) {
+    const relFile = `video/${item.slug}.mp4`;
+    pushFile(`${charRoot}/${relFile}`, item.bytes);
+    manifestVideos.push({
+      name: item.slug,
+      originalName: item.vRef.resolvedName,
+      file: relFile,
+    });
+  }
+
+  // 4b. Skill & Passive icons (icons/)
+  const iconAssets: string[] = [];
+  if (fullMediaProfile) {
+    try {
+      const iconFiles = await collectCharacterSkillIconFiles(fullMediaProfile, charRoot, signal, 'icons');
+      for (const ic of iconFiles) {
+        const bytes = await toUint8Array(ic.data);
+        if (bytes.byteLength === 0 || bytes.byteLength > MAX_GAME_FILE_BYTES) continue;
+        pushFile(ic.path, bytes);
+        iconAssets.push(ic.path.slice(charRoot.length + 1));
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') throw err;
+    }
+  }
+
+  // 4c. Key lightweight character artworks (avatar & portrait in artes/)
+  const manifestArtwork: NonNullable<GameCharacterManifest['artwork']> = {};
+  if (ninja.kind !== 'effect') {
+    try {
+      const rawArtworks = await collectCharacterArtworkFiles({
+        ninja,
+        mediaProfile: fullMediaProfile,
+        folderPrefix: charRoot,
+        signal,
       });
+      const avatarEntry = rawArtworks.find((f) => /\/artes\/08_avatar_/i.test(f.path));
+      const portraitEntry =
+        rawArtworks.find((f) => /\/artes\/02_meio_corpo_/i.test(f.path)) ||
+        rawArtworks.find((f) => /\/artes\/03_retrato_medio_/i.test(f.path));
+
+      if (avatarEntry) {
+        const bytes = await toUint8Array(avatarEntry.data);
+        if (bytes.byteLength > 0 && bytes.byteLength <= MAX_GAME_FILE_BYTES) {
+          const ext = avatarEntry.path.split('.').pop()?.toLowerCase() || 'png';
+          const relFile = `artes/avatar.${ext}`;
+          pushFile(`${charRoot}/${relFile}`, bytes);
+          manifestArtwork.avatar = relFile;
+        }
+      }
+      if (portraitEntry) {
+        const bytes = await toUint8Array(portraitEntry.data);
+        if (bytes.byteLength > 0 && bytes.byteLength <= MAX_GAME_FILE_BYTES) {
+          const ext = portraitEntry.path.split('.').pop()?.toLowerCase() || 'png';
+          const relFile = `artes/portrait.${ext}`;
+          pushFile(`${charRoot}/${relFile}`, bytes);
+          manifestArtwork.portrait = relFile;
+        }
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') throw err;
     }
   }
 
   // 5. Reuse combate_e_habilidades.json and animacoes_instrucoes.json from completeCharacterExporter.ts
   const combatJsonText =
-    buildCharacterCombatJson(ninja.id, fullMediaProfile) ||
+    buildCharacterCombatJson(ninja.id, fullMediaProfile, { iconDir: 'icons' }) ||
     JSON.stringify(
       {
         schemaVersion: 'shinobi-combat-v1',
+        documentationFile: 'DOCUMENTACAO_EXPORTACAO.md',
         characterId: ninja.id,
         heroCode: ninja.code,
         displayName: ninja.name || ninja.id,
@@ -1377,9 +1725,26 @@ export async function buildGameExportForNinja(params: {
     options.includeEffects ? 'all' : 'base',
     effectBundles,
     missingEffects,
-    fullMediaProfile
+    fullMediaProfile,
+    {
+      regionSizes: regionCanvasMap,
+      videoDurationsMs,
+      iconDir: 'icons',
+      animAudioDir: 'audio',
+      voiceAudioDir: 'audio',
+      voiceFilePrefix: 'voice_',
+      videoDir: 'video',
+      formatVoiceName: (cat, key) => toGameSlug(`voice_${cat}_${key}`, 'voice'),
+      formatSoundName: (cleanName) => toGameSlug(cleanName, 'sfx'),
+      formatVideoName: (videoKey) => toGameSlug(videoKey, 'video'),
+    }
   );
   pushFile(`${charRoot}/animacoes_instrucoes.json`, textEncoder.encode(instructionsJsonText));
+
+  pushFile(
+    `${charRoot}/DOCUMENTACAO_EXPORTACAO.md`,
+    textEncoder.encode(buildExportDocumentationMarkdown('game'))
+  );
 
   // 6. Build character.json
   const charRelFiles = allFiles
@@ -1387,8 +1752,14 @@ export async function buildGameExportForNinja(params: {
     .concat('character.json')
     .sort();
 
+  const cp = fullMediaProfile?.combatProfile;
+  const hasCombatSummary = Boolean(
+    cp && (cp.heroCode || cp.natureLabel || cp.combatRoleLabel || cp.quality || cp.star)
+  );
+
   const manifest: GameCharacterManifest = {
     schemaVersion: 'shinobi-phaser-v1',
+    documentationFile: 'DOCUMENTACAO_EXPORTACAO.md',
     id: idSlug,
     originalId: ninja.id,
     code: ninja.code || fullMediaProfile?.heroCode || '',
@@ -1402,7 +1773,30 @@ export async function buildGameExportForNinja(params: {
     animations: manifestAnims,
     effects: manifestEffects,
     audio: manifestAudio,
+    ...(manifestVoices.length > 0 ? { voices: manifestVoices } : {}),
     ...(manifestVideos.length > 0 ? { videos: manifestVideos } : {}),
+    ...(iconAssets.length > 0 ? { iconAssets } : {}),
+    ...(manifestArtwork.avatar || manifestArtwork.portrait ? { artwork: manifestArtwork } : {}),
+    ...(fullMediaProfile?.passiveAura
+      ? {
+          passiveAura: {
+            id: fullMediaProfile.passiveAura.id,
+            label: fullMediaProfile.passiveAura.label,
+          },
+        }
+      : {}),
+    ...(hasCombatSummary && cp
+      ? {
+          combatSummary: {
+            heroCode: cp.heroCode,
+            natureLabel: cp.natureLabel,
+            combatRoleLabel: cp.combatRoleLabel,
+            quality: cp.quality,
+            star: cp.star,
+            maxStar: cp.maxStar,
+          },
+        }
+      : {}),
     files: charRelFiles,
   };
 

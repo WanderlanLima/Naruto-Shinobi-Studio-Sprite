@@ -130,6 +130,15 @@ export interface SpineAnimationData {
   events?: Array<{ time?: number; name?: string; string?: string }>;
 }
 
+export type EffectPlacementSpace = 'self' | 'target' | 'screen' | 'world';
+export type SpineBlendModeName = 'normal' | 'additive' | 'screen' | 'multiply';
+
+export interface SkeletonBlendSummary {
+  primaryBlendMode: SpineBlendModeName;
+  blendModes: SpineBlendModeName[];
+  usesAdditive: boolean;
+}
+
 export interface SpineCommandEffectRef {
   spineId: string;
   animName: string;
@@ -137,7 +146,108 @@ export interface SpineCommandEffectRef {
   layer: 'behind' | 'front';
   isSelfOrScreen: boolean;
   loop: boolean;
+  tela?: number;
+  cena?: number;
+  targets?: string[];
+  space?: EffectPlacementSpace;
   rawCommand: string;
+}
+
+export interface SpineHitEventRef {
+  time: number;
+  target?: string;
+  p?: number;
+  hurtAnim?: string;
+  blowup?: number;
+  velocity?: { x?: number; y?: number };
+  final?: boolean;
+  rawCommand: string;
+}
+
+export interface SpineCameraCue {
+  timeMs: number;
+  type: 'camera' | 'rock';
+  center?: string;
+  scale?: number;
+  durationFrames?: number;
+  hStrength?: number;
+  vStrength?: number;
+}
+
+export interface SpineScreenCue {
+  timeMs: number;
+  type:
+    | 'flash'
+    | 'changebg'
+    | 'onlyparters'
+    | 'showall'
+    | 'scenetransform'
+    | 'transform'
+    | 'showfeature'
+    | 'hide'
+    | 'showring';
+  color?: string;
+  colorMatrix?: number[];
+  hbsc?: number[];
+  alpha?: number;
+  durationMs?: number;
+  onlyBg?: boolean;
+  effectName?: string;
+  targets?: string[];
+  files?: string[];
+  mainFile?: string;
+  cleanup?: boolean;
+}
+
+export interface SpineMovementCue {
+  timeMs: number;
+  type: 'move' | 'play' | 'attach' | 'detach' | 'onebyone';
+  animName?: string;
+  loop?: boolean;
+  durationFrames?: number;
+  destType?: string;
+  dispX?: number;
+  dispY?: number;
+  bone?: string;
+  targets?: string[];
+  hurtAnim?: string;
+  direction?: number;
+  apy?: number;
+}
+
+export interface SpinePhaseCue {
+  timeMs: number;
+  type:
+    | 'preact'
+    | 'next'
+    | 'postact'
+    | 'pretargetact'
+    | 'posttargetact'
+    | 'end'
+    | 'call'
+    | 'pause'
+    | 'plano'
+    | 'label';
+  planoId?: string | number;
+  label?: string;
+}
+
+export interface SpineChoreographyCues {
+  cameraCues: SpineCameraCue[];
+  screenCues: SpineScreenCue[];
+  movementCues: SpineMovementCue[];
+  phaseCues: SpinePhaseCue[];
+}
+
+export interface AnimationImpactMetrics {
+  impactMs: number;
+  impactReachPx: number;
+  impactCenterX: number;
+}
+
+export interface ScreenEffectFraming {
+  referenceViewport: { width: number; height: number };
+  focalBounds: { minX: number; minY: number; maxX: number; maxY: number };
 }
 
 export interface SpineAudioEventRef {
